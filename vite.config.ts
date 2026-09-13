@@ -13,7 +13,7 @@ export default defineConfig({
     headers: crossOriginHeaders,
     allowedHosts: [
       'voxeland-production.up.railway.app',
-      'voceland.greninja.xyz',
+      'voxeland.greninja.xyz',
     ],
   },
 
