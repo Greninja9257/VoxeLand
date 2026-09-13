@@ -1,0 +1,276 @@
+// Streams chunks around the player: generation/loading in workers, border light propagation,
+// meshing dispatch (padded 18^3 arrays) and GPU upload through the renderer.
+import type { Assets } from '../assets';
+import { Chunk, ChunkStage, MIN_Y, SECTION_COUNT, chunkKey, type ChunkData } from './chunk';
+import { World } from './world';
+import { WorkerPool } from '../workers/pool';
+import { storage } from '../save/storage';
+import type { MeshOutput } from '../render/mesher';
+import { BIOMES } from './gen/biomes';
+
+export interface SectionMeshTarget {
+  setSectionMesh(cx: number, sy: number, cz: number, out: MeshOutput): void;
+  removeChunkMeshes(cx: number, cz: number): void;
+}
+
+export class ChunkManager {
+  genPool: WorkerPool;
+  meshPool: WorkerPool;
+  viewDistance = 8;
+  private pendingGen = new Set<number>();
+  private pendingMesh = new Set<number>();
+  private meshQueue: { cx: number; sy: number; cz: number; d: number }[] = [];
+  private lastCenter = { cx: 1e9, cz: 1e9 };
+  private saveTimer = 0;
+  stats = { genTime: 0, genCount: 0, meshTime: 0, meshCount: 0, loaded: 0 };
+  private unloading = false;
+  onChunkLoaded?: (c: Chunk) => void;
+  onChunkUnloaded?: (c: Chunk) => void;
+
+  constructor(public world: World, public assets: Assets, public target: SectionMeshTarget, public worldId: string, public biomeColors: Uint8Array) {
+    const hw = Math.max(2, Math.min(8, (navigator.hardwareConcurrency || 4)));
+    const genCount = Math.max(1, Math.floor(hw / 2));
+    const meshCount = Math.max(1, hw - genCount - 1);
+    this.genPool = new WorkerPool(() => new Worker(new URL('../workers/gen.worker.ts', import.meta.url), { type: 'module' }), genCount, { type: 'init', mcdata: assets.mcdata, seed: world.seed, dimension: world.dimension });
+    this.meshPool = new WorkerPool(() => new Worker(new URL('../workers/mesh.worker.ts', import.meta.url), { type: 'module' }), meshCount, { type: 'init', mcdata: assets.mcdata, models: assets.models, atlas: assets.atlas, redstoneTint: assets.mcdata.tints.redstone.data });
+  }
+
+  ready(): Promise<void> { return Promise.all([this.genPool.ready(), this.meshPool.ready()]).then(() => {}); }
+
+  dispose(): void { this.genPool.terminate(); this.meshPool.terminate(); }
+
+  async findSpawn(): Promise<[number, number, number]> {
+    const r = await this.genPool.request({ type: 'spawn' });
+    return r.pos;
+  }
+
+  /** Called every frame with the player position. */
+  update(px: number, pz: number, dt: number): void {
+    const ccx = Math.floor(px) >> 4, ccz = Math.floor(pz) >> 4;
+    const vd = this.viewDistance;
+    const world = this.world;
+    if (ccx !== this.lastCenter.cx || ccz !== this.lastCenter.cz) {
+      this.lastCenter = { cx: ccx, cz: ccz };
+      // unload far chunks
+      const toRemove: Chunk[] = [];
+      for (const c of world.chunks.values()) {
+        const dx = c.cx - ccx, dz = c.cz - ccz;
+        if (dx * dx + dz * dz > (vd + 2) * (vd + 2)) toRemove.push(c);
+      }
+      if (toRemove.length) {
+        const save: ChunkData[] = [];
+        for (const c of toRemove) {
+          world.removeChunk(c.cx, c.cz);
+          this.target.removeChunkMeshes(c.cx, c.cz);
+          this.onChunkUnloaded?.(c);
+          if (c.modified) save.push(c.serialize());
+        }
+        if (save.length) storage.saveChunks(this.worldId, world.dimension, save).catch(console.error);
+      }
+    }
+    // request generation for missing chunks, nearest first
+    const maxInFlight = this.genPool.size * 3;
+    if (this.genPool.inFlight < maxInFlight) {
+      const wanted: [number, number, number][] = [];
+      for (let dz = -vd; dz <= vd; dz++) for (let dx = -vd; dx <= vd; dx++) {
+        const d = dx * dx + dz * dz;
+        if (d > vd * vd) continue;
+        const cx = ccx + dx, cz = ccz + dz;
+        const key = chunkKey(cx, cz);
+        if (world.chunks.has(key) || this.pendingGen.has(key)) continue;
+        wanted.push([d, cx, cz]);
+      }
+      wanted.sort((a, b) => a[0] - b[0]);
+      for (let i = 0; i < wanted.length && this.genPool.inFlight + i < maxInFlight; i++) this.requestChunk(wanted[i][1], wanted[i][2]);
+    }
+    // meshing
+    this.dispatchMeshes(ccx, ccz);
+    // periodic save
+    this.saveTimer += dt;
+    if (this.saveTimer > 30) { this.saveTimer = 0; this.saveAll(); }
+    this.stats.loaded = world.chunks.size;
+  }
+
+  private async requestChunk(cx: number, cz: number): Promise<void> {
+    const key = chunkKey(cx, cz);
+    this.pendingGen.add(key);
+    try {
+      let chunk: Chunk | null = null;
+      const saved = await storage.loadChunk(this.worldId, this.world.dimension, cx, cz).catch(() => undefined);
+      if (saved) chunk = Chunk.deserialize(saved);
+      else {
+        const r = await this.genPool.request({ type: 'gen', cx, cz });
+        chunk = Chunk.deserialize(r.data);
+        chunk.modified = true; // freshly generated: persist
+        (chunk as any).fresh = true;
+        this.stats.genTime += r.time; this.stats.genCount++;
+      }
+      if (!this.pendingGen.has(key)) return; // disposed
+      this.addChunk(chunk);
+    } finally { this.pendingGen.delete(key); }
+  }
+
+  private addChunk(chunk: Chunk): void {
+    const world = this.world;
+    world.addChunk(chunk);
+    chunk.stage = ChunkStage.GENERATED;
+    chunk.markAllDirty();
+    // border light exchange with loaded neighbours
+    world.light.propagateBorders(chunk);
+    chunk.borderLit = true;
+    // neighbours need remeshing at the shared border (their padded data changed)
+    for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
+      if (!dx && !dz) continue;
+      const n = world.getChunk(chunk.cx + dx, chunk.cz + dz);
+      if (n) { n.markAllDirty(); (n as any).tints = undefined; }
+    }
+    this.onChunkLoaded?.(chunk);
+  }
+
+  private neighborsLoaded(cx: number, cz: number): boolean {
+    const w = this.world;
+    return w.hasChunk(cx - 1, cz) && w.hasChunk(cx + 1, cz) && w.hasChunk(cx, cz - 1) && w.hasChunk(cx, cz + 1) && w.hasChunk(cx - 1, cz - 1) && w.hasChunk(cx + 1, cz - 1) && w.hasChunk(cx - 1, cz + 1) && w.hasChunk(cx + 1, cz + 1);
+  }
+
+  private dispatchMeshes(ccx: number, ccz: number): void {
+    const maxInFlight = this.meshPool.size * 4;
+    if (this.meshPool.inFlight >= maxInFlight) return;
+    const world = this.world;
+    // gather dirty sections
+    const list = this.meshQueue;
+    list.length = 0;
+    for (const c of world.chunks.values()) {
+      if (!c.dirtySections) continue;
+      if (!this.neighborsLoaded(c.cx, c.cz)) continue;
+      const d = (c.cx - ccx) ** 2 + (c.cz - ccz) ** 2;
+      for (let sy = 0; sy < SECTION_COUNT; sy++) {
+        if (!(c.dirtySections & (1 << sy))) continue;
+        const key = sectionKey(c.cx, sy, c.cz);
+        if (this.pendingMesh.has(key)) continue;
+        list.push({ cx: c.cx, sy, cz: c.cz, d });
+      }
+    }
+    if (!list.length) return;
+    list.sort((a, b) => a.d - b.d);
+    for (let i = 0; i < list.length && this.meshPool.inFlight < maxInFlight; i++) {
+      const { cx, sy, cz } = list[i];
+      const c = world.getChunk(cx, cz)!;
+      c.dirtySections &= ~(1 << sy);
+      if (!c.sections[sy]) { // empty section: nothing to draw
+        this.target.setSectionMesh(cx, sy, cz, { cx, sy, cz, layers: [null, null, null], time: 0 });
+        continue;
+      }
+      this.meshSection(c, sy);
+    }
+  }
+
+  private meshSection(c: Chunk, sy: number): void {
+    const key = sectionKey(c.cx, sy, c.cz);
+    this.pendingMesh.add(key);
+    const blocks = new Uint16Array(18 * 18 * 18);
+    const light = new Uint8Array(18 * 18 * 18);
+    const world = this.world;
+    const y0 = sy * 16 + MIN_Y;
+    const wx0 = c.cx * 16, wz0 = c.cz * 16;
+    for (let z = -1; z <= 16; z++) {
+      for (let x = -1; x <= 16; x++) {
+        const wx = wx0 + x, wz = wz0 + z;
+        const ch = (x >= 0 && x < 16 && z >= 0 && z < 16) ? c : world.getChunk(wx >> 4, wz >> 4);
+        const lx = wx & 15, lz = wz & 15;
+        let idx = (z + 1) * 18 + (x + 1);
+        if (!ch) continue;
+        for (let y = -1; y <= 16; y++) {
+          const wy = y0 + y;
+          const i = idx + (y + 1) * 324;
+          blocks[i] = ch.getBlock(lx, wy, lz);
+          light[i] = ch.getLight(lx, wy, lz);
+        }
+      }
+    }
+    const tints = this.chunkTints(c);
+    const input = { cx: c.cx, sy, cz: c.cz, blocks, light, tints };
+    this.meshPool.request({ type: 'mesh', input }, [blocks.buffer, light.buffer]).then((r) => {
+      this.pendingMesh.delete(key);
+      const out = r.out as MeshOutput;
+      this.stats.meshTime += out.time; this.stats.meshCount++;
+      if (world.getChunk(c.cx, c.cz) === c) this.target.setSectionMesh(c.cx, sy, c.cz, out);
+    });
+  }
+
+  /** Blended biome tint colours for each column of a chunk (3x3 smoothing). */
+  chunkTints(c: Chunk): Uint8Array {
+    const cached = (c as any).tints as Uint8Array | undefined;
+    if (cached) return cached;
+    const out = new Uint8Array(16 * 16 * 12);
+    const world = this.world;
+    const bc = this.biomeColors;
+    const acc = new Float32Array(12);
+    for (let lz = 0; lz < 16; lz++) for (let lx = 0; lx < 16; lx++) {
+      acc.fill(0);
+      let n = 0;
+      for (let dz = -2; dz <= 2; dz++) for (let dx = -2; dx <= 2; dx++) {
+        const wx = c.cx * 16 + lx + dx, wz = c.cz * 16 + lz + dz;
+        const ch = world.getChunk(wx >> 4, wz >> 4) ?? c;
+        const b = ch.biomes[((wz & 15) << 4) | (wx & 15)];
+        const o = b * 12;
+        for (let k = 0; k < 12; k++) acc[k] += bc[o + k];
+        n++;
+      }
+      const o = ((lz << 4) | lx) * 12;
+      for (let k = 0; k < 12; k++) out[o + k] = acc[k] / n;
+    }
+    (c as any).tints = out;
+    return out;
+  }
+
+  saveAll(): Promise<void> {
+    const save: ChunkData[] = [];
+    for (const c of this.world.chunks.values()) if (c.modified) { save.push(c.serialize()); c.modified = false; }
+    return storage.saveChunks(this.worldId, this.world.dimension, save).catch(console.error) as Promise<void>;
+  }
+
+  /** Remove everything (dimension change / quit). */
+  clear(): void {
+    for (const c of [...this.world.chunks.values()]) { this.world.removeChunk(c.cx, c.cz); this.target.removeChunkMeshes(c.cx, c.cz); }
+    this.pendingGen.clear(); this.pendingMesh.clear();
+    this.lastCenter = { cx: 1e9, cz: 1e9 };
+  }
+
+  get pendingGenCount(): number { return this.pendingGen.size; }
+  get pendingMeshCount(): number { return this.pendingMesh.size; }
+}
+
+function sectionKey(cx: number, sy: number, cz: number): number { return ((cx + 0x8000) * 0x10000 + ((cz + 0x8000) & 0xffff)) * 32 + sy; }
+
+/** Compute per-biome tint colours (grass, foliage, water, dry foliage) from colormaps + tints.json overrides. */
+export function computeBiomeColors(assets: Assets, colormaps: { grass: ImageData; foliage: ImageData; dry: ImageData | null }): Uint8Array {
+  const out = new Uint8Array(BIOMES.length * 12);
+  const sample = (img: ImageData, temp: number, downfall: number): [number, number, number] => {
+    const t = Math.max(0, Math.min(1, temp)), h = Math.max(0, Math.min(1, downfall)) * t;
+    const x = Math.round((1 - t) * 255), y = Math.round((1 - h) * 255);
+    const i = (y * 256 + x) * 4;
+    return [img.data[i], img.data[i + 1], img.data[i + 2]];
+  };
+  const tints = assets.mcdata.tints;
+  const override = (table: { keys: string[]; color: number }[], name: string): number | null => {
+    for (const e of table) if (e.keys.includes(name) && (e.color & 0xffffff) !== 0) return e.color & 0xffffff;
+    return null;
+  };
+  for (let i = 0; i < BIOMES.length; i++) {
+    const b = BIOMES[i];
+    const o = i * 12;
+    let g = sample(colormaps.grass, b.temperature, b.downfall);
+    let f = sample(colormaps.foliage, b.temperature, b.downfall);
+    let d = colormaps.dry ? sample(colormaps.dry, b.temperature, b.downfall) : [g[0] * 0.8, g[1] * 0.6, g[2] * 0.4] as [number, number, number];
+    // minecraft-data stores dark_forest's *additive* offset, not a colour — handled by the formula below
+    const go = b.grassColor ?? (b.name === 'dark_forest' ? null : override(tints.grass.data, b.name));
+    const fo = b.foliageColor ?? (b.name === 'dark_forest' ? null : override(tints.foliage.data, b.name));
+    const wo = b.waterColor ?? override(tints.water.data, b.name) ?? 0x3f76e4;
+    if (go !== null) g = [(go >> 16) & 255, (go >> 8) & 255, go & 255];
+    if (fo !== null) f = [(fo >> 16) & 255, (fo >> 8) & 255, fo & 255];
+    if (b.name === 'swamp') { g = [0x6a, 0x70, 0x39]; f = [0x6a, 0x70, 0x39]; }
+    if (b.name === 'dark_forest') { g = [(g[0] + 0x28) >> 1, (g[1] + 0x34) >> 1, (g[2] + 0x0a) >> 1]; }
+    out.set([g[0], g[1], g[2], f[0], f[1], f[2], (wo >> 16) & 255, (wo >> 8) & 255, wo & 255, d[0], d[1], d[2]], o);
+  }
+  return out;
+}
