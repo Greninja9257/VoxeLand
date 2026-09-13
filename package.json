@@ -8,6 +8,8 @@
     "fetch-assets": "node scripts/fetch-assets.mjs",
     "dev": "vite --host",
     "build": "tsc --noEmit && vite build",
+    "railway:build": "npm run fetch-assets && npm run build",
+    "start": "node scripts/serve.mjs",
     "preview": "vite preview --host",
     "typecheck": "tsc --noEmit"
   },

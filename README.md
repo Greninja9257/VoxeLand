@@ -18,6 +18,17 @@ npm run dev              # http://localhost:5173
 
 `npm run build` produces a static site in `dist/` (serve it from any static host; workers and IndexedDB saves work out of the box).
 
+## Railway deployment
+
+Connect this repository to a Railway service and deploy it. The checked-in
+`railway.json` tells Railway to fetch the git-ignored game assets, create the
+production build, start the bundled static server, and check `/healthz` before
+routing traffic to it. The server automatically listens on Railway's `PORT`.
+
+The full asset download is roughly 450 MB and makes the first build relatively
+slow. Subsequent build cache hits may be faster, but Railway does not guarantee
+that a build cache is available.
+
 **Browsers:** Chrome / Edge / Firefox (desktop). Safari lacks Ogg Vorbis decoding for Web Audio, so sounds are silent there.
 
 ## Controls (rebindable in Options → Controls)
