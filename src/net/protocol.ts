@@ -5,9 +5,13 @@
 //   guest -> relay: [payload]           relay -> host: [u32 fromClientId] [payload]
 // Payload: [u8 kind] [u32 jsonLength] [json utf8] [binary body]
 
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 
-export type ServerInfo = { id: string; name: string; host: string; motd: string; players: number; maxPlayers: number; gameMode: string; version: string; public: boolean; lan: boolean };
+/** A server as advertised by a relay. `private` servers need a password; `official` is the backend's own world. */
+export type ServerInfo = { id: string; name: string; host: string; motd: string; players: number; maxPlayers: number; gameMode: string; version: string; private: boolean; official: boolean; online?: boolean };
+
+/** Binary frame target used by the public world's host to persist a chunk on the backend. */
+export const TARGET_SERVER = 0xffffffff;
 
 /** Chunk section run-length encoding (u16 values -> [count u16, value u16]*). */
 export function rleEncode16(src: Uint16Array): Uint16Array {
@@ -45,14 +49,14 @@ export function rleDecode8(src: Uint8Array, length: number): Uint8Array {
 
 /** Serialised chunk for the network: sections/light RLE'd into one buffer with a JSON directory. */
 export interface ChunkWire {
-  cx: number; cz: number;
+  cx: number; cz: number; dim?: string;
   sections: (number | null)[]; // byte length of each RLE section, null = empty
   light: (number | null)[];
   heightmap: number[]; skyHeight: number[]; biomes: number[];
   blockEntities: any[];
 }
 
-export function encodeChunk(c: { cx: number; cz: number; sections: (Uint16Array | null)[]; light: (Uint8Array | null)[]; heightmap: Int16Array; skyHeight: Int16Array; biomes: Uint8Array; blockEntities: Map<number, any> }): { header: ChunkWire; body: Uint8Array } {
+export function encodeChunk(c: { cx: number; cz: number; sections: (Uint16Array | null)[]; light: (Uint8Array | null)[]; heightmap: Int16Array; skyHeight: Int16Array; biomes: Uint8Array; blockEntities: Map<number, any> }, dim?: string): { header: ChunkWire; body: Uint8Array } {
   const parts: Uint8Array[] = [];
   const sections: (number | null)[] = [], light: (number | null)[] = [];
   for (const s of c.sections) {
@@ -65,7 +69,7 @@ export function encodeChunk(c: { cx: number; cz: number; sections: (Uint16Array 
   }
   let total = 0; for (const p of parts) total += p.length;
   const body = new Uint8Array(total); let o = 0; for (const p of parts) { body.set(p, o); o += p.length; }
-  return { header: { cx: c.cx, cz: c.cz, sections, light, heightmap: Array.from(c.heightmap), skyHeight: Array.from(c.skyHeight), biomes: Array.from(c.biomes), blockEntities: [...c.blockEntities.values()] }, body };
+  return { header: { cx: c.cx, cz: c.cz, dim, sections, light, heightmap: Array.from(c.heightmap), skyHeight: Array.from(c.skyHeight), biomes: Array.from(c.biomes), blockEntities: [...c.blockEntities.values()] }, body };
 }
 
 export function decodeChunk(h: ChunkWire, body: Uint8Array): { cx: number; cz: number; sections: (Uint16Array | null)[]; light: (Uint8Array | null)[]; heightmap: Int16Array; skyHeight: Int16Array; biomes: Uint8Array; blockEntities: any[] } {
@@ -91,6 +95,23 @@ export function unpackFrame(buf: Uint8Array): { kind: number; json: any; body: U
 }
 
 export const FRAME_CHUNK = 1;
+
+/** Turn anything the player may type (an IP, host:port, http(s):// or ws(s):// URL) into a relay WebSocket URL. */
+export function normalizeRelayUrl(input: string): string {
+  let t = input.trim();
+  if (!t) return defaultRelayUrl();
+  t = t.replace(/^http:\/\//i, 'ws://').replace(/^https:\/\//i, 'wss://');
+  if (!/^wss?:\/\//i.test(t)) {
+    // bare host / host:port — plain ws locally or on a private address, wss for public hosts
+    const hostOnly = t.split('/')[0].split(':')[0];
+    // plain ws for localhost and raw IPs (no certificate to validate), wss for real hostnames
+    const plain = hostOnly === 'localhost' || !hostOnly.includes('.') || /^\d{1,3}(\.\d{1,3}){3}$/.test(hostOnly);
+    t = (plain ? 'ws://' : 'wss://') + t;
+  }
+  t = t.replace(/\/+$/, '');
+  if (!/\/ws$/.test(t)) t += '/ws';
+  return t;
+}
 
 /** Default relay: same origin when served by the VoxeLand server, otherwise localhost:8080 (dev). */
 export function defaultRelayUrl(): string {

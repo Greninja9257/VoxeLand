@@ -52,7 +52,8 @@ export class ChunkManager {
 
   ready(): Promise<void> { return Promise.all([this.genPool.ready(), this.meshPool.ready()]).then(() => {}); }
 
-  dispose(): void { this.genPool.terminate(); this.meshPool.terminate(); }
+  disposed = false;
+  dispose(): void { this.disposed = true; this.genPool.terminate(); this.meshPool.terminate(); }
 
   async findSpawn(): Promise<[number, number, number]> {
     const r = await this.genPool.request({ type: 'spawn' });
@@ -61,6 +62,7 @@ export class ChunkManager {
 
   /** Called every frame with the player position. */
   update(px: number, pz: number, dt: number): void {
+    if (this.disposed) return;
     const ccx = Math.floor(px) >> 4, ccz = Math.floor(pz) >> 4;
     const vd = this.viewDistance;
     const world = this.world;

@@ -97,6 +97,8 @@ export class TextField extends Widget {
   onChange: ((t: string) => void) | null = null;
   filter: ((ch: string) => boolean) | null = null;
   bordered = true;
+  /** render the text as dots (passwords) */
+  password = false;
   constructor(x: number, y: number, w: number, h: number, text = '') { super(x, y, w, h); this.text = text; this.cursor = text.length; }
   render(ctx: CanvasRenderingContext2D, _mx: number, _my: number, _p: number, s: Screen): void {
     const gui = s.gui;
@@ -108,12 +110,13 @@ export class TextField extends Widget {
     ctx.save(); ctx.beginPath(); ctx.rect(tx - 1, this.y, inner + 2, this.h); ctx.clip();
     if (!this.text && this.placeholder && !focused) gui.font.draw(ctx, this.placeholder, tx, ty, 0x808080);
     // scroll so cursor visible
-    const before = this.text.slice(0, this.cursor);
+    const shown = this.password ? '•'.repeat(this.text.length) : this.text;
+    const before = (this.password ? '•'.repeat(this.cursor) : this.text.slice(0, this.cursor));
     let off = 0;
     const bw = gui.font.width(before);
     if (bw > inner - 2) off = bw - (inner - 2);
     this.scrollOff = off;
-    gui.font.draw(ctx, this.text, tx - off, ty, 0xe0e0e0);
+    gui.font.draw(ctx, shown, tx - off, ty, 0xe0e0e0);
     if (focused && Math.floor(performance.now() / 500) % 2 === 0) { const cx = tx - off + bw; if (this.cursor === this.text.length) gui.font.draw(ctx, '_', cx, ty, 0xe0e0e0, false); else { ctx.fillStyle = '#e0e0e0'; ctx.fillRect(cx, ty - 1, 1, 10); } }
     ctx.restore();
   }

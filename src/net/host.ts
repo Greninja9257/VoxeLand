@@ -10,7 +10,7 @@ import { ArrowEntity, FallingBlockEntity, PrimedTnt, ThrownProjectile } from '..
 import { ItemStack, Inventory } from '../items/stack';
 import { useBlock } from '../blocks/interaction';
 import { SET_UPDATE_NEIGHBORS, type WorldListener } from '../world/world';
-import { encodeChunk, packFrame, FRAME_CHUNK, PROTOCOL_VERSION, defaultRelayUrl } from './protocol';
+import { encodeChunk, packFrame, FRAME_CHUNK, PROTOCOL_VERSION, TARGET_SERVER, defaultRelayUrl } from './protocol';
 import type { Chunk } from '../world/chunk';
 import { runCommand } from '../game/commands';
 
@@ -24,14 +24,22 @@ interface Guest {
   ridingSent?: boolean;
 }
 
-export interface HostOptions { name: string; motd: string; gameMode: string; cheats: boolean; isPublic: boolean; maxPlayers: number; relayUrl?: string }
+export interface HostOptions {
+  name: string; motd: string; gameMode: string; cheats: boolean; maxPlayers: number; relayUrl?: string;
+  /** '' = public (anyone may join), otherwise the password guests must enter */
+  password?: string;
+  /** true when hosting the backend's persistent public world (state is uploaded to the server) */
+  official?: boolean;
+}
 
 export class NetHost implements WorldListener {
   ws: WebSocket | null = null;
   serverId = '';
   guests = new Map<number, Guest>();
   status = 'connecting';
-  lan = false; isPublic = false;
+  isPublic = true; official = false;
+  /** chunks changed since the last upload of the public world (key -> [cx, cz]) */
+  private dirtyChunks = new Map<number, [number, number]>();
   private blockBatch: number[] = [];
   private queue: any[] = [];
   private origPlayAt: any;
@@ -50,8 +58,14 @@ export class NetHost implements WorldListener {
       try { ws = new WebSocket(url); } catch (e) { reject(e); return; }
       ws.binaryType = 'arraybuffer';
       this.ws = ws;
-      ws.onopen = () => { ws.send(JSON.stringify({ t: 'host', name: this.opts.name, host: this.hostName, motd: this.opts.motd, gameMode: this.opts.gameMode, public: this.opts.isPublic, forcePublic: this.opts.isPublic, maxPlayers: this.opts.maxPlayers, version: `${g.version}/${PROTOCOL_VERSION}` })); };
-      ws.onmessage = (e) => { if (typeof e.data === 'string') { const m = JSON.parse(e.data); if (m.t === 'hosted') { this.serverId = m.id; this.lan = m.lan; this.isPublic = m.public; this.status = 'open'; this.attach(); resolve(); } else this.queue.push(m); } else this.queue.push({ t: 'bin', data: new Uint8Array(e.data) }); };
+      ws.onopen = () => { ws.send(JSON.stringify({ t: 'host', name: this.opts.name, host: this.hostName, motd: this.opts.motd, gameMode: this.opts.gameMode, password: this.opts.password ?? '', official: !!this.opts.official, maxPlayers: this.opts.maxPlayers, version: `${g.version}/${PROTOCOL_VERSION}` })); };
+      ws.onmessage = (e) => {
+        if (typeof e.data !== 'string') { this.queue.push({ t: 'bin', data: new Uint8Array(e.data) }); return; }
+        const m = JSON.parse(e.data);
+        if (m.t === 'hosted') { this.serverId = m.id; this.isPublic = !m.private; this.official = !!m.official; this.status = 'open'; this.attach(); resolve(); }
+        else if (m.t === 'error' && this.status === 'connecting') { this.status = 'error'; reject(new Error(m.reason)); }
+        else this.queue.push(m);
+      };
       ws.onerror = () => { this.status = 'error'; reject(new Error('Could not reach the relay server at ' + url)); };
       ws.onclose = () => { this.status = 'closed'; this.onStatus?.('closed'); this.detach(); };
     });
@@ -86,7 +100,32 @@ export class NetHost implements WorldListener {
   }
 
   // ---- world listener ----
-  onBlockChanged(x: number, y: number, z: number, _old: number, s: number): void { this.blockBatch.push(x, y, z, s); }
+  onBlockChanged(x: number, y: number, z: number, _old: number, s: number): void {
+    this.blockBatch.push(x, y, z, s);
+    if (this.official) { const cx = x >> 4, cz = z >> 4; this.dirtyChunks.set(((cx + 0x8000) << 16) | ((cz + 0x8000) & 0xffff), [cx, cz]); }
+  }
+
+  /** Public world: push changed chunks and world meta to the backend so it survives us leaving. */
+  private uploadWorld(): void {
+    const g = this.game;
+    if (!this.ws || this.ws.readyState !== 1) return;
+    let sent = 0;
+    for (const [key, [cx, cz]] of this.dirtyChunks) {
+      const c = g.world.getChunk(cx, cz);
+      this.dirtyChunks.delete(key);
+      if (!c) continue;
+      const { header, body } = encodeChunk(c, g.world.dimension);
+      const payload = packFrame(FRAME_CHUNK, header, body);
+      const out = new Uint8Array(4 + payload.length);
+      new DataView(out.buffer).setUint32(0, TARGET_SERVER, true); out.set(payload, 4);
+      this.ws.send(out);
+      if (++sent >= 8) break;   // trickle: at most 8 chunks per upload tick
+    }
+    const playerData: Record<string, any> = {};
+    for (const gu of this.guests.values()) if (gu.player.lastSaved) playerData[gu.name] = gu.player.lastSaved;
+    playerData[this.hostName] = g.player.serialize();
+    this.ws.send(JSON.stringify({ t: 'meta', meta: { time: g.world.time, dayTime: g.world.dayTime, weather: g.weather.serialize(), rules: g.rules, worldSpawn: g.worldSpawn, dragonKills: g.dragonKills }, playerData }));
+  }
 
   /** Called every game tick from Game.tick. */
   tick(): void {
@@ -103,6 +142,7 @@ export class NetHost implements WorldListener {
       if (gu.container && this.ticks % 5 === 0) this.sendContainer(gu, false);
     }
     if (this.ticks % 2 === 0) this.sendEntities();
+    if (this.official && this.ticks % 100 === 0) this.uploadWorld();
     if (this.ticks % 20 === 0) this.broadcast({ t: 'time', time: g.world.time, day: g.world.dayTime, rain: g.weather.rainLevel, thunder: g.weather.thunderLevel, raining: g.weather.raining, thundering: g.weather.thundering, diff: g.difficulty });
   }
 

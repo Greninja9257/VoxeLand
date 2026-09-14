@@ -31,6 +31,7 @@ export class WorkerPool {
   get inFlight(): number { let n = 0; for (const w of this.workers) n += w.busy; return n; }
 
   request(msg: any, transfer?: Transferable[]): Promise<any> {
+    if (!this.workers.length) return new Promise(() => {}); // terminated (world left): never resolves, never throws
     const id = this.nextId++;
     let best = this.workers[0];
     for (const w of this.workers) if (w.busy < best.busy) best = w;
@@ -44,5 +45,5 @@ export class WorkerPool {
   /** Send a message to every worker (no reply expected). */
   broadcast(msg: any): void { for (const w of this.workers) w.w.postMessage(msg); }
 
-  terminate(): void { for (const w of this.workers) w.w.terminate(); this.workers = []; }
+  terminate(): void { for (const w of this.workers) w.w.terminate(); this.workers = []; this.callbacks.clear(); }
 }

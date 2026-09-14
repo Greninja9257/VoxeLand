@@ -158,6 +158,7 @@ export class Mob extends LivingEntity {
     this.speed = def.speed;
     this.hostile = def.category === 'hostile';
     this.undead = !!def.ai.undead; this.arthropod = !!def.ai.arthropod;
+    if (def.name === 'rabbit') this.variant = Math.floor(Math.random() * 6);
     if (def.ai.sheep) this.woolColor = Math.random() < 0.82 ? 'white' : Math.random() < 0.6 ? 'black' : Math.random() < 0.5 ? 'gray' : Math.random() < 0.5 ? 'light_gray' : Math.random() < 0.5 ? 'brown' : 'pink';
     if (def.ai.slime) this.setSlimeSize([1, 2, 4][Math.floor(Math.random() * 3)]);
     this.noGravity = !!def.ai.fly && !def.ai.phantom;
@@ -170,6 +171,10 @@ export class Mob extends LivingEntity {
     this.speed = 0.2 + 0.1 * size;
     this.updateBB();
   }
+  /** 0..1 through the current hop (vanilla Rabbit.getJumpCompletion). */
+  jumpProgress(partial: number): number { return this.onGround ? 0 : Math.min(1, (this.jumpTicksTotal - (this.jumpTicks - partial)) / Math.max(1, this.jumpTicksTotal)); }
+  jumpTicksTotal = 10;
+
   setBaby(baby: boolean): void { this.isBaby = baby; this.growAge = baby ? -24000 : 0; const sc = baby ? 0.5 : 1; this.width = this.def.width * sc; this.height = this.def.height * sc; this.eyeHeight = this.def.eye * sc; this.updateBB(); }
 
   isFireImmune(): boolean { return !!this.def.fireImmune; }
@@ -476,6 +481,8 @@ export class Mob extends LivingEntity {
     const targetYaw = Math.atan2(-dx, dz) * 180 / Math.PI;
     this.yaw += clamp(wrapDegrees(targetYaw - this.yaw), -30, 30);
     this.moveForward = speedMul;
+    // rabbits hop instead of walking (vanilla RabbitJumpControl): a jump every ~half second on the ground
+    if (this.type === 'rabbit') { if (this.onGround && this.jumpTicks === 0) this.jumping = true; else if (!this.onGround) this.jumping = false; this.moveForward = speedMul * (this.onGround ? 0.6 : 1.4); }
     // jump if blocked or a step ahead
     const d = lookDir(this.yaw, 0);
     const fx = Math.floor(this.x + d[0] * (this.width / 2 + 0.3)), fz = Math.floor(this.z + d[2] * (this.width / 2 + 0.3));

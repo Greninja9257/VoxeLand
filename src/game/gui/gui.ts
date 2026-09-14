@@ -481,15 +481,21 @@ export class Gui {
     if (g.client) names = g.client.players.map((p) => p.name);
     else if (g.host) names = g.host.playerList().map((p) => p.name);
     else names = [g.player.name];
+    const title = g.client ? `${g.client.welcome?.hostName ?? 'Host'}'s world · ping ${g.client.ping} ms`
+      : g.host ? (g.host.official ? g.worldMeta?.name ?? 'Public world' : `${g.worldMeta?.name ?? 'World'} (${g.host.isPublic ? 'public' : 'private'})`)
+      : g.worldMeta?.name ?? 'Singleplayer';
     const cols = Math.max(1, Math.ceil(names.length / 20)), rows = Math.ceil(names.length / cols);
-    const cw = 120, w = cols * (cw + 5) + 5, h = rows * 9 + 12;
+    // the panel grows to fit its contents: the longest name and the header both have to fit (vanilla PlayerTabOverlay)
+    let cw = 60; for (const n of names) cw = Math.max(cw, this.font.width(n) + 6);
+    const gridW = cols * (cw + 5) + 5;
+    const w = Math.max(gridW, this.font.width(title) + 8), h = rows * 9 + 12;
     const x0 = Math.floor((this.width - w) / 2), y0 = 10;
+    const gx = x0 + Math.floor((w - gridW) / 2);
     ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(x0, y0, w, h);
-    const title = g.client ? `${g.client.welcome?.hostName ?? 'Host'}'s world · ping ${g.client.ping} ms` : g.host ? `${g.worldMeta?.name ?? 'World'} (open to ${g.host.isPublic ? 'public' : 'LAN'})` : g.worldMeta?.name ?? 'Singleplayer';
     this.font.drawCentered(ctx, title, x0 + w / 2, y0 + 2, 0xffffff);
     names.forEach((n, i) => {
       const c = Math.floor(i / rows), r = i % rows;
-      const x = x0 + 5 + c * (cw + 5), y = y0 + 12 + r * 9;
+      const x = gx + 5 + c * (cw + 5), y = y0 + 12 + r * 9;
       ctx.fillStyle = 'rgba(255,255,255,0.15)'; ctx.fillRect(x, y - 1, cw, 9);
       this.font.draw(ctx, n, x + 2, y, n === g.player.name ? 0xffff55 : 0xffffff);
     });

@@ -1,28 +1,93 @@
 #!/usr/bin/env node
-// VoxeLand multiplayer relay + static host.
-//   node server/index.mjs            -> serves ./dist on :8080 and the WebSocket relay on /ws
-//   PORT=... PUBLIC=1                -> on a public host (e.g. Railway) list "public" servers to everyone
+// VoxeLand backend: static game host + multiplayer relay + the persistent public world.
 //
-// A browser that hosts a world connects as a "host" and registers its server; other browsers list servers
-// and join. The relay only forwards messages (the host's browser is authoritative), so it needs no game logic
-// and no persistent state. LAN-only servers are listed only to clients on private/loopback addresses.
+//   node server/index.mjs                 -> serves ./dist on :8080, relay on /ws
+//   PORT=... DATA_DIR=... PUBLIC_SEED=...
+//
+// Servers are registered by the browser that opens a world. They are either **public** (anyone may join) or
+// **private** (a password is required). Every server on a relay is listed to every client of that relay, so a
+// player can also point the game at another VoxeLand backend by IP and see the worlds hosted there.
+//
+// The backend additionally keeps one **persistent public world** (id "official"): its seed, time, weather, player
+// data and modified chunks live on the server, so it is joinable at any time. The simulation itself runs in the
+// browser of whichever player is currently the host — the first player to join an unhosted public world is
+// promoted to host, uploads world deltas while playing, and when they leave the remaining players reconnect and
+// the next one takes over.
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { WebSocketServer } from 'ws';
 
 const PORT = +(process.env.PORT || 8080);
-const DIST = process.env.DIST || path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', 'dist');
-const PUBLIC_HOST = process.env.PUBLIC === '1' || process.env.RAILWAY_ENVIRONMENT !== undefined;
+const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+const DIST = process.env.DIST || path.join(ROOT, 'dist');
+const DATA_DIR = process.env.DATA_DIR || path.join(ROOT, '.data');
 const MAX_PLAYERS_DEFAULT = 8;
+const OFFICIAL_ID = 'official';
+const OFFICIAL_MAX = +(process.env.PUBLIC_MAX_PLAYERS || 16);
+const MAX_STORED_CHUNKS = +(process.env.PUBLIC_MAX_CHUNKS || 2048);
 
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.png': 'image/png', '.ogg': 'audio/ogg', '.txt': 'text/plain; charset=utf-8', '.wasm': 'application/wasm', '.ico': 'image/x-icon', '.svg': 'image/svg+xml' };
+
+// ---------------------------------------------------------------- persistent public world
+
+/** @type {{ seed:number, name:string, motd:string, gameMode:string, difficulty:number, meta:any, playerData:any, chunks:Map<string,Buffer>, dirty:boolean }} */
+const official = {
+  seed: +(process.env.PUBLIC_SEED || 0) || Math.floor(Math.random() * 2 ** 31),
+  name: process.env.PUBLIC_NAME || 'VoxeLand Public Server',
+  motd: process.env.PUBLIC_MOTD || 'Open to everyone · survival',
+  gameMode: process.env.PUBLIC_GAMEMODE || 'survival',
+  difficulty: +(process.env.PUBLIC_DIFFICULTY ?? 2),
+  meta: null,            // { time, dayTime, weather, rules, worldSpawn, dragonKills }
+  playerData: {},        // by player name
+  chunks: new Map(),     // "dim:cx,cz" -> binary chunk frame
+  dirty: false,
+};
+
+function loadOfficial() {
+  try {
+    const metaFile = path.join(DATA_DIR, 'public-world.json');
+    if (fs.existsSync(metaFile)) {
+      const d = JSON.parse(fs.readFileSync(metaFile, 'utf8'));
+      official.seed = d.seed ?? official.seed;
+      official.meta = d.meta ?? null;
+      official.playerData = d.playerData ?? {};
+    }
+    const blobFile = path.join(DATA_DIR, 'public-chunks.bin');
+    if (fs.existsSync(blobFile)) {
+      const buf = fs.readFileSync(blobFile);
+      const indexLen = buf.readUInt32LE(0);
+      const index = JSON.parse(buf.subarray(4, 4 + indexLen).toString('utf8'));
+      let o = 4 + indexLen;
+      for (const [key, len] of index) { official.chunks.set(key, buf.subarray(o, o + len)); o += len; }
+    }
+    console.log(`[world] public world seed ${official.seed}, ${official.chunks.size} stored chunks`);
+  } catch (e) { console.error('[world] load failed', e); }
+}
+
+function saveOfficial() {
+  if (!official.dirty) return;
+  official.dirty = false;
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(path.join(DATA_DIR, 'public-world.json'), JSON.stringify({ seed: official.seed, meta: official.meta, playerData: official.playerData }));
+    const index = [], parts = [];
+    for (const [key, buf] of official.chunks) { index.push([key, buf.length]); parts.push(buf); }
+    const head = Buffer.from(JSON.stringify(index), 'utf8');
+    const len = Buffer.alloc(4); len.writeUInt32LE(head.length, 0);
+    fs.writeFileSync(path.join(DATA_DIR, 'public-chunks.bin'), Buffer.concat([len, head, ...parts]));
+  } catch (e) { console.error('[world] save failed', e); }
+}
+setInterval(saveOfficial, 60_000).unref?.();
+for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { saveOfficial(); process.exit(0); });
+
+// ---------------------------------------------------------------- http
 
 const http_ = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://x');
   if (url.pathname === '/api/servers') {
     res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' });
-    res.end(JSON.stringify(listServers(isPrivateAddress(req.socket.remoteAddress))));
+    res.end(JSON.stringify(listServers()));
     return;
   }
   if (url.pathname === '/api/health' || url.pathname === '/healthz') { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('ok'); return; }
@@ -36,31 +101,32 @@ const http_ = http.createServer((req, res) => {
 
 const wss = new WebSocketServer({ server: http_, path: '/ws', maxPayload: 64 * 1024 * 1024 });
 
-/** @type {Map<string, {id:string, ws:import('ws').WebSocket, info:any, guests:Map<number, import('ws').WebSocket>, lan:boolean}>} */
+/** Player-hosted servers, plus the official one when someone is hosting it. */
 const servers = new Map();
 let nextClientId = 1;
 
-function isPrivateAddress(addr) {
-  if (!addr) return false;
-  const a = addr.replace('::ffff:', '');
-  return a === '127.0.0.1' || a === '::1' || a.startsWith('10.') || a.startsWith('192.168.') || /^172\.(1[6-9]|2\d|3[01])\./.test(a) || a.startsWith('fe80:') || a.startsWith('fd') || a === 'localhost';
-}
-
-function listServers(privateClient) {
-  const out = [];
+function listServers() {
+  const out = [{ id: OFFICIAL_ID, name: official.name, host: servers.get(OFFICIAL_ID)?.info.host ?? '(server)', motd: official.motd, players: servers.get(OFFICIAL_ID) ? servers.get(OFFICIAL_ID).guests.size + 1 : 0, maxPlayers: OFFICIAL_MAX, gameMode: official.gameMode, version: 'public', private: false, official: true, online: true }];
   for (const s of servers.values()) {
-    if (!s.info.public && !(privateClient && s.lan)) continue;
-    out.push({ id: s.id, name: s.info.name, host: s.info.host, motd: s.info.motd ?? '', players: s.guests.size + 1, maxPlayers: s.info.maxPlayers ?? MAX_PLAYERS_DEFAULT, gameMode: s.info.gameMode, version: s.info.version, public: !!s.info.public, lan: s.lan });
+    if (s.id === OFFICIAL_ID) continue;
+    out.push({ id: s.id, name: s.info.name, host: s.info.host, motd: s.info.motd ?? '', players: s.guests.size + 1, maxPlayers: s.info.maxPlayers ?? MAX_PLAYERS_DEFAULT, gameMode: s.info.gameMode, version: s.info.version, private: !!s.info.password, official: false, online: true });
   }
   return out;
 }
 
-const send = (ws, obj) => { if (ws.readyState === 1) ws.send(JSON.stringify(obj)); };
+const send = (ws, obj) => { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); };
+const sendBin = (ws, buf) => { if (ws && ws.readyState === 1) ws.send(buf); };
 
-wss.on('connection', (ws, req) => {
-  const privateClient = isPrivateAddress(req.socket.remoteAddress);
-  let role = null; // 'host' | 'guest'
-  let server = null; // server record (host: own; guest: joined)
+/** Hand the caller everything needed to host the public world in their browser. */
+function promoteToOfficialHost(ws) {
+  send(ws, { t: 'becomeHost', id: OFFICIAL_ID, world: { seed: official.seed, name: official.name, motd: official.motd, gameMode: official.gameMode, difficulty: official.difficulty, meta: official.meta, playerData: official.playerData, maxPlayers: OFFICIAL_MAX }, chunkCount: official.chunks.size });
+  for (const buf of official.chunks.values()) sendBin(ws, buf);
+  send(ws, { t: 'worldReady' });
+}
+
+wss.on('connection', (ws) => {
+  let role = null;          // 'host' | 'guest'
+  let server = null;        // the server record this socket belongs to
   let clientId = 0;
 
   ws.on('message', (data, isBinary) => {
@@ -68,11 +134,20 @@ wss.on('connection', (ws, req) => {
       const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
       if (role === 'host' && server) {
         const target = buf.readUInt32LE(0); const payload = buf.subarray(4);
-        if (target === 0) { for (const g of server.guests.values()) if (g.readyState === 1) g.send(payload); }
-        else { const g = server.guests.get(target); if (g && g.readyState === 1) g.send(payload); }
+        if (target === 0xffffffff) { // persist a chunk of the public world
+          if (server.id !== OFFICIAL_ID) return;
+          const key = readChunkKey(payload);
+          if (!key) return;
+          if (!official.chunks.has(key) && official.chunks.size >= MAX_STORED_CHUNKS) return;
+          official.chunks.set(key, Buffer.from(payload));
+          official.dirty = true;
+          return;
+        }
+        if (target === 0) { for (const g of server.guests.values()) sendBin(g, payload); }
+        else sendBin(server.guests.get(target), payload);
       } else if (role === 'guest' && server) {
         const out = Buffer.alloc(4 + buf.length); out.writeUInt32LE(clientId, 0); buf.copy(out, 4);
-        if (server.ws.readyState === 1) server.ws.send(out);
+        sendBin(server.ws, out);
       }
       return;
     }
@@ -80,25 +155,51 @@ wss.on('connection', (ws, req) => {
     switch (m.t) {
       case 'host': {
         if (role) return;
+        const wantOfficial = m.official === true;
+        if (wantOfficial && servers.has(OFFICIAL_ID)) { send(ws, { t: 'error', reason: 'The public world already has a host.' }); return; }
         role = 'host';
-        const id = Math.random().toString(36).slice(2, 10);
-        server = { id, ws, info: { name: String(m.name ?? 'VoxeLand world').slice(0, 48), host: String(m.host ?? 'Player').slice(0, 24), motd: String(m.motd ?? '').slice(0, 64), maxPlayers: Math.min(32, Math.max(1, m.maxPlayers ?? MAX_PLAYERS_DEFAULT)), gameMode: m.gameMode, version: m.version, public: !!m.public && (PUBLIC_HOST || !!m.forcePublic) }, guests: new Map(), lan: privateClient || !PUBLIC_HOST };
+        const id = wantOfficial ? OFFICIAL_ID : Math.random().toString(36).slice(2, 10);
+        server = {
+          id, ws, guests: new Map(), official: wantOfficial,
+          info: {
+            name: wantOfficial ? official.name : String(m.name ?? 'VoxeLand world').slice(0, 48),
+            host: String(m.host ?? 'Player').slice(0, 24),
+            motd: wantOfficial ? official.motd : String(m.motd ?? '').slice(0, 64),
+            maxPlayers: wantOfficial ? OFFICIAL_MAX : Math.min(32, Math.max(1, m.maxPlayers ?? MAX_PLAYERS_DEFAULT)),
+            gameMode: m.gameMode, version: m.version,
+            password: wantOfficial ? '' : String(m.password ?? '').slice(0, 64),
+          },
+        };
         servers.set(id, server);
-        send(ws, { t: 'hosted', id, public: server.info.public, lan: server.lan });
-        console.log(`[relay] hosted ${id} "${server.info.name}" by ${server.info.host} public=${server.info.public} lan=${server.lan}`);
+        send(ws, { t: 'hosted', id, private: !!server.info.password, official: wantOfficial });
+        console.log(`[relay] hosted ${id} "${server.info.name}" by ${server.info.host}${server.info.password ? ' (private)' : ''}${wantOfficial ? ' [public world]' : ''}`);
         break;
       }
-      case 'update': { if (role === 'host' && server) { if (m.gameMode) server.info.gameMode = m.gameMode; if (m.motd !== undefined) server.info.motd = String(m.motd).slice(0, 64); if (typeof m.public === 'boolean') server.info.public = m.public && (PUBLIC_HOST || !!m.forcePublic); } break; }
-      case 'list': send(ws, { t: 'servers', servers: listServers(privateClient) }); break;
+      case 'update': {
+        if (role !== 'host' || !server) return;
+        if (m.gameMode) server.info.gameMode = m.gameMode;
+        if (m.motd !== undefined && !server.official) server.info.motd = String(m.motd).slice(0, 64);
+        if (m.password !== undefined && !server.official) server.info.password = String(m.password).slice(0, 64);
+        break;
+      }
+      case 'meta': { // public world: time / weather / rules / per-player data
+        if (role !== 'host' || !server?.official) return;
+        if (m.meta) official.meta = m.meta;
+        if (m.playerData) Object.assign(official.playerData, m.playerData);
+        official.dirty = true;
+        break;
+      }
+      case 'list': send(ws, { t: 'servers', servers: listServers() }); break;
       case 'join': {
         if (role) return;
+        if (m.id === OFFICIAL_ID && !servers.has(OFFICIAL_ID)) { promoteToOfficialHost(ws); return; } // nobody hosting: you are
         const s = servers.get(m.id);
-        if (!s) { send(ws, { t: 'error', reason: 'Server not found (it may have closed).' }); return; }
+        if (!s) { send(ws, { t: 'error', reason: 'That server is no longer online.' }); return; }
         if (s.guests.size + 1 >= (s.info.maxPlayers ?? MAX_PLAYERS_DEFAULT)) { send(ws, { t: 'error', reason: 'The server is full.' }); return; }
-        if (!s.info.public && !(privateClient && s.lan)) { send(ws, { t: 'error', reason: 'That server is LAN-only.' }); return; }
+        if (s.info.password && String(m.password ?? '') !== s.info.password) { send(ws, { t: 'error', reason: 'Incorrect password.', needPassword: true }); return; }
         role = 'guest'; server = s; clientId = nextClientId++;
         s.guests.set(clientId, ws);
-        send(ws, { t: 'joined', id: s.id, clientId, info: s.info });
+        send(ws, { t: 'joined', id: s.id, clientId, info: { name: s.info.name, host: s.info.host, motd: s.info.motd, gameMode: s.info.gameMode, maxPlayers: s.info.maxPlayers, official: s.official } });
         send(s.ws, { t: 'guestJoined', from: clientId, name: String(m.name ?? 'Player').slice(0, 16), skin: m.skin });
         break;
       }
@@ -107,7 +208,7 @@ wss.on('connection', (ws, req) => {
         if (role === 'host' && server) {
           const to = m.to;
           if (!to) { const text = JSON.stringify(d); for (const g of server.guests.values()) if (g.readyState === 1) g.send(text); }
-          else { const g = server.guests.get(to); if (g && g.readyState === 1) g.send(JSON.stringify(d)); }
+          else send(server.guests.get(to), d);
         } else if (role === 'guest' && server) { d.from = clientId; send(server.ws, d); }
         break;
       }
@@ -118,9 +219,16 @@ wss.on('connection', (ws, req) => {
 
   ws.on('close', () => {
     if (role === 'host' && server) {
-      for (const g of server.guests.values()) { send(g, { t: 'kicked', reason: 'The host closed the world.' }); g.close(); }
       servers.delete(server.id);
-      console.log(`[relay] closed ${server.id}`);
+      if (server.official) {
+        saveOfficial();
+        // the world lives on: everyone reconnects and the first one back becomes the new host
+        for (const g of server.guests.values()) { send(g, { t: 'rehost', id: OFFICIAL_ID, reason: 'The host left — reconnecting to the public world…' }); g.close(); }
+        console.log('[relay] public world host left; world saved');
+      } else {
+        for (const g of server.guests.values()) { send(g, { t: 'kicked', reason: 'The host closed the world.' }); g.close(); }
+        console.log(`[relay] closed ${server.id}`);
+      }
     } else if (role === 'guest' && server) {
       server.guests.delete(clientId);
       send(server.ws, { t: 'guestLeft', from: clientId });
@@ -128,6 +236,17 @@ wss.on('connection', (ws, req) => {
   });
 });
 
+/** Chunk frames start with [kind u8][json length u32][json] — read cx/cz/dim without decoding the body. */
+function readChunkKey(payload) {
+  try {
+    const len = payload.readUInt32LE(1);
+    const head = JSON.parse(payload.subarray(5, 5 + len).toString('utf8'));
+    if (typeof head.cx !== 'number' || typeof head.cz !== 'number') return null;
+    return `${head.dim ?? 'overworld'}:${head.cx},${head.cz}`;
+  } catch { return null; }
+}
+
+loadOfficial();
 http_.listen(PORT, () => {
-  console.log(`VoxeLand server on http://localhost:${PORT}  (relay: /ws, ${PUBLIC_HOST ? 'public' : 'LAN'} mode, serving ${DIST})`);
+  console.log(`VoxeLand server on http://localhost:${PORT}  (relay /ws, public world "${official.name}", serving ${DIST})`);
 });

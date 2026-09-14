@@ -1,6 +1,6 @@
 // Menus: title, world select/create, options, controls, pause, death, chat, confirm.
 import { OptionsScreen } from './settings';
-import { MultiplayerScreen, OpenToLanScreen, DisconnectedScreen } from './multiplayer';
+import { MultiplayerScreen, ShareWorldScreen, DisconnectedScreen } from './multiplayer';
 export { DisconnectedScreen };
 export { OptionsScreen };
 import { Screen, Button, Slider, TextField, Checkbox, CycleButton, ListWidget } from './widgets';
@@ -52,7 +52,7 @@ export class WorldSelectScreen extends Screen {
   build(): void {
     const g = this.gui.game;
     const cx = this.width / 2;
-    storage.listWorlds().then((w) => { this.worlds = w; });
+    storage.listWorlds().then((w) => { this.worlds = w.filter((x) => x.id !== 'public'); }); // the server's world is joined from Multiplayer
     this.list = this.add(new ListWidget(cx - 150, 32, 300, this.height - 100, 36, () => this.worlds.length, (ctx, i, x, y, w, sel, hov) => {
       const wm = this.worlds[i];
       if (sel) { ctx.fillStyle = '#808080'; ctx.fillRect(x - 2, y, w + 4, 36); ctx.fillStyle = '#000'; ctx.fillRect(x - 1, y + 1, w + 2, 34); }
@@ -207,8 +207,8 @@ export class PauseScreen extends Screen {
     this.add(new Button(cx - 102, y + 24, 98, 20, 'Advancements', () => {}));
     this.add(new Button(cx + 4, y + 24, 98, 20, 'Statistics', () => {}));
     this.add(new Button(cx - 102, y + 48, 98, 20, g.assets.lang['menu.options'] ?? 'Options...', () => this.gui.open(new OptionsScreen(this))));
-    const lan = this.add(new Button(cx + 4, y + 48, 98, 20, g.host ? 'Open to LAN' : g.isRemote ? 'Player List' : 'Open to LAN', () => { if (g.isRemote) this.gui.showPlayerList = !this.gui.showPlayerList; else if (!g.host) this.gui.open(new OpenToLanScreen(this)); }));
-    if (g.host) lan.active = false;
+    const share = this.add(new Button(cx + 4, y + 48, 98, 20, g.isRemote ? 'Player List' : 'Share World', () => { if (g.isRemote) this.gui.showPlayerList = !this.gui.showPlayerList; else if (!g.host) this.gui.open(new ShareWorldScreen(this)); }));
+    if (g.host) share.active = false;
     this.add(new Button(cx - 102, y + 72, 204, 20, g.isRemote ? 'Disconnect' : g.assets.lang['menu.returnToMenu'] ?? 'Save and Quit to Title', () => g.quitToTitle()));
   }
   render(ctx: CanvasRenderingContext2D, mx: number, my: number, partial: number): void { this.gui.font.drawCentered(ctx, this.gui.game.assets.lang['menu.game'] ?? 'Game Menu', this.width / 2, this.height / 4 - 16, 0xffffff); super.render(ctx, mx, my, partial); }

@@ -206,7 +206,9 @@ export class EntityRenderer {
     if (e.type === 'wolf' && e.tamed) tex = 'entity/wolf/wolf_tame'; else if (e.type === 'wolf' && e.angerTicks > 0) tex = 'entity/wolf/wolf_angry';
     if (e.type === 'sheep' && e.isBaby) tex = 'entity/sheep/sheep_baby';
     if (e.type === 'ghast' && e.rangedTicks > 45) tex = 'entity/ghast/ghast_shooting';
-    if (e.isBaby && (e.type === 'zombie' || e.type === 'husk' || e.type === 'drowned')) tex = tex + '_baby';
+    // vanilla rabbit variants (the "Toast" skin is the rare named one)
+    if (e.type === 'rabbit') tex = 'entity/rabbit/rabbit_' + (['brown', 'white', 'black', 'white_splotched', 'gold', 'salt'][e.variant % 6] ?? 'brown');
+    if (e.isBaby && (e.type === 'zombie' || e.type === 'husk' || e.type === 'drowned' || e.type === 'rabbit')) tex = tex + '_baby';
     const m = this.model(modelName);
     const pos = this.lerpPos(e, partial);
     const bodyYaw = e.prevBodyYaw + ((((e.bodyYaw - e.prevBodyYaw) % 360) + 540) % 360 - 180) * partial;
@@ -325,7 +327,19 @@ export class EntityRenderer {
         if (model === 'wolf' && e instanceof Mob) { pose.tail = { rx: e.angerTicks > 0 || e.tamed ? 0.6 : Math.PI / 4 + Math.sin(t * 3) * 0.1 }; if (e.sitting) { pose.body = { rx: Math.PI / 4 * 2, ty: 4 }; pose.leg0 = { rx: -1.3, ty: 4 }; pose.leg1 = { rx: -1.3, ty: 4 }; pose.leg2 = { rx: 0, ty: 4 }; pose.leg3 = { rx: 0, ty: 4 }; pose.mane = { ty: 4, rx: Math.PI / 2 }; pose.head = { ry: hy, rx: hp, ty: 4 }; } }
         if (model === 'wolf' && e instanceof Mob && e.attackAnim > 0) pose.head = { ry: hy, rx: hp + 0.3 };
         if (model === 'turtle') { pose.leg0 = { rx: swing2 }; pose.leg1 = { rx: swing }; pose.leg2 = { rz: swing2 }; pose.leg3 = { rz: swing }; }
-        if (model === 'rabbit') { const j = e.onGround ? 0 : 1; pose.leg0 = { rx: swing * 0.5 + j * -0.5 }; pose.leg1 = { rx: swing * 0.5 + j * -0.5 }; pose.leg2 = { rx: swing2 * 0.5 }; pose.leg3 = { rx: swing2 * 0.5 }; }
+        if (model === 'rabbit') {
+          // vanilla: jumpRotation = sin(jumpCompletion * PI) drives haunches, feet, front legs and body pitch
+          const jc = e instanceof Mob ? Math.max(0, Math.min(1, e.jumpProgress(partial))) : 0;
+          const j = Math.sin(jc * Math.PI);
+          pose.head = { ry: hy, rx: hp };
+          pose.earL = { ry: 0, rx: hp + j * 0.2 }; pose.earR = { ry: 0, rx: hp + j * 0.2 };
+          pose.body = { rx: j * 0.5 };
+          pose.haunchL = { rx: j * 0.8 }; pose.haunchR = { rx: j * 0.8 };
+          pose.footL = { rx: j * 0.8 }; pose.footR = { rx: j * 0.8 };
+          pose.legL = { rx: -j * 0.6 }; pose.legR = { rx: -j * 0.6 };
+          pose.tail = { rx: j * 0.3 };
+          delete pose.leg0; delete pose.leg1; delete pose.leg2; delete pose.leg3;
+        }
         break;
       }
       case 'chicken': { pose.head = { ry: hy, rx: hp }; pose.leg0 = { rx: swing }; pose.leg1 = { rx: swing2 }; const flap = e.onGround ? 0 : Math.sin(t * 40) * 0.8 + 0.3; pose.wingR = { rz: flap }; pose.wingL = { rz: -flap }; break; }
@@ -396,8 +410,8 @@ export class EntityRenderer {
     if (held) this.drawHandItem(base, pose, held, sky, light, false, slim, hurt);
     const off = p.offhandItem();
     if (off) this.drawHandItem(base, pose, off, sky, light, true, slim, hurt);
-    // name tag for other players
-    if ((p as any).isRemote && !p.sleeping) this.game.gui.queueNameTag(p.name, p.x, p.y + p.height + 0.5, p.z);
+    // name tag for other players (vanilla hides it while sneaking (isDiscrete) and for dead players)
+    if ((p as any).isRemote && !p.sleeping && !p.isSneaking && p.health > 0 && p.deathTime === 0 && !p.isSpectator) this.game.gui.queueNameTag(p.name, p.x, p.y + p.height + 0.5, p.z);
   }
 
   /** vanilla ItemInHandLayer.renderArmWithItem: hand transform in the (flipped) model space, then the item's

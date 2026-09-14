@@ -1,6 +1,6 @@
 // Vanilla-structured settings screens: Options -> Video / Music & Sounds / Controls (Mouse, Key Binds) / Chat /
 // Skin Customization / Accessibility / Language / Credits. Sub-screens are generated from the option specs.
-import { Screen, Button, Slider, CycleButton, Widget } from './widgets';
+import { Screen, Button, Slider, CycleButton, TextField, Widget } from './widgets';
 import { ACCESSIBILITY_OPTIONS, CHAT_OPTIONS, CONTROL_OPTIONS, MOUSE_OPTIONS, SKIN_PARTS, SOUND_OPTIONS, VIDEO_OPTIONS, getOption, setOption, type OptionSpec } from '../options';
 import { ControlsScreen, CreditsScreen } from './screens';
 
@@ -139,9 +139,39 @@ export class ControlsMenuScreen extends OptionsListScreen {
   }
 }
 
+/** Vanilla has no name field; VoxeLand needs one, so it lives with the rest of the appearance settings. */
+export class PlayerNameScreen extends Screen {
+  hidesHud = true;
+  field!: TextField;
+  constructor(private parent: Screen) { super(); }
+  build(): void {
+    const g = this.gui.game, cx = this.width / 2;
+    this.field = this.add(new TextField(cx - 100, this.height / 2 - 10, 200, 20, g.options.playerName));
+    this.field.maxLength = 16; this.field.placeholder = 'Player';
+    this.field.filter = (ch) => /[\w]/.test(ch);
+    this.field.onEnter = () => this.done();
+    this.focused = this.field;
+    this.add(new Button(cx - 100, this.height / 2 + 20, 200, 20, 'Done', () => this.done()));
+  }
+  private done(): void {
+    const g = this.gui.game;
+    g.options.playerName = this.field.text.trim() || 'Player';
+    if (g.player && !g.isRemote && !g.host) g.player.name = g.options.playerName;
+    g.saveOptions();
+    this.gui.open(this.parent);
+  }
+  render(ctx: CanvasRenderingContext2D, mx: number, my: number, partial: number): void {
+    this.gui.font.drawCentered(ctx, 'Player Name', this.width / 2, this.height / 2 - 44, 0xffffff);
+    this.gui.font.drawCentered(ctx, 'Shown in chat, the player list and death messages', this.width / 2, this.height / 2 - 30, 0xa0a0a0);
+    super.render(ctx, mx, my, partial);
+  }
+  keyDown(code: string, key: string, mods: any): boolean { if (code === 'Escape') { this.done(); return true; } return super.keyDown(code, key, mods); }
+}
+
 export class SkinScreen extends OptionsListScreen {
   constructor(parent: Screen) {
     super('Skin Customization', [], parent, [
+      (s: OptionsListScreen, x: number, y: number, w: number) => new Button(x, y, w, 20, `Player Name: ${s.gui.game.options.playerName}`, () => s.gui.open(new PlayerNameScreen(s))),
       ...SKIN_PARTS.map((p) => (s: OptionsListScreen, x: number, y: number, w: number) => new CycleButton(x, y, w, 20, p.label + ': ', [{ value: true, label: 'ON' }, { value: false, label: 'OFF' }], s.gui.game.options.modelParts[p.key] !== false, (v) => { s.gui.game.options.modelParts[p.key] = v; })),
       (s, x, y, w) => new CycleButton(x, y, w, 20, 'Main Hand: ', [{ value: 'right', label: 'Right' }, { value: 'left', label: 'Left' }], s.gui.game.options.mainHand, (v) => { s.gui.game.options.mainHand = v as any; }),
       (s, x, y, w) => new CycleButton(x, y, w, 20, 'Skin: ', [{ value: 'steve', label: 'Steve (Classic)' }, { value: 'alex', label: 'Alex (Slim)' }], s.gui.game.options.skin, (v) => { s.gui.game.options.skin = v as any; }),

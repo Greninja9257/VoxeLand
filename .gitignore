@@ -3,3 +3,10 @@ dist/
 public/assets/
 .cache/
 .DS_Store
+
+
+#Ignore vscode AI rules
+.github/instructions/codacy.instructions.md
+
+# server-side public world state
+.data/

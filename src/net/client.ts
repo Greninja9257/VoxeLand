@@ -11,7 +11,13 @@ import { SET_UPDATE_NEIGHBORS, type WorldListener } from '../world/world';
 import { Chunk, chunkKey } from '../world/chunk';
 import { decodeChunk, unpackFrame, FRAME_CHUNK, PROTOCOL_VERSION, defaultRelayUrl, type ServerInfo } from './protocol';
 
-export interface JoinResult { welcome: any; info: any }
+/** Joining either lands us in someone else's world, or makes us the host of the backend's public world. */
+export type JoinResult =
+  | { kind: 'joined'; welcome: any; info: any }
+  | { kind: 'host'; world: any; chunks: Uint8Array[] };
+
+/** Thrown when a private server refused the password we sent (or were missing). */
+export class PasswordRequired extends Error { constructor(msg = 'This server is private.') { super(msg); } }
 
 /** Fetch the server list from a relay. */
 export function listServers(relayUrl = defaultRelayUrl()): Promise<ServerInfo[]> {
@@ -48,28 +54,43 @@ export class NetClient implements WorldListener {
 
   constructor(public game: Game, public relayUrl: string) {}
 
-  connect(serverId: string, name: string, skin: string): Promise<JoinResult> {
+  /** Snapshot of the public world handed to us when we are promoted to host. */
+  private snapshotChunks: Uint8Array[] = [];
+  private collectingSnapshot = false;
+  /** Set when the backend asks everyone to reconnect (public world host migration). */
+  rehostId: string | null = null;
+
+  connect(serverId: string, name: string, skin: string, password = ''): Promise<JoinResult> {
     return new Promise((resolve, reject) => {
       let ws: WebSocket;
       try { ws = new WebSocket(this.relayUrl); } catch (e) { reject(e); return; }
       ws.binaryType = 'arraybuffer';
       this.ws = ws;
-      const timer = setTimeout(() => { if (this.status === 'connecting') { reject(new Error('Timed out waiting for the host')); ws.close(); } }, 15000);
-      ws.onopen = () => ws.send(JSON.stringify({ t: 'join', id: serverId, name, skin }));
+      const timer = setTimeout(() => { if (this.status === 'connecting') { reject(new Error('Timed out waiting for the host')); ws.close(); } }, 20000);
+      ws.onopen = () => ws.send(JSON.stringify({ t: 'join', id: serverId, name, skin, password }));
       ws.onmessage = (e) => {
-        if (typeof e.data !== 'string') { this.chunkFrames.push(new Uint8Array(e.data)); return; }
+        if (typeof e.data !== 'string') { (this.collectingSnapshot ? this.snapshotChunks : this.chunkFrames).push(new Uint8Array(e.data)); return; }
         const m = JSON.parse(e.data);
         if (this.status === 'connecting') {
-          if (m.t === 'error') { clearTimeout(timer); this.status = 'error'; reject(new Error(m.reason)); return; }
+          if (m.t === 'error') { clearTimeout(timer); this.status = 'error'; reject(m.needPassword ? new PasswordRequired(m.reason) : new Error(m.reason)); return; }
+          if (m.t === 'becomeHost') { this.collectingSnapshot = true; this.snapshotChunks = []; (this as any).pendingWorld = m.world; return; }
+          if (m.t === 'worldReady') { clearTimeout(timer); this.status = 'promoted'; resolve({ kind: 'host', world: (this as any).pendingWorld, chunks: this.snapshotChunks }); return; }
           if (m.t === 'joined') { this.clientId = m.clientId; this.info = m.info; return; }
-          if (m.t === 'welcome') { clearTimeout(timer); this.welcome = m; this.players = m.players ?? []; this.status = 'joined'; if (m.protocol !== PROTOCOL_VERSION) { this.status = 'error'; reject(new Error(`Incompatible server version (${m.version})`)); ws.close(); return; } resolve({ welcome: m, info: this.info }); return; }
-          if (m.t === 'kicked') { clearTimeout(timer); this.status = 'error'; reject(new Error(m.reason)); return; }
+          if (m.t === 'welcome') { clearTimeout(timer); this.welcome = m; this.players = m.players ?? []; this.status = 'joined'; if (m.protocol !== PROTOCOL_VERSION) { this.status = 'error'; reject(new Error(`Incompatible server version (${m.version})`)); ws.close(); return; } resolve({ kind: 'joined', welcome: m, info: this.info }); return; }
+          if (m.t === 'kicked' || m.t === 'rehost') { clearTimeout(timer); this.status = 'error'; reject(new Error(m.reason ?? 'Disconnected')); return; }
           return;
         }
         this.queue.push(m);
       };
       ws.onerror = () => { if (this.status === 'connecting') { clearTimeout(timer); reject(new Error('Could not reach the relay server at ' + this.relayUrl)); } this.status = 'error'; };
-      ws.onclose = () => { if (this.status === 'joined') { this.status = 'closed'; this.disconnectReason = this.disconnectReason || 'Connection lost'; } };
+      ws.onclose = () => {
+        if (this.status !== 'joined') return;
+        // the server closes us right after a 'rehost'/'kicked' notice: take the reason out of the pending queue
+        const pending = this.queue.find((m) => m.t === 'rehost' || m.t === 'kicked');
+        if (pending?.t === 'rehost') this.rehostId = pending.id ?? null;
+        this.status = 'closed';
+        this.disconnectReason = this.disconnectReason || pending?.reason || 'Connection lost';
+      };
     });
   }
 
@@ -132,6 +153,7 @@ export class NetClient implements WorldListener {
       case 'contUpd': { if (this.container && this.container.x === m.x && this.container.y === m.y && this.container.z === m.z && !this.containerDirty) { this.container.inv.deserialize(m.slots, g.items); if (m.be && this.container.be) Object.assign(this.container.be, m.be); } break; }
       case 'wake': { if (p.sleeping) { p.wakeUp(); g.gui.sleepFade = 0; } break; }
       case 'kicked': { this.disconnectReason = m.reason ?? 'Disconnected'; this.status = 'closed'; break; }
+      case 'rehost': { this.disconnectReason = m.reason ?? 'Reconnecting…'; this.rehostId = m.id ?? null; this.status = 'closed'; break; }
       case 'pong': this.ping = Math.round(performance.now() - m.time); break;
       case 'ride': { const v = m.id !== null ? this.entities.get(m.id) : null; if (v instanceof BoatEntity) { if (p.vehicle !== v) { p.vehicle = v; if (!v.passengers.includes(p)) v.passengers.push(p); v.positionPassengers(); p.prevX = p.x; p.prevY = p.y; p.prevZ = p.z; } } else { const old = p.vehicle; if (old) { old.passengers = old.passengers.filter((x) => x !== p); p.vehicle = null; } if (m.x !== undefined) { p.setPos(m.x, m.y, m.z); p.vy = 0; } } break; }
     }

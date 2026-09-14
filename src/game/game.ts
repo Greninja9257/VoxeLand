@@ -32,6 +32,7 @@ import { mergeOptions, type Options } from './options';
 import { Weather } from './weather';
 import { NetHost, type HostOptions } from '../net/host';
 import { NetClient } from '../net/client';
+import { decodeChunk, unpackFrame } from '../net/protocol';
 import { RemotePlayer } from '../entity/remotePlayer';
 import { BoatEntity } from '../entity/boat';
 import { EnderDragonEntity, WitherEntity, EndCrystalEntity, AreaEffectCloud } from '../entity/boss';
@@ -899,7 +900,15 @@ export class Game {
   /** Guest tick: our player runs locally, the host drives everything else. */
   private tickRemote(): void {
     const p = this.player, w = this.world, c = this.client!;
-    if (c.status === 'closed') { const reason = c.disconnectReason || 'Disconnected'; this.client = null; this.leaveRemoteWorld(reason); return; }
+    if (c.status === 'closed') {
+      const reason = c.disconnectReason || 'Disconnected';
+      const rehost = c.rehostId, last = this.lastServer;
+      this.client = null;
+      this.leaveRemoteWorld(reason);
+      // public world host migration: reconnect (the first client back becomes the new host)
+      if (rehost && last) setTimeout(() => { if (!this.inWorld) this.joinServer(last.relayUrl, rehost, last.password).catch((e) => this.gui.open(new DisconnectedScreen(String(e?.message ?? e)))); }, 1500 + Math.random() * 1500);
+      return;
+    }
     this.updatePlayerInput();
     this.chunks.update(p.x, p.z, 0.05);
     for (const e of this.entities) { if (e.removed) continue; if (e.remote) e.remoteTick(); }
@@ -934,11 +943,13 @@ export class Game {
     return h;
   }
 
-  /** Join a hosted world as a guest. */
-  async joinServer(relayUrl: string, serverId: string): Promise<void> {
+  /** Join a server. Joining the backend's public world with nobody hosting promotes us to host instead. */
+  async joinServer(relayUrl: string, serverId: string, password = ''): Promise<void> {
     const c = new NetClient(this, relayUrl);
     this.gui.open(new LoadingScreen('Connecting…'));
-    const { welcome } = await c.connect(serverId, this.options.playerName || 'Player', this.options.skin);
+    const res = await c.connect(serverId, this.options.playerName || 'Player', this.options.skin, password);
+    if (res.kind === 'host') { c.close(); await this.hostPublicWorld(relayUrl, res.world, res.chunks); return; }
+    const welcome = res.welcome;
     this.gui.open(new LoadingScreen('Joining world…'));
     this.client = c;
     this.worldMeta = { id: 'remote', name: welcome.hostName + "'s world", seed: welcome.seed, created: Date.now(), lastPlayed: Date.now(), gameMode: welcome.gameMode, difficulty: welcome.difficulty, cheats: welcome.cheats, version: this.version };
@@ -961,7 +972,39 @@ export class Game {
     this.gui.onHeldItemChanged();
     await this.waitForChunks();
     this.sounds.stopMusic();
+    this.lastServer = { relayUrl, serverId, password };
     this.gui.addChat(`§eJoined ${welcome.hostName}'s world`);
+  }
+  /** Relay + id + password of the server we are on, so a host migration can reconnect us. */
+  lastServer: { relayUrl: string; serverId: string; password: string } | null = null;
+
+  /** Take over hosting the backend's persistent public world from the snapshot it handed us. */
+  private async hostPublicWorld(relayUrl: string, world: any, chunkFrames: Uint8Array[]): Promise<void> {
+    this.gui.open(new LoadingScreen('Starting the public world…'));
+    // the backend's stored chunks are the authoritative copy: write them into local storage, then load normally
+    const data: any[] = [];
+    for (const f of chunkFrames) {
+      try {
+        const { json, body } = unpackFrame(f);
+        if (json.dim && json.dim !== 'overworld') continue;   // guests only ever see the overworld of the public world
+        const d = decodeChunk(json, body);
+        data.push({ ...d, decorated: true });
+      } catch (e) { console.error('snapshot chunk', e); }
+    }
+    const meta: WorldMeta = { id: 'public', name: world.name ?? 'Public world', seed: world.seed, created: Date.now(), lastPlayed: Date.now(), gameMode: (world.gameMode ?? 'survival') as any, difficulty: world.difficulty ?? 2, cheats: false, version: this.version };
+    await storage.saveWorldMeta(meta).catch(() => {});
+    if (data.length) await storage.saveChunks('public', 'overworld', data as any).catch((e) => console.error(e));
+    // world-level state from the backend (time, weather, rules, spawn, everyone's saved players)
+    await storage.saveState('public', 'world', {
+      player: world.playerData?.[this.options.playerName || 'Player'] ?? undefined,
+      weather: world.meta?.weather, time: { overworld: { time: world.meta?.time ?? 0, dayTime: world.meta?.dayTime ?? 0 } },
+      rules: world.meta?.rules, worldSpawn: world.meta?.worldSpawn, playerData: world.playerData ?? {}, dragonKills: world.meta?.dragonKills ?? 0,
+    }).catch(() => {});
+    await this.loadWorld(meta);
+    const h = await this.openToLan({ name: world.name ?? 'Public world', motd: world.motd ?? '', gameMode: world.gameMode ?? 'survival', cheats: false, maxPlayers: world.maxPlayers ?? 16, relayUrl, official: true });
+    this.lastServer = { relayUrl, serverId: 'official', password: '' };
+    this.gui.addChat('§eYou are hosting the public world — it is saved on the server and passes on when you leave.');
+    void h;
   }
 
   private leaveRemoteWorld(reason: string): void {
@@ -1211,9 +1254,21 @@ export class Game {
   }
 
   // ---------- title panorama ----------
+  /** Menu panorama: VoxeLand's own scene (public/panorama), falling back to the resource pack's. */
+  /** Menu panorama: VoxeLand's own scene, falling back to the resource pack's if it is missing. */
   private async loadPanorama(): Promise<void> {
-    for (let i = 0; i < 6; i++) {
-      try { const r = await fetch(`./assets/pack/assets/minecraft/textures/gui/title/background/panorama_${i}.png`); const bmp = await createImageBitmap(await r.blob()); this.panoramaTex[i] = createTexture(this.renderer.gl, bmp, { nearest: false }); } catch { this.panoramaTex[i] = null; }
+    const sources = [`./panorama/panorama_`, `./assets/pack/assets/minecraft/textures/gui/title/background/panorama_`];
+    for (const base of sources) {
+      let ok = true;
+      for (let i = 0; i < 6; i++) {
+        try {
+          const r = await fetch(`${base}${i}.png`);
+          if (!r.ok) { ok = false; break; }
+          const bmp = await createImageBitmap(await r.blob());
+          this.panoramaTex[i] = createTexture(this.renderer.gl, bmp, { nearest: false });
+        } catch { ok = false; break; }
+      }
+      if (ok) return;
     }
   }
   private renderPanorama(timeSec: number): void {
@@ -1229,9 +1284,9 @@ export class Game {
     gl.uniformMatrix4fv(r.quadProg.u('uVP'), false, r.vp);
     gl.uniform4f(r.quadProg.u('uColor'), 1, 1, 1, 1);
     gl.activeTexture(gl.TEXTURE0); gl.uniform1i(r.quadProg.u('uTex'), 0);
-    // cube faces: 0 front(-z? ), 1 right, 2 back, 3 left, 4 top, 5 bottom (vanilla panorama order: front(south?), ...)
+    // vanilla panorama order: 0 north, 1 east, 2 south, 3 west, 4 up, 5 down
     const m = new Float32Array(16);
-    const faces: [number, number, number, number][] = [[0, 0, 0, 0], [1, 0, 90, 0], [2, 0, 180, 0], [3, 0, 270, 0], [4, -90, 0, 0], [5, 90, 0, 0]];
+    const faces: [number, number, number, number][] = [[0, 0, 0, 0], [1, 0, 90, 0], [2, 0, 180, 0], [3, 0, 270, 0], [4, 90, 0, 0], [5, -90, 0, 0]];
     gl.bindVertexArray((r as any).quadVao);
     for (const [i, rx, ry] of faces) {
       const tex = this.panoramaTex[i]; if (!tex) continue;

@@ -563,9 +563,9 @@ export abstract class LivingEntity extends Entity {
       this.vy *= 0.98;
       this.vx *= friction; this.vz *= friction;
     }
-    if (this.jumping && this.jumpTicks === 0) {
-      if (this.onGround && !this.inWater && !this.inLava) this.jump();
-    }
+    // vanilla LivingEntity.aiStep: jumping is gated by a 10-tick delay that only resets when the key is released
+    if (this.jumping) { if (this.jumpTicks === 0 && this.onGround && !this.inWater && !this.inLava) this.jump(); }
+    else this.jumpTicks = 0;
   }
 
   depthStriderLevel(): number { return 0; }
@@ -618,13 +618,21 @@ export class ItemEntity extends Entity {
     if (this.onGround && this.vy < 0) this.vy *= -0.5;
     // burn in fire/lava
     if (this.inLava && !this.stack.item.isFireResistant) { this.remove(); return; }
-    // merge with nearby items
-    if (this.age % 20 === 0 && this.stack.count < this.stack.maxStack) {
+    // merge with neighbours (vanilla ItemEntity.mergeWithNeighbours: every tick, AABB grown 0.5 horizontally,
+    // both stacks below their max, combined count fits, the bigger stack absorbs the smaller one)
+    if (this.isMergable()) {
+      const box = this.bb.clone().grow(0.5, 0, 0.5);
       for (const e of this.game.entities) {
-        if (e === this || !(e instanceof ItemEntity) || e.removed || e.pickupDelay !== this.pickupDelay && false) continue;
-        if (e.distSq(this.x, this.y, this.z) < 0.5 * 0.5 && e.stack.canStackWith(this.stack) && e.stack.count + this.stack.count <= this.stack.maxStack) {
-          this.stack.count += e.stack.count; e.remove(); this.pickupDelay = Math.max(this.pickupDelay, e.pickupDelay);
-        }
+        if (e === this || this.removed) break;
+        if (!(e instanceof ItemEntity) || e.removed || !e.isMergable() || !e.bb.intersects(box)) continue;
+        if (!e.stack.canStackWith(this.stack) || e.stack.count + this.stack.count > this.stack.maxStack) continue;
+        const [dst, src] = e.stack.count < this.stack.count ? [this, e] : [e, this];
+        const n = Math.min(dst.stack.maxStack - dst.stack.count, src.stack.count);
+        if (n <= 0) continue;
+        dst.stack.count += n; src.stack.count -= n;
+        dst.pickupDelay = Math.max(dst.pickupDelay, src.pickupDelay);
+        dst.age = Math.min(dst.age, src.age);
+        if (src.stack.count <= 0) src.remove();
       }
     }
     // push out of solid blocks
@@ -637,6 +645,8 @@ export class ItemEntity extends Entity {
     const n = this.world.registry.nameOf(s);
     return n === 'ice' || n === 'packed_ice' ? 0.98 : n === 'blue_ice' ? 0.989 : n === 'slime_block' ? 0.8 : 0.6;
   }
+  /** vanilla ItemEntity.isMergable */
+  isMergable(): boolean { return !this.removed && this.pickupDelay !== 32767 && this.age < 6000 && this.stack.count < this.stack.maxStack; }
   hurt(d: EntityDamage): boolean { if (d.source === 'explosion' || d.source === 'lava' || d.source === 'fire' || d.source === 'onFire') { if (!this.stack.item.isFireResistant || d.source === 'explosion') this.remove(); } return false; }
   serialize(): any { return { ...super.serialize(), stack: this.stack.serialize(), pickupDelay: this.pickupDelay, thrower: this.thrower }; }
   deserialize(d: any): void { super.deserialize(d); this.pickupDelay = d.pickupDelay ?? 10; this.thrower = d.thrower ?? null; }
