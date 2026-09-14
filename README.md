@@ -1,4 +1,8 @@
-# VoxeLand
+<h1 align="center">VoxeLand<br>
+<sub><sup><font color="gray">/ˈvɒk.si.lænd/</font></sup></sub>
+</h1>
+
+<br>
 
 A faithful remake of the latest **Minecraft: Java Edition** (26.x assets) that runs in the browser — WebGL2 + TypeScript, zero runtime dependencies.
 
