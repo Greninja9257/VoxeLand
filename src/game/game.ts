@@ -594,7 +594,6 @@ export class Game {
     if (b.hardness < 0 && player && !player.isCreative) return;
     if (this.client && player === this.player) {
       // guest: predict locally (no drops), the host breaks it for real and broadcasts the change
-      if (!silentPlayer) { this.sounds.playAt(`block.${b.soundType}.break`, x + 0.5, y + 0.5, z + 0.5, 1, 0.8); this.particles.spawnBlockBreak(x, y, z, s); }
       this.client.applying = true; try { w.setBlock(x, y, z, reg.isWaterlogged(s) && !reg.implicitWater[reg.stateBlock[s]] ? reg.WATER : 0, SET_UPDATE_NEIGHBORS); } finally { this.client.applying = false; }
       this.client.send({ t: 'break', x, y, z });
       const tool = player.heldItem();
@@ -903,6 +902,7 @@ export class Game {
     if (c.status === 'closed') {
       const reason = c.disconnectReason || 'Disconnected';
       const rehost = c.rehostId, last = this.lastServer;
+      c.close();
       this.client = null;
       this.leaveRemoteWorld(reason);
       // public world host migration: reconnect (the first client back becomes the new host)
@@ -958,6 +958,7 @@ export class Game {
     this.worldSpawn = welcome.spawn;
     await this.setupDimension(welcome.dimension, welcome.seed, { time: welcome.time, dayTime: welcome.day });
     this.world.listeners = [c];
+    c.attachAudio();
     this.player = new Player();
     this.player.world = this.world; this.player.game = this;
     this.player.name = welcome.name; this.player.cheats = welcome.cheats;
@@ -1190,6 +1191,8 @@ export class Game {
     this.entityRenderer.drawAll(this.entities, p, sky, partial, this.gui.thirdPerson === 0);
     // block outline & cracks
     if (this.targetBlock && !p.isSpectator && !this.gui.hideHud) this.drawBlockOutline(sky);
+    if (p.breaking) this.drawBlockCracks(p.breaking.x, p.breaking.y, p.breaking.z, p.breakStage, sky, this.targetBlock?.face);
+    for (const e of this.entities) if (e instanceof RemotePlayer && e.breaking && e.breakStage >= 0) this.drawBlockCracks(e.breaking.x, e.breaking.y, e.breaking.z, e.breakStage, sky);
     // lightning
     for (const b of this.lightningBolts) this.drawLightning(b);
     // particles
@@ -1207,6 +1210,7 @@ export class Game {
   }
 
   private drawBlockOutline(sky: SkyState): void {
+    void sky;
     const t = this.targetBlock!;
     const s = this.world.getBlock(t.x, t.y, t.z);
     if (s === 0) return;
@@ -1214,10 +1218,13 @@ export class Game {
     if (this.registry.isFluid(s)) return;
     if (boxes.length === 0) boxes = this.outlineBoxes(s);
     for (const b of boxes) this.renderer.drawBoxOutline(t.x + b[0] - 0.002, t.y + b[1] - 0.002, t.z + b[2] - 0.002, t.x + b[3] + 0.002, t.y + b[4] + 0.002, t.z + b[5] + 0.002, [0, 0, 0, 0.4]);
-    // cracks
-    const stage = this.player.breakStage;
-    if (stage >= 0 && this.player.breaking && this.player.breaking.x === t.x && this.player.breaking.y === t.y && this.player.breaking.z === t.z) {
-      const models = this.baker.modelsAt(s, t.x, t.y, t.z);
+  }
+
+  private drawBlockCracks(x: number, y: number, z: number, stage: number, sky: SkyState, face = 1): void {
+    if (stage < 0 || stage > 9) return;
+    const s = this.world.getBlock(x, y, z);
+    if (s === 0 || this.registry.isFluid(s)) return;
+      const models = this.baker.modelsAt(s, x, y, z);
       const tile = this.baker.tileUv.get(`block/destroy_stage_${stage}`);
       if (!tile) return;
       let quads = 0; for (const m of models) quads += m.quads.length;
@@ -1232,7 +1239,7 @@ export class Game {
           const ax = q.face >> 1 === 0 ? px : q.face >> 1 === 1 ? px : pz, ay = q.face >> 1 === 0 ? pz : py;
           const o = vi * VERTEX_STRIDE;
           const n = [q.nx, q.ny, q.nz];
-          f32[o >> 2] = t.x + px + n[0] * 0.003 - cam.x; f32[(o >> 2) + 1] = t.y + py + n[1] * 0.003 - cam.y; f32[(o >> 2) + 2] = t.z + pz + n[2] * 0.003 - cam.z;
+          f32[o >> 2] = x + px + n[0] * 0.003 - cam.x; f32[(o >> 2) + 1] = y + py + n[1] * 0.003 - cam.y; f32[(o >> 2) + 2] = z + pz + n[2] * 0.003 - cam.z;
           u16[(o + 12) >> 1] = (tile.u0 + (tile.u1 - tile.u0) * Math.max(0, Math.min(1, ax))) * 65535; u16[(o + 14) >> 1] = (tile.v0 + (tile.v1 - tile.v0) * Math.max(0, Math.min(1, 1 - ay))) * 65535;
           u8[o + 16] = 255; u8[o + 17] = 255; u8[o + 18] = 255; u8[o + 19] = 0xff;
           vi++;
@@ -1240,9 +1247,8 @@ export class Game {
       }
       // vanilla RenderType.crumbling: blend(DST_COLOR, SRC_COLOR) with the block's own light, alpha < 0.1 discarded
       const gl = this.renderer.gl;
-      const nl = this.world.getLight(t.x + (t.face === 5 ? 1 : t.face === 4 ? -1 : 0), t.y + (t.face === 1 ? 1 : t.face === 0 ? -1 : 0), t.z + (t.face === 3 ? 1 : t.face === 2 ? -1 : 0));
+      const nl = this.world.getLight(x + (face === 5 ? 1 : face === 4 ? -1 : 0), y + (face === 1 ? 1 : face === 0 ? -1 : 0), z + (face === 3 ? 1 : face === 2 ? -1 : 0));
       this.renderer.drawChunkFormatBuffer(buf, quads, mat4Identity(new Float32Array(16)), sky, { light: nl, alphaCut: 0.1, blend: true, blendFunc: [gl.DST_COLOR, gl.SRC_COLOR], noCull: true });
-    }
   }
 
   private drawLightning(b: { x: number; y: number; z: number; life: number }): void {

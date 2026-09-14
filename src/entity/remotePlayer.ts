@@ -30,12 +30,15 @@ export class RemotePlayer extends Player {
     if (s.hurt) this.hurtTime = this.hurtDuration;
     if (s.dead !== undefined && s.dead && this.deathTime === 0) this.deathTime = 1;
     if (s.dead === false) this.deathTime = 0;
+    if (s.br && Number.isInteger(s.br.x) && Number.isInteger(s.br.y) && Number.isInteger(s.br.z) && Number.isInteger(s.br.stage)) this.breaking = { x: s.br.x, y: s.br.y, z: s.br.z, progress: Math.max(0, Math.min(9, s.br.stage)) / 10, state: s.br.state };
+    else if (s.br === null) this.breaking = null;
     this.snapshotAge = 0;
     if (this.snapshotAge === 0 && Math.abs(this.x - this.tx) + Math.abs(this.z - this.tz) > 16) { this.setPos(this.tx, this.ty, this.tz); this.prevX = this.x; this.prevY = this.y; this.prevZ = this.z; }
   }
 
   remoteTick(): void { this.tick(); }
   tick(): void {
+    this.attackCooldownTicks++;
     if (this.vehicle?.removed) this.vehicle = null;
     if (this.vehicle) { // the vehicle positions us; only animate
       this.prevYaw = this.yaw; this.prevPitch = this.pitch; this.prevBodyYaw = this.bodyYaw; this.prevHeadYaw = this.headYaw; this.prevSwingProgress = this.swingProgress; this.prevLimbSwingAmount = this.limbSwingAmount;
@@ -74,13 +77,13 @@ export class RemotePlayer extends Player {
     this.swingProgress = this.swingTime / 6;
   }
 
-  /** Damage dealt on the host is forwarded to the owning client (it is authoritative over its own health). */
+  /** The host applies damage to this mirror, then forwards the authoritative result to its owner. */
   hurt(d: EntityDamage): boolean {
-    if (this.invulnerableMode || this.health <= 0) return false;
-    if (this.invulnerableTicks > 10 && d.amount <= this.lastDamage) return false;
-    this.invulnerableTicks = 20; this.lastDamage = d.amount; this.hurtTime = this.hurtDuration;
-    this.hurtHandler?.(d);
-    return true;
+    const before = this.health;
+    const hurt = super.hurt(d);
+    if (hurt) this.hurtHandler?.({ ...d, amount: Math.max(0, before - this.health), bypassArmor: true, attacker: null });
+    return hurt;
   }
+  die(): void { this.health = 0; this.isDead = true; }
   addExhaustion(): void {}
 }

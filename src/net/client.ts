@@ -51,6 +51,7 @@ export class NetClient implements WorldListener {
   disconnectReason = '';
   private wanted = new Set<number>();
   private requested = new Set<number>();
+  private audioAttached = false;
 
   constructor(public game: Game, public relayUrl: string) {}
 
@@ -95,7 +96,19 @@ export class NetClient implements WorldListener {
   }
 
   send(m: any): void { if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify({ t: 'msg', d: m })); }
-  close(): void { this.status = 'closed'; try { this.ws?.close(); } catch { /* */ } this.ws = null; }
+  attachAudio(): void {
+    if (this.audioAttached) return;
+    this.audioAttached = true;
+    const sounds = this.game.sounds;
+    sounds.musicControlled = true;
+    sounds.onSound = (event, x, y, z, volume, pitch, attenuate) => this.send({ t: 'snd', e: event, x, y, z, v: volume, p: pitch, a: attenuate });
+    const music = this.welcome?.music;
+    if (music) sounds.playMusicRemote(music.name, music.kind, music.volume);
+  }
+  close(): void {
+    this.status = 'closed'; try { this.ws?.close(); } catch { /* */ } this.ws = null;
+    if (this.audioAttached) { const sounds = this.game.sounds; sounds.onSound = null; sounds.musicControlled = false; this.audioAttached = false; }
+  }
 
   // ---- world listener: locally predicted block changes are sent to the host ----
   onBlockChanged(x: number, y: number, z: number, _old: number, s: number): void {
@@ -125,7 +138,7 @@ export class NetClient implements WorldListener {
     for (const m of q) { try { this.handle(m); } catch (e) { console.error('client message error', e); } }
     // our snapshot
     if (this.ticks === 1) this.send({ t: 'ready' });
-    const snap: any = { t: 'move', x: r3(p.x), y: r3(p.y), z: r3(p.z), yaw: r1(p.yaw), pitch: r1(p.pitch), sneak: p.isSneaking, sprint: p.isSprinting, swim: p.swimmingPose, sleep: p.sleeping, fly: p.flying, health: p.health, slot: p.selectedSlot, mode: p.gameMode, swing: p.swinging && p.swingTime <= 1, use: !!p.usingItem, hurt: p.hurtTime === p.hurtDuration, dead: p.health <= 0 };
+    const snap: any = { t: 'move', x: r3(p.x), y: r3(p.y), z: r3(p.z), yaw: r1(p.yaw), pitch: r1(p.pitch), sneak: p.isSneaking, sprint: p.isSprinting, swim: p.swimmingPose, sleep: p.sleeping, fly: p.flying, health: p.health, slot: p.selectedSlot, mode: p.gameMode, swing: p.swinging && p.swingTime <= 1, use: !!p.usingItem, hurt: p.hurtTime === p.hurtDuration, dead: p.health <= 0, br: p.breaking ? { x: p.breaking.x, y: p.breaking.y, z: p.breaking.z, stage: p.breakStage, state: p.breaking.state } : null };
     if (this.ticks % 100 === 0) snap.saved = p.serialize();
     this.send(snap);
     const held = JSON.stringify(p.heldItem()?.serialize() ?? null), armor = JSON.stringify(p.armor.serialize()) + JSON.stringify(p.offhand.serialize());
@@ -139,13 +152,24 @@ export class NetClient implements WorldListener {
     const g = this.game, p = g.player, w = g.world;
     switch (m.t) {
       case 'blk': { this.applying = true; try { const b = m.b as number[]; for (let i = 0; i < b.length; i += 4) { if (w.isLoaded(b[i], b[i + 2])) w.setBlock(b[i], b[i + 1], b[i + 2], b[i + 3], SET_UPDATE_NEIGHBORS); } } finally { this.applying = false; } break; }
-      case 'snd': { const d = Math.hypot(m.x - p.x, m.y - p.y, m.z - p.z); if (d < 64) g.sounds.playAt(m.e, m.x, m.y, m.z, m.v, m.p, true); break; }
+      case 'breakFx': g.particles.spawnBlockBreak(m.x, m.y, m.z, m.s); break;
+      case 'snd': { if (m.o === this.clientId) break; const d = Math.hypot(m.x - p.x, m.y - p.y, m.z - p.z); if (d < 64 || m.a === false) g.sounds.playAtRemote(m.e, m.x, m.y, m.z, m.v, m.p, m.a !== false); break; }
+      case 'music': g.sounds.playMusicRemote(m.name, m.kind, m.v); break;
+      case 'record': { if (m.disc) g.sounds.playRecordRemote(m.disc, m.x, m.y, m.z); else g.sounds.stopRecordRemote(m.x, m.y, m.z); break; }
       case 'time': { w.time = m.time; w.dayTime = m.day; g.weather.rainLevel = m.rain; g.weather.thunderLevel = m.thunder; g.weather.raining = m.raining; g.weather.thundering = m.thundering; g.difficulty = m.diff; break; }
       case 'ent': this.applyEntities(m.e ?? [], m.rm ?? []); break;
       case 'chat': g.gui.addChat(m.text); break;
       case 'actionbar': g.gui.showActionBar(m.text); break;
       case 'players': this.players = m.list; break;
-      case 'hurt': { const attacker = m.ax !== undefined ? ({ x: m.ax, y: m.ay, z: m.az } as any) : undefined; p.hurt({ amount: m.amount, source: m.source, bypassArmor: m.bypassArmor, attacker: attacker as any }); if (attacker) { const dx = p.x - m.ax, dz = p.z - m.az, d = Math.hypot(dx, dz) || 1; p.vx += dx / d * 0.4; p.vz += dz / d * 0.4; p.vy += 0.4; } break; }
+      case 'hurt': {
+        const hook = g.sounds.onSound, enabled = g.sounds.enabled;
+        g.sounds.onSound = null; g.sounds.enabled = false;
+        try { p.hurt({ amount: m.damage, source: m.source ?? 'attack', bypassArmor: true }); }
+        finally { g.sounds.onSound = hook; g.sounds.enabled = enabled; }
+        p.health = m.health; p.absorption = m.absorption ?? p.absorption; p.vx = m.vx; p.vy = m.vy; p.vz = m.vz; p.fireTicks = m.fire ?? p.fireTicks; p.hurtTime = p.hurtDuration;
+        if (m.dead) { p.health = 0; p.isDead = true; }
+        break;
+      }
       case 'give': { const st = ItemStack.deserialize(m.stack, g.items); if (!st) break; const left = p.inventory.add(st); g.sounds.playAt('entity.item.pickup', p.x, p.y, p.z, 0.2, 1.5 + Math.random() * 0.5); if (left > 0) this.send({ t: 'drop', stack: st.serialize(), x: p.x, y: p.y + 1, z: p.z, dir: [0, 0, 0] }); break; }
       case 'givexp': p.addXp(m.v); g.sounds.playAt('entity.experience_orb.pickup', p.x, p.y, p.z, 0.1, 1 + Math.random() * 0.5); break;
       case 'consumed': { p.inventory.slots[p.selectedSlot] = m.held ? ItemStack.deserialize(m.held, g.items) : null; p.inventory.onChange?.(); break; }

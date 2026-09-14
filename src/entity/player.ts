@@ -121,7 +121,7 @@ export class Player extends LivingEntity {
       this.addExhaustion(0.1);
       this.game.sounds.playAt(this.health <= 0 ? 'entity.player.death' : 'entity.player.hurt', this.x, this.y, this.z, 1, 1);
       if (d.attacker) { const dx = d.attacker.x - this.x, dz = d.attacker.z - this.z; this.hurtDir = Math.atan2(dz, dx) * 180 / Math.PI - this.yaw; } else this.hurtDir = 0;
-      this.game.gui.onPlayerHurt();
+      if (!(this as any).isRemote) this.game.gui.onPlayerHurt();
     }
     return r;
   }

@@ -42,7 +42,7 @@ export class NetHost implements WorldListener {
   private dirtyChunks = new Map<number, [number, number]>();
   private blockBatch: number[] = [];
   private queue: any[] = [];
-  private origPlayAt: any;
+  private soundOrigin = 0;
   private ticks = 0;
   hostName = 'Host';
   onStatus: ((s: string) => void) | null = null;
@@ -76,15 +76,14 @@ export class NetHost implements WorldListener {
   private attach(): void {
     const g = this.game;
     g.world.listeners.push(this);
-    // broadcast world sounds
-    this.origPlayAt = g.sounds.playAt.bind(g.sounds);
-    const self = this;
-    g.sounds.playAt = function (event: string, x: number, y: number, z: number, volume = 1, pitch = 1, attenuate = true) { self.origPlayAt(event, x, y, z, volume, pitch, attenuate); if (attenuate !== false || true) self.broadcast({ t: 'snd', e: event, x, y, z, v: volume, p: pitch }); };
+    g.sounds.onSound = (event, x, y, z, volume, pitch, attenuate) => this.broadcast({ t: 'snd', e: event, x, y, z, v: volume, p: pitch, a: attenuate, o: this.soundOrigin });
+    g.sounds.onMusic = (name, kind, volume) => this.broadcast({ t: 'music', name, kind, v: volume });
+    g.sounds.onRecord = (disc, x, y, z) => this.broadcast({ t: 'record', disc, x, y, z });
   }
   private detach(): void {
     const g = this.game;
     if (g.world) g.world.listeners = g.world.listeners.filter((l) => l !== this);
-    if (this.origPlayAt) { g.sounds.playAt = this.origPlayAt; this.origPlayAt = null; }
+    g.sounds.onSound = null; g.sounds.onMusic = null; g.sounds.onRecord = null;
     for (const gu of this.guests.values()) gu.player.remove();
     this.guests.clear();
   }
@@ -163,7 +162,7 @@ export class NetHost implements WorldListener {
     if ([...this.guests.values()].some((x) => x.name === name) || name === this.hostName) { name = name + '_' + id; }
     const p = new RemotePlayer(name);
     p.clientId = id; p.skin = skin === 'alex' ? 'alex' : 'steve';
-    p.hurtHandler = (d) => this.send(id, { t: 'hurt', amount: d.amount, source: d.source, ax: d.attacker?.x, ay: d.attacker?.y, az: d.attacker?.z, bypassArmor: !!d.bypassArmor });
+    p.hurtHandler = (d) => queueMicrotask(() => this.send(id, { t: 'hurt', damage: d.amount, source: d.source, health: p.health, absorption: p.absorption, vx: p.vx, vy: p.vy, vz: p.vz, fire: p.fireTicks, dead: p.health <= 0 }));
     const saved = g.playerData.get(name);
     const spawn = g.worldSpawn ?? [Math.floor(g.player.x), Math.floor(g.player.y), Math.floor(g.player.z)];
     p.setPos(saved?.x ?? spawn[0] + 0.5, saved?.y ?? spawn[1], saved?.z ?? spawn[2] + 0.5); p.tx = p.x; p.ty = p.y; p.tz = p.z;
@@ -171,7 +170,7 @@ export class NetHost implements WorldListener {
     g.addEntity(p);
     const gu: Guest = { id, name, player: p, known: new Set(), chunks: new Set(), wantChunks: new Set(), container: null, ready: false };
     this.guests.set(id, gu);
-    this.send(id, { t: 'welcome', name, hostName: this.hostName, dimension: g.world.dimension, seed: g.world.seed, time: g.world.time, day: g.world.dayTime, spawn, saved: saved ?? null, gameMode: this.opts.gameMode, cheats: this.opts.cheats, difficulty: g.difficulty, rules: g.rules, weather: g.weather.serialize(), version: g.version, protocol: PROTOCOL_VERSION, players: this.playerList() });
+    this.send(id, { t: 'welcome', name, hostName: this.hostName, dimension: g.world.dimension, seed: g.world.seed, time: g.world.time, day: g.world.dayTime, spawn, saved: saved ?? null, gameMode: this.opts.gameMode, cheats: this.opts.cheats, difficulty: g.difficulty, rules: g.rules, weather: g.weather.serialize(), version: g.version, protocol: PROTOCOL_VERSION, players: this.playerList(), music: g.sounds.currentMusic() });
     g.gui.addChat(`§e${name} joined the game`);
     this.broadcast({ t: 'chat', text: `§e${name} joined the game` });
     this.broadcast({ t: 'players', list: this.playerList() });
@@ -217,9 +216,22 @@ export class NetHost implements WorldListener {
         if (m.be) g.blockEntities.put(x, y, z, m.be);
         break;
       }
-      case 'break': { const { x, y, z } = m; if (w.isLoaded(x, z) && Math.abs(x - p.x) < 8 && Math.abs(z - p.z) < 8) g.breakBlock(x, y, z, p, true, true); break; }
+      case 'break': {
+        const { x, y, z } = m; const state = w.getBlock(x, y, z);
+        if (state && w.isLoaded(x, z) && Math.abs(x - p.x) < 8 && Math.abs(y - p.y) < 8 && Math.abs(z - p.z) < 8) { g.breakBlock(x, y, z, p, true, false); this.broadcast({ t: 'breakFx', x, y, z, s: state }); }
+        this.send(gu.id, { t: 'blk', b: [x, y, z, w.getBlock(x, y, z)] });
+        break;
+      }
       case 'use': this.remoteUse(gu, m); break;
-      case 'attack': { const e = g.entities.find((x) => x.id === m.id); if (e instanceof LivingEntity && !e.removed && e.distSq(p.x, p.y, p.z) < 36) { p.attackCooldownTicks = 100; p.attack(e); } break; }
+      case 'attack': { const e = m.id === -1 ? g.player : g.entities.find((x) => x.id === m.id); if (e instanceof LivingEntity && e !== p && !e.removed && e.distSq(p.x, p.y, p.z) < 36) p.attack(e); break; }
+      case 'snd': {
+        const { x, y, z } = m;
+        if (typeof m.e !== 'string' || m.e.length > 128 || !g.sounds.events[m.e.replace(/^minecraft:/, '')] || ![x, y, z, m.v, m.p].every(Number.isFinite) || p.distSq(x, y, z) > 1024) break;
+        this.soundOrigin = gu.id;
+        try { g.sounds.playAt(m.e, x, y, z, Math.max(0, Math.min(16, m.v)), Math.max(0.25, Math.min(4, m.p)), m.a !== false); }
+        finally { this.soundOrigin = 0; }
+        break;
+      }
       case 'interact': {
         const e = g.entities.find((x) => x.id === m.id);
         if (!e || e.removed || e.distSq(p.x, p.y, p.z) > 36) break;
@@ -375,7 +387,7 @@ export class NetHost implements WorldListener {
       const R2 = 96 * 96;
       // host player as an entity
       const hp = g.player;
-      const hostSnap: any = { i: -1, t: 'player', x: r3(hp.x), y: r3(hp.y), z: r3(hp.z), yaw: r1(hp.yaw), pitch: r1(hp.pitch), sneak: hp.isSneaking, sprint: hp.isSprinting, swim: hp.swimmingPose, sleep: hp.sleeping, fly: hp.flying, hurt: hp.hurtTime > 0, dead: hp.health <= 0, swing: hp.swinging && hp.swingTime <= 1, use: !!hp.usingItem, mode: hp.gameMode };
+      const hostSnap: any = { i: -1, t: 'player', x: r3(hp.x), y: r3(hp.y), z: r3(hp.z), yaw: r1(hp.yaw), pitch: r1(hp.pitch), sneak: hp.isSneaking, sprint: hp.isSprinting, swim: hp.swimmingPose, sleep: hp.sleeping, fly: hp.flying, hurt: hp.hurtTime > 0, dead: hp.health <= 0, swing: hp.swinging && hp.swingTime <= 1, use: !!hp.usingItem, mode: hp.gameMode, br: hp.breaking ? { x: hp.breaking.x, y: hp.breaking.y, z: hp.breaking.z, stage: hp.breakStage, state: hp.breaking.state } : null };
       if (!gu.known.has(-1)) { hostSnap.full = { name: this.hostName, skin: g.options.skin }; gu.known.add(-1); }
       if (this.ticks % 10 === 0) hostSnap.held = hp.heldItem()?.serialize() ?? null, hostSnap.armor = hp.armor.serialize();
       ents.push(hostSnap); seen.add(-1);
@@ -395,7 +407,7 @@ export class NetHost implements WorldListener {
     const first = !gu.known.has(e.id);
     const s: any = { i: e.id, x: r3(e.x), y: r3(e.y), z: r3(e.z), yaw: r1(e.yaw), pitch: r1(e.pitch) };
     if (e instanceof RemotePlayer) {
-      s.t = 'player'; s.sneak = e.isSneaking; s.sprint = e.isSprinting; s.swim = e.swimmingPose; s.sleep = e.sleeping; s.fly = e.flying; s.hurt = e.hurtTime > 0; s.dead = e.health <= 0; s.swing = e.swinging && e.swingTime <= 1; s.mode = e.gameMode; s.use = !!e.usingItem;
+      s.t = 'player'; s.sneak = e.isSneaking; s.sprint = e.isSprinting; s.swim = e.swimmingPose; s.sleep = e.sleeping; s.fly = e.flying; s.hurt = e.hurtTime > 0; s.dead = e.health <= 0; s.swing = e.swinging && e.swingTime <= 1; s.mode = e.gameMode; s.use = !!e.usingItem; s.br = e.breaking ? { x: e.breaking.x, y: e.breaking.y, z: e.breaking.z, stage: e.breakStage, state: e.breaking.state } : null;
       if (first) s.full = { name: e.name, skin: e.skin };
       if (this.ticks % 10 === 0 || first) { s.held = e.heldItem()?.serialize() ?? null; s.armor = e.armor.serialize(); }
     } else if (e instanceof Mob) {

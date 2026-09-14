@@ -5,7 +5,7 @@
 //   guest -> relay: [payload]           relay -> host: [u32 fromClientId] [payload]
 // Payload: [u8 kind] [u32 jsonLength] [json utf8] [binary body]
 
-export const PROTOCOL_VERSION = 4;
+export const PROTOCOL_VERSION = 6;
 
 /** A server as advertised by a relay. `private` servers need a password; `official` is the backend's own world. */
 export type ServerInfo = { id: string; name: string; host: string; motd: string; players: number; maxPlayers: number; gameMode: string; version: string; private: boolean; official: boolean; online?: boolean };

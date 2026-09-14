@@ -25,6 +25,11 @@ export class SoundManager {
   enabled = true;
   subtitles: { text: string; time: number; x: number; y: number; z: number }[] = [];
   private playing: { src: AudioBufferSourceNode; gain: GainNode; panner: PannerNode | null; x: number; y: number; z: number; attenuate: boolean }[] = [];
+  /** Multiplayer hooks. Network playback uses the *Remote methods to avoid echoing events. */
+  onSound: ((event: string, x: number, y: number, z: number, volume: number, pitch: number, attenuate: boolean) => void) | null = null;
+  onMusic: ((name: string, kind: string, volume: number) => void) | null = null;
+  onRecord: ((disc: string | null, x?: number, y?: number, z?: number) => void) | null = null;
+  musicControlled = false;
 
   constructor(private assets: Assets) {
     for (const [event, def] of Object.entries(assets.data.sounds)) {
@@ -52,6 +57,11 @@ export class SoundManager {
     if (this.record) this.record.el.volume = Math.min(1, this.volumes.master * this.volumes.record);
   }
   private musicVolumeScale = 1;
+  private musicName = '';
+  currentMusic(): { name: string; kind: string; volume: number } | null {
+    if (!this.music || this.music.paused || this.music.ended) return null;
+    return this.musicName ? { name: this.musicName, kind: this.musicKind, volume: this.musicVolumeScale } : null;
+  }
 
   private category(event: string): SoundCategory {
     if (event.startsWith('music.') ) return 'music';
@@ -93,6 +103,12 @@ export class SoundManager {
 
   /** Positional sound. */
   playAt(event: string, x: number, y: number, z: number, volume = 1, pitch = 1, attenuate = true): void {
+    this.onSound?.(event, x, y, z, volume, pitch, attenuate);
+    this.playAtRemote(event, x, y, z, volume, pitch, attenuate);
+  }
+
+  /** Play a sound received from the network without sending it back. */
+  playAtRemote(event: string, x: number, y: number, z: number, volume = 1, pitch = 1, attenuate = true): void {
     if (!this.ctx || !this.enabled) return;
     const entry = this.pick(event);
     if (!entry) return;
@@ -154,6 +170,7 @@ export class SoundManager {
   // ---------- music ----------
   /** kind: 'menu' | 'game' | 'creative' | 'nether.<biome>' | 'end' | 'under_water' */
   tickMusic(kind: string, dtTicks: number): void {
+    if (this.musicControlled) return;
     if (!this.assets.manifest?.music && !this.events['music.' + kind]) return;
     if (this.record) return;
     if (this.music && !this.music.paused && !this.music.ended) { if (this.musicKind !== kind && (kind === 'menu' || this.musicKind === 'menu')) { this.stopMusic(); } else return; }
@@ -163,9 +180,18 @@ export class SoundManager {
     const entry = this.pick('music.' + kind);
     if (!entry) { this.musicTimer = 1200; return; }
     this.musicKind = kind;
-    const el = new Audio(`./assets/sounds/${entry.name}.ogg`);
-    this.musicVolumeScale = entry.volume;
-    el.volume = Math.min(1, this.volumes.master * this.volumes.music * entry.volume);
+    this.onMusic?.(entry.name, kind, entry.volume);
+    this.playMusicRemote(entry.name, kind, entry.volume);
+  }
+
+  /** Start the exact soundtrack selected by the multiplayer host. */
+  playMusicRemote(name: string, kind: string, volume = 1): void {
+    if (this.music) this.music.pause();
+    const el = new Audio(`./assets/sounds/${name}.ogg`);
+    this.musicName = name;
+    this.musicKind = kind;
+    this.musicVolumeScale = volume;
+    el.volume = Math.min(1, this.volumes.master * this.volumes.music * volume);
     el.play().catch(() => { this.musicTimer = 200; });
     this.music = el;
     this.musicTimer = 1e9;
@@ -174,7 +200,11 @@ export class SoundManager {
   fadeMusicForRecord(): void { this.stopMusic(); }
 
   playRecord(disc: string, x: number, y: number, z: number): void {
-    this.stopRecord();
+    this.onRecord?.(disc, x, y, z);
+    this.playRecordRemote(disc, x, y, z);
+  }
+  playRecordRemote(disc: string, x: number, y: number, z: number): void {
+    this.stopRecordRemote();
     const entry = this.pick('music_disc.' + disc.replace('music_disc_', ''));
     if (!entry) return;
     this.stopMusic();
@@ -183,7 +213,8 @@ export class SoundManager {
     el.play().catch(() => {});
     this.record = { el, x, y, z };
   }
-  stopRecord(x?: number, y?: number, z?: number): void { void x; void y; void z; if (this.record) { this.record.el.pause(); this.record = null; } }
+  stopRecord(x?: number, y?: number, z?: number): void { this.onRecord?.(null, x, y, z); this.stopRecordRemote(x, y, z); }
+  stopRecordRemote(x?: number, y?: number, z?: number): void { void x; void y; void z; if (this.record) { this.record.el.pause(); this.record = null; } }
   updateRecord(): void {
     if (!this.record) return;
     const r = this.record;
