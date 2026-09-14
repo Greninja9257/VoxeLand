@@ -19,7 +19,7 @@ export class MultiplayerScreen extends Screen {
   build(): void {
     const g = this.gui.game;
     const cx = this.width / 2;
-    this.nameField = new TextField(cx - 118, 4, 120, 12, g.options.playerName);
+    this.nameField = new TextField(cx - 118, 6, 120, 12, g.options.playerName);
     this.nameField.maxLength = 16; this.nameField.placeholder = 'Player name'; this.nameField.bordered = false;
     this.nameField.onChange = (t) => { g.options.playerName = t.replace(/[^\w]/g, '').slice(0, 16); if (g.player && !g.isRemote && !g.host) g.player.name = g.options.playerName || 'Player'; };
     this.add(this.nameField);
