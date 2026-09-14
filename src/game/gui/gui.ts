@@ -4,6 +4,8 @@ import { MinecraftFont, loadImg } from './font';
 import type { Screen } from './widgets';
 import type { ItemStack, Inventory } from '../../items/stack';
 import { ContainerScreen, InventoryScreen, CraftingScreen, FurnaceScreen, CreativeScreen, StonecutterScreen, AnvilScreen, EnchantingScreen, SmithingScreen, GrindstoneScreen, BrewingScreen, TradingScreen } from './containers';
+import { EnderDragonEntity, WitherEntity } from '../../entity/boss';
+import { LivingEntity } from '../../entity/entity';
 import { ChatScreen, DeathScreen, PauseScreen, TitleScreen } from './screens';
 import type { BlockEntity } from '../blockEntities';
 import { BIOMES } from '../../world/gen/biomes';
@@ -24,6 +26,7 @@ export class Gui {
   heldItemName = { text: '', time: 0 };
   hideHud = false;
   showDebug = false;
+  showPlayerList = false;
   hurtFlash = 0;
   private tooltip: { lines: string[]; x: number; y: number } | null = null;
   private nameTags: { text: string; x: number; y: number; z: number }[] = [];
@@ -266,6 +269,7 @@ export class Gui {
     const g = this.game;
     if (g.inWorld && !this.hideHud && !(this.screen && this.screen.hidesHud)) this.drawHud(ctx, partial);
     if (g.inWorld && this.showDebug && !(this.screen && this.screen.hidesHud)) this.drawDebug(ctx);
+    if (g.inWorld && (this.showPlayerList || g.input.isDown('playerList')) && !(this.screen && this.screen.hidesHud)) this.drawPlayerList(ctx);
     if (this.screen) { this.screen.drawBackground(ctx); this.screen.render(ctx, this.mouseX, this.mouseY, partial); }
     if (this.screen && this.game.input.pointerLocked && this.game.input.softCursor) this.drawCursor(ctx);
     this.drawTooltip(ctx);
@@ -281,9 +285,9 @@ export class Gui {
     if (p.fireTicks > 0 && !p.isFireImmune()) { const t = this.sprite('block/fire_1'); if (t) { ctx.save(); ctx.globalAlpha = 0.9; const fh = h * 0.5; ctx.drawImage(t, 0, 0, 16, 16, 0, h - fh, w, fh); ctx.restore(); } }
     if (p.armor.get(0)?.item.name === 'carved_pumpkin' && this.thirdPerson === 0) this.drawSprite(ctx, 'misc/pumpkinblur', 0, 0, w, h);
     if (this.spyglass) { const s = this.sprite('misc/spyglass_scope'); if (s) { const size = Math.min(w, h); ctx.fillStyle = '#000'; ctx.fillRect(0, 0, w, h); ctx.drawImage(s, (w - size) / 2, (h - size) / 2, size, size); } }
-    if (p.isInPortal || p.inPortalTicks > 0) { ctx.fillStyle = `rgba(120,40,200,${Math.min(0.6, p.inPortalTicks / 80 * 0.6 + 0.1)})`; ctx.fillRect(0, 0, w, h); }
-    if (this.hurtFlash > 0) { ctx.fillStyle = `rgba(255,0,0,${this.hurtFlash / 120})`; ctx.fillRect(0, 0, w, h); }
-    if (g.weather.flash > 0) { ctx.fillStyle = `rgba(255,255,255,${g.weather.flash / 12})`; ctx.fillRect(0, 0, w, h); }
+    // vanilla Gui.renderPortalOverlay: the animated nether_portal sprite over the whole screen, alpha = portal time
+    { const pt = p.prevPortalTime + (p.portalTime - p.prevPortalTime) * partial; if (pt > 0) { const img = this.sprite('block/nether_portal'); if (img) { const frames = Math.max(1, Math.floor(img.height / 16)), fi = Math.floor(g.world.time / 2) % frames; ctx.save(); ctx.globalAlpha = Math.min(1, pt); ctx.imageSmoothingEnabled = false; ctx.drawImage(img, 0, fi * 16, 16, 16, 0, 0, w, h); ctx.restore(); } } }
+    if (g.weather.flash > 0 && !g.options.hideLightningFlashes) { ctx.fillStyle = `rgba(255,255,255,${g.weather.flash / 12})`; ctx.fillRect(0, 0, w, h); }
     if (p.hasEffect('blindness')) { ctx.fillStyle = 'rgba(0,0,0,0.85)'; ctx.fillRect(0, 0, w, h); }
     if (p.hasEffect('darkness')) { ctx.fillStyle = `rgba(0,0,0,${0.5 + 0.3 * Math.sin(performance.now() / 500)})`; ctx.fillRect(0, 0, w, h); }
     // vignette
@@ -299,6 +303,24 @@ export class Gui {
     }
     if (this.spyglass) return;
     const cx = Math.floor(w / 2);
+    // boss bars (vanilla BossHealthOverlay: 182x5 bars stacked from y=12, name above)
+    { let by = 12;
+      for (const e of g.entities) {
+        if (e.removed) continue;
+        let name = '', color = '', hp = 0;
+        if (e instanceof EnderDragonEntity) { name = 'Ender Dragon'; color = 'pink'; hp = e.health / e.maxHealth; }
+        else if (e instanceof WitherEntity) { if (e.distSq(p.x, p.y, p.z) > 80 * 80) continue; name = 'Wither'; color = 'purple'; hp = e.health / e.maxHealth; }
+        else if (e.remote && (e.type === 'ender_dragon' || e.type === 'wither') && e instanceof LivingEntity) { name = e.type === 'wither' ? 'Wither' : 'Ender Dragon'; color = e.type === 'wither' ? 'purple' : 'pink'; hp = e.health / e.maxHealth; }
+        else continue;
+        const bx = cx - 91;
+        this.drawSprite(ctx, `gui/sprites/boss_bar/${color}_background`, bx, by, 182, 5);
+        const pw = Math.floor(182 * Math.max(0, Math.min(1, hp)));
+        if (pw > 0) this.drawSprite(ctx, `gui/sprites/boss_bar/${color}_progress`, bx, by, pw, 5, 0, 0, pw, 5);
+        this.font.drawCentered(ctx, name, cx, by - 9, 0xffffff);
+        by += 10 + 9;
+        if (by > h / 3) break;
+      }
+    }
     // crosshair
     if (this.thirdPerson === 0 && !this.screen) {
       ctx.save(); ctx.globalCompositeOperation = 'difference';
@@ -307,7 +329,7 @@ export class Gui {
       const held = p.heldItem();
       const speed = held ? held.item.attackSpeed : 4;
       const cd = Math.min(1, (p.attackCooldownTicks + partial) / (20 / speed));
-      if (cd < 1 && g.options.attackIndicator) { const ax = cx - 8, ay = Math.floor(h / 2) + 8; this.drawSprite(ctx, 'gui/sprites/hud/crosshair_attack_indicator_background', ax, ay, 16, 4); const pw = Math.floor(16 * cd); this.drawSprite(ctx, 'gui/sprites/hud/crosshair_attack_indicator_progress', ax, ay, pw, 4, 0, 0, pw, 4); }
+      if (cd < 1 && g.options.attackIndicator === 'crosshair') { const ax = cx - 8, ay = Math.floor(h / 2) + 8; this.drawSprite(ctx, 'gui/sprites/hud/crosshair_attack_indicator_background', ax, ay, 16, 4); const pw = Math.floor(16 * cd); this.drawSprite(ctx, 'gui/sprites/hud/crosshair_attack_indicator_progress', ax, ay, pw, 4, 0, 0, pw, 4); }
       ctx.restore();
     }
     if (p.isSpectator) return;
@@ -318,6 +340,12 @@ export class Gui {
     const off = p.offhandItem();
     if (off) { this.drawSprite(ctx, 'gui/sprites/hud/hotbar_offhand_left', hx - 29, hy - 1, 29, 24); this.drawItem(ctx, off, hx - 29 + 3, hy + 3); }
     for (let i = 0; i < 9; i++) this.drawItem(ctx, p.inventory.get(i), hx + 3 + i * 20, hy + 3);
+    // hotbar attack indicator (vanilla: sword icon beside the hotbar, opposite the offhand)
+    if (g.options.attackIndicator === 'hotbar') {
+      const held = p.heldItem(); const speed = held ? held.item.attackSpeed : 4;
+      const cd = Math.min(1, (p.attackCooldownTicks + partial) / (20 / speed));
+      if (cd < 1) { const ax = hx + 182 + 6, ay = hy + 2; this.drawSprite(ctx, 'gui/sprites/hud/hotbar_attack_indicator_background', ax, ay, 18, 18); const ph = Math.floor(18 * cd); this.drawSprite(ctx, 'gui/sprites/hud/hotbar_attack_indicator_progress', ax, ay + 18 - ph, 18, ph, 0, 18 - ph, 18, ph); }
+    }
     if (!p.isCreative || true) {
       const survival = !p.isCreative && !p.isSpectator;
       if (survival) {
@@ -386,7 +414,17 @@ export class Gui {
       for (const s of g.sounds.subtitles.slice(-6).reverse()) { const dir = this.subtitleDir(s.x, s.z); const text = `${dir[0]} ${s.text} ${dir[1]}`; const tw = this.font.width(text); ctx.fillStyle = `rgba(0,0,0,${0.7 * Math.min(1, s.time / 20)})`; ctx.fillRect(w - tw - 14, sy - 2, tw + 8, 11); this.font.draw(ctx, text, w - tw - 10, sy, 0xffffff, true, Math.min(1, s.time / 20)); sy -= 12; }
     }
     // name tags
-    for (const n of this.nameTags) { const pr = g.project(n.x, n.y, n.z); if (pr) { const sx = pr[0] / this.scale, sy = pr[1] / this.scale; const tw = this.font.width(n.text); ctx.fillStyle = 'rgba(0,0,0,0.25)'; ctx.fillRect(sx - tw / 2 - 1, sy - 1, tw + 2, 10); this.font.drawCentered(ctx, n.text, sx, sy, 0xffffff, false); } }
+    for (const n of this.nameTags) {
+      const pr = g.project(n.x, n.y, n.z);
+      if (!pr) continue;
+      const sx = pr[0] / this.scale, sy = pr[1] / this.scale;
+      const nameScale = this.game.canvas.height * this.game.renderer.proj[5] * 0.025 / (2 * pr[2] * this.scale);
+      const tw = this.font.width(n.text);
+      ctx.save(); ctx.translate(sx, sy); ctx.scale(nameScale, nameScale);
+      ctx.fillStyle = 'rgba(0,0,0,0.25)'; ctx.fillRect(-tw / 2 - 1, -1, tw + 2, 10);
+      this.font.drawCentered(ctx, n.text, 0, 0, 0xffffff, false);
+      ctx.restore();
+    }
   }
 
   private subtitleDir(x: number, z: number): [string, string] {
@@ -398,23 +436,64 @@ export class Gui {
     return right < -1 ? ['<', ''] : right > 1 ? ['', '>'] : ['', ''];
   }
 
+  /** Scroll offset (lines) while the chat is open; vanilla ChatComponent.scrollChat. */
+  chatScroll = 0;
   drawChat(ctx: CanvasRenderingContext2D, all: boolean): void {
+    const g = this.game, o = g.options;
+    if (o.chatVisibility === 'hidden') return;
     const h = this.height;
+    const scale = 0.5 + o.chatScale * 0.5; // vanilla chat scale option
+    const width = Math.round(40 + o.chatWidth * 280);
+    const maxLines = Math.round((20 + (all ? o.chatFocusedHeight : o.chatUnfocusedHeight) * 160) / 9);
     const lines: { text: string; alpha: number }[] = [];
-    for (const c of this.chat.slice(-20)) {
+    for (const c of this.chat) {
       if (!all && c.time > 200) continue;
-      const alpha = all ? 1 : c.time > 180 ? (200 - c.time) / 20 : 1;
-      for (const l of this.font.wrap(c.text, 320)) lines.push({ text: l, alpha });
+      if (o.chatVisibility === 'system' && !c.text.startsWith('§') && /^<.*>/.test(c.text)) continue;
+      const alpha = (all ? 1 : c.time > 180 ? (200 - c.time) / 20 : 1) * (0.1 + o.chatOpacity * 0.9);
+      for (const l of this.font.wrap(c.text, width / scale - 4)) lines.push({ text: l, alpha });
     }
-    let y = h - 48 - (all ? 4 : 0) - 9 * lines.length + 9;
-    for (const l of lines) {
-      ctx.fillStyle = `rgba(0,0,0,${0.5 * l.alpha})`; ctx.fillRect(2, y - 1, 324, 9);
-      this.font.draw(ctx, l.text, 4, y, 0xffffff, true, l.alpha);
-      y += 9;
+    if (!all) this.chatScroll = 0;
+    this.chatScroll = Math.max(0, Math.min(this.chatScroll, Math.max(0, lines.length - maxLines)));
+    const end = lines.length - this.chatScroll, start = Math.max(0, end - maxLines);
+    const shown = lines.slice(start, end);
+    const lineH = 9 * scale;
+    let y = h - 48 - (all ? 4 : 0) - lineH * shown.length + lineH;
+    for (const l of shown) {
+      ctx.fillStyle = `rgba(0,0,0,${o.textBackgroundOpacity * l.alpha})`; ctx.fillRect(2, y - 1, width + 4, lineH);
+      ctx.save(); ctx.translate(4, y); ctx.scale(scale, scale);
+      this.font.draw(ctx, l.text, 0, 0, 0xffffff, true, l.alpha);
+      ctx.restore();
+      y += lineH;
+    }
+    if (all && lines.length > maxLines) { // scrollbar like vanilla
+      const barH = Math.max(4, maxLines / lines.length * (maxLines * lineH));
+      const by = h - 48 - 4 - (this.chatScroll / (lines.length - maxLines)) * (maxLines * lineH - barH) - barH + lineH;
+      ctx.fillStyle = 'rgba(190,190,190,0.7)'; ctx.fillRect(width + 4, by, 2, barH);
     }
   }
 
   private drawTiledFull(ctx: CanvasRenderingContext2D, name: string, alpha: number): void { this.drawTiled(ctx, name, 0, 0, this.width, this.height, 64, alpha); }
+
+  /** Tab list: every player in the world (vanilla PlayerTabOverlay). */
+  private drawPlayerList(ctx: CanvasRenderingContext2D): void {
+    const g = this.game;
+    let names: string[];
+    if (g.client) names = g.client.players.map((p) => p.name);
+    else if (g.host) names = g.host.playerList().map((p) => p.name);
+    else names = [g.player.name];
+    const cols = Math.max(1, Math.ceil(names.length / 20)), rows = Math.ceil(names.length / cols);
+    const cw = 120, w = cols * (cw + 5) + 5, h = rows * 9 + 12;
+    const x0 = Math.floor((this.width - w) / 2), y0 = 10;
+    ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(x0, y0, w, h);
+    const title = g.client ? `${g.client.welcome?.hostName ?? 'Host'}'s world · ping ${g.client.ping} ms` : g.host ? `${g.worldMeta?.name ?? 'World'} (open to ${g.host.isPublic ? 'public' : 'LAN'})` : g.worldMeta?.name ?? 'Singleplayer';
+    this.font.drawCentered(ctx, title, x0 + w / 2, y0 + 2, 0xffffff);
+    names.forEach((n, i) => {
+      const c = Math.floor(i / rows), r = i % rows;
+      const x = x0 + 5 + c * (cw + 5), y = y0 + 12 + r * 9;
+      ctx.fillStyle = 'rgba(255,255,255,0.15)'; ctx.fillRect(x, y - 1, cw, 9);
+      this.font.draw(ctx, n, x + 2, y, n === g.player.name ? 0xffff55 : 0xffffff);
+    });
+  }
 
   private drawDebug(ctx: CanvasRenderingContext2D): void {
     const g = this.game, p = g.player;

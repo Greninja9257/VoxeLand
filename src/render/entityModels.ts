@@ -96,7 +96,7 @@ const MODELS: Record<string, ModelDef> = {
   creeper: creeper(),
   spider: spider(),
   // 1.21.5+ pig/cow textures are 64x64 (same layout in the top half; the cow gained a nose at texOffs(0,32))
-  pig: { ...quadruped(6), texH: 64 },
+  pig: { ...quadruped(6, 28, 8, { headBoxes: [box(-4, -4, -8, 8, 8, 8, 0, 0), box(-2, 0, -9, 4, 3, 1, 16, 16)] }), texH: 64 },
   cow: {
     texW: 64, texH: 64,
     parts: [
@@ -293,9 +293,9 @@ const MODELS: Record<string, ModelDef> = {
     texW: 128, texH: 64,
     parts: [
       part('head', [0, 19, -10], [box(-3, -1, -3, 6, 5, 6, 3, 0)]),
-      part('body', [0, 11, -10], [box(-9.5, 3, 0, 19, 20, 6, 7, 37)], { rot: [Math.PI / 2, 0, 0] }),
-      part('leg0', [-3.5, 22, 11], [box(-1, 0, 0, 4, 1, 10, 1, 23)]),
-      part('leg1', [3.5, 22, 11], [box(-3, 0, 0, 4, 1, 10, 1, 12)]),
+      part('body', [0, 11, -10], [box(-9.5, 3, -10, 19, 20, 6, 7, 37), box(-4.5, 3, -14, 9, 18, 1, 70, 33)], { rot: [Math.PI / 2, 0, 0] }),
+      part('leg0', [-3.5, 22, 11], [box(-2, 0, 0, 4, 1, 10, 1, 23)]),
+      part('leg1', [3.5, 22, 11], [box(-2, 0, 0, 4, 1, 10, 1, 12)]),
       part('leg2', [-5, 21, -4], [box(-13, 0, -2, 13, 1, 5, 27, 30)]),
       part('leg3', [5, 21, -4], [box(0, 0, -2, 13, 1, 5, 27, 24)]),
     ],
@@ -393,6 +393,39 @@ const MODELS: Record<string, ModelDef> = {
 };
 
 /** Resolve a model name (with fallback to a humanoid). */
+// vanilla BoatModel (128x64) and RaftModel; the paddles are children so they rotate at the oarlock
+MODELS.boat = {
+  texW: 128, texH: 64,
+  parts: [
+    part('bottom', [0, 3, 1], [box(-14, -9, -3, 28, 16, 3, 0, 0)], { rot: [Math.PI / 2, 0, 0] }),
+    part('back', [-15, 4, 4], [box(-13, -7, -1, 18, 6, 2, 0, 19)], { rot: [0, Math.PI * 1.5, 0] }),
+    part('front', [15, 4, 0], [box(-8, -7, -1, 16, 6, 2, 0, 27)], { rot: [0, Math.PI / 2, 0] }),
+    part('right', [0, 4, -9], [box(-14, -7, -1, 28, 6, 2, 0, 35)], { rot: [0, Math.PI, 0] }),
+    part('left', [0, 4, 9], [box(-14, -7, -1, 28, 6, 2, 0, 43)]),
+    part('paddleL', [3, -5, 9], [box(-1, 0, -5, 2, 2, 18, 62, 0), box(-1.01, -3, 8, 1, 6, 7, 62, 20)], { rot: [0, 0, 0.19634955] }),
+    part('paddleR', [3, -5, -9], [box(-1, 0, -5, 2, 2, 18, 62, 0), box(-1.01, -3, 8, 1, 6, 7, 62, 20)], { rot: [0, Math.PI, 0.19634955] }),
+  ],
+};
+MODELS.chest_boat = { ...MODELS.boat, parts: [...MODELS.boat.parts, part('chest_bottom', [-2, 3, 4], [box(0, 0, 0, 12, 8, 12, 0, 76 - 64)], { rot: [0, Math.PI * 1.5, 0] })] };
+MODELS.raft = {
+  texW: 128, texH: 64,
+  parts: [
+    part('bottom', [0, -3, 1], [box(-14, -11, -4, 28, 20, 4, 0, 0), box(-14, -9, -8, 28, 16, 4, 0, 0)], { rot: [Math.PI / 2, 0, 0] }),
+    part('paddleL', [3, -4, 9], [box(-1, 0, -5, 2, 2, 18, 62, 0), box(-1.01, -3, 8, 1, 6, 7, 62, 20)], { rot: [0, 0, 0.19634955] }),
+    part('paddleR', [3, -4, -9], [box(-1, 0, -5, 2, 2, 18, 62, 0), box(-1.01, -3, 8, 1, 6, 7, 62, 20)], { rot: [0, Math.PI, 0.19634955] }),
+  ],
+};
+
+// vanilla EndCrystalModel (texture 128x64 in the current pack)
+MODELS.end_crystal = {
+  texW: 128, texH: 64,
+  parts: [
+    part('glass', [0, 0, 0], [box(-4, -4, -4, 8, 8, 8, 0, 0)]),
+    part('cube', [0, 0, 0], [box(-4, -4, -4, 8, 8, 8, 32, 0)]),
+    part('base', [0, 0, 0], [box(-6, 0, -6, 12, 4, 12, 0, 16)]),
+  ],
+};
+
 export function getModel(name: string): ModelDef {
   return MODELS[name] ?? MODELS.zombie;
 }

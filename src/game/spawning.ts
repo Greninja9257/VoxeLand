@@ -1,6 +1,7 @@
 // Natural mob spawning (hostile at night/dark, passive on grass, water mobs, ambient bats, phantoms).
 import type { Game } from './game';
 import { Mob, MOB_DEFS } from '../entity/mobs';
+import { EndCrystalEntity } from '../entity/boss';
 import { BIOMES } from '../world/gen/biomes';
 import type { Chunk } from '../world/chunk';
 import { SEA_LEVEL } from '../world/chunk';
@@ -106,8 +107,22 @@ export class Spawner {
   }
 
   /** Animals spawned when a chunk is first generated. */
+  /** End crystals sit on the obsidian pillars (positions mirror EndGen) until the dragon is slain. */
+  private populateEndCrystals(c: Chunk): void {
+    const g = this.game;
+    for (let i = 0; i < 10; i++) {
+      const a = (i / 10) * Math.PI * 2;
+      const px = Math.round(Math.cos(a) * 42), pz = Math.round(Math.sin(a) * 42);
+      if ((px >> 4) !== c.cx || (pz >> 4) !== c.cz) continue;
+      const h = 76 + (i * 7) % 28;
+      if (g.entities.some((e) => e instanceof EndCrystalEntity && Math.floor(e.x) === px && Math.floor(e.z) === pz)) continue;
+      const cr = new EndCrystalEntity(); cr.setPos(px + 0.5, h + 1, pz + 0.5);
+      g.addEntity(cr);
+    }
+  }
   populateChunk(c: Chunk): void {
     const g = this.game;
+    if (g.world.dimension === 'the_end' && g.dragonKills === 0) this.populateEndCrystals(c);
     if (g.world.dimension !== 'overworld') { if (g.world.dimension === 'the_nether' && Math.random() < 0.15) { const b = BIOMES[c.biomes[0]]; const list = b.hostile.concat(b.passive); if (list.length) { const name = list[Math.floor(Math.random() * list.length)]; for (let i = 0; i < 2; i++) { const x = c.cx * 16 + Math.random() * 16, z = c.cz * 16 + Math.random() * 16; let y = 100; while (y > 32 && g.world.getBlock(Math.floor(x), y - 1, Math.floor(z)) === 0) y--; if (MOB_DEFS[name] && this.canSpawnAt(MOB_DEFS[name], x, y, z, 'hostile')) g.spawnMob(name, x, y, z); } } } return; }
     if (Math.random() > 0.1) return;
     const biome = BIOMES[c.biomes[136]];

@@ -42,17 +42,17 @@ export const MOB_DEFS: Record<string, MobDef> = {
   spider: D('spider', 16, 0.3, 2, 1.4, 0.9, 'hostile', 'spider', 'entity/spider/spider', { melee: true, arthropod: true, climb: true, spider: true, lightSensitive: true }, 5),
   cave_spider: D('cave_spider', 12, 0.3, 2, 0.7, 0.5, 'hostile', 'spider', 'entity/spider/cave_spider', { melee: true, arthropod: true, climb: true, spider: true }, 5),
   enderman: D('enderman', 40, 0.3, 7, 0.6, 2.9, 'neutral', 'enderman', 'entity/enderman/enderman', { melee: true, enderman: true, teleport: true, neutral: true, followRange: 64 }, 5),
-  witch: D('witch', 26, 0.25, 0, 0.6, 1.95, 'hostile', 'villager', 'entity/witch', { ranged: 'potion', rangedInterval: 60 }, 5),
+  witch: D('witch', 26, 0.25, 0, 0.6, 1.95, 'hostile', 'villager', 'entity/witch/witch', { ranged: 'potion', rangedInterval: 60 }, 5),
   slime: D('slime', 16, 0.3, 4, 2.04, 2.04, 'hostile', 'slime', 'entity/slime/slime', { melee: true, slime: true }, 4),
   magma_cube: D('magma_cube', 16, 0.3, 6, 2.04, 2.04, 'hostile', 'magma_cube', 'entity/slime/magmacube', { melee: true, slime: true }, 4, { fireImmune: true }),
-  phantom: D('phantom', 20, 0.3, 6, 0.9, 0.5, 'hostile', 'phantom', 'entity/phantom', { fly: true, phantom: true, burnsInDay: true, undead: true, melee: true }, 5),
+  phantom: D('phantom', 20, 0.3, 6, 0.9, 0.5, 'hostile', 'phantom', 'entity/phantom/phantom', { fly: true, phantom: true, burnsInDay: true, undead: true, melee: true }, 5),
   zombified_piglin: D('zombified_piglin', 20, 0.23, 5, 0.6, 1.95, 'neutral', 'zombie', 'entity/piglin/zombified_piglin', { melee: true, undead: true, neutral: true, pack: true }, 5, { fireImmune: true }),
   piglin: D('piglin', 16, 0.35, 5, 0.6, 1.95, 'hostile', 'zombie', 'entity/piglin/piglin', { melee: true }, 5, { fireImmune: true }),
   piglin_brute: D('piglin_brute', 50, 0.35, 7, 0.6, 1.95, 'hostile', 'zombie', 'entity/piglin/piglin_brute', { melee: true }, 20, { fireImmune: true }),
   hoglin: D('hoglin', 40, 0.3, 6, 1.4, 1.4, 'hostile', 'hoglin', 'entity/hoglin/hoglin', { melee: true }, 5),
   zoglin: D('zoglin', 40, 0.3, 6, 1.4, 1.4, 'hostile', 'hoglin', 'entity/hoglin/zoglin', { melee: true, undead: true }, 5),
   ghast: D('ghast', 10, 0.02, 0, 4, 4, 'hostile', 'ghast', 'entity/ghast/ghast', { fly: true, ghast: true, ranged: 'fireball', rangedInterval: 60, followRange: 64, attackRange: 64 }, 5, { fireImmune: true }),
-  blaze: D('blaze', 20, 0.23, 6, 0.6, 1.8, 'hostile', 'blaze', 'entity/blaze', { fly: true, ranged: 'fire_charge', rangedInterval: 40, melee: true, followRange: 48, attackRange: 3 }, 10, { fireImmune: true }),
+  blaze: D('blaze', 20, 0.23, 6, 0.6, 1.8, 'hostile', 'blaze', 'entity/blaze/blaze', { fly: true, ranged: 'fire_charge', rangedInterval: 40, melee: true, followRange: 48, attackRange: 3 }, 10, { fireImmune: true }),
   strider: D('strider', 20, 0.175, 0, 0.9, 1.7, 'passive', 'strider', 'entity/strider/strider', { lavaWalk: true, tempt: ['warped_fungus'], breed: ['warped_fungus'] }, 2, { fireImmune: true }),
   pig: D('pig', 10, 0.25, 0, 0.9, 0.9, 'passive', 'pig', 'entity/pig/pig_temperate', { flee: true, tempt: ['carrot', 'potato', 'beetroot'], breed: ['carrot', 'potato', 'beetroot'] }, 2),
   cow: D('cow', 10, 0.2, 0, 0.9, 1.4, 'passive', 'cow', 'entity/cow/cow_temperate', { flee: true, tempt: ['wheat'], breed: ['wheat'] }, 2),
@@ -72,9 +72,9 @@ export const MOB_DEFS: Record<string, MobDef> = {
   polar_bear: D('polar_bear', 30, 0.25, 6, 1.4, 1.4, 'neutral', 'polar_bear', 'entity/bear/polarbear', { melee: true, neutral: true }, 5),
   parrot: D('parrot', 6, 0.2, 0, 0.5, 0.9, 'passive', 'parrot', 'entity/parrot/parrot_red_blue', { flee: true, fly: true, tameable: ['wheat_seeds', 'melon_seeds', 'pumpkin_seeds', 'beetroot_seeds'] }, 2),
   bee: D('bee', 10, 0.3, 2, 0.7, 0.6, 'neutral', 'bee', 'entity/bee/bee', { fly: true, neutral: true, melee: true, breed: ['dandelion', 'poppy'] }, 2),
-  turtle: D('turtle', 30, 0.1, 0, 1.2, 0.4, 'passive', 'turtle', 'entity/turtle/big_sea_turtle', { flee: true, water: true, breed: ['seagrass'] }, 2),
+  turtle: D('turtle', 30, 0.1, 0, 1.2, 0.4, 'passive', 'turtle', 'entity/turtle/turtle', { flee: true, water: true, breed: ['seagrass'] }, 2),
   frog: D('frog', 10, 0.2, 0, 0.5, 0.5, 'passive', 'frog', 'entity/frog/frog_temperate', { flee: true }, 2),
-  armadillo: D('armadillo', 12, 0.14, 0, 0.7, 0.65, 'passive', 'armadillo', 'entity/armadillo', { flee: true, tempt: ['spider_eye'], breed: ['spider_eye'] }, 2),
+  armadillo: D('armadillo', 12, 0.14, 0, 0.7, 0.65, 'passive', 'armadillo', 'entity/armadillo/armadillo', { flee: true, tempt: ['spider_eye'], breed: ['spider_eye'] }, 2),
   camel: D('camel', 32, 0.09, 0, 1.7, 2.375, 'passive', 'camel', 'entity/camel/camel', { flee: true, tempt: ['cactus'], breed: ['cactus'] }, 2),
   sniffer: D('sniffer', 14, 0.1, 0, 1.9, 1.75, 'passive', 'sniffer', 'entity/sniffer/sniffer', { flee: true, breed: ['torchflower_seeds'] }, 2),
   axolotl: D('axolotl', 14, 0.2, 2, 0.75, 0.42, 'passive', 'axolotl', 'entity/axolotl/axolotl_lucy', { water: true }, 2),
@@ -84,18 +84,18 @@ export const MOB_DEFS: Record<string, MobDef> = {
   salmon: D('salmon', 3, 0.7, 0, 0.7, 0.4, 'water', 'salmon', 'entity/fish/salmon', { water: true, flee: true }, 1),
   tropical_fish: D('tropical_fish', 3, 0.7, 0, 0.5, 0.4, 'water', 'cod', 'entity/fish/tropical_a', { water: true, flee: true }, 1),
   pufferfish: D('pufferfish', 3, 0.7, 2, 0.7, 0.7, 'water', 'pufferfish', 'entity/fish/pufferfish', { water: true }, 1),
-  dolphin: D('dolphin', 10, 1.2, 3, 0.9, 0.6, 'water', 'dolphin', 'entity/dolphin', { water: true, neutral: true }, 1),
-  guardian: D('guardian', 30, 0.5, 6, 0.85, 0.85, 'hostile', 'guardian', 'entity/guardian', { water: true, melee: true }, 10),
-  bat: D('bat', 6, 0.3, 0, 0.5, 0.9, 'ambient', 'bat', 'entity/bat', { fly: true }, 0),
+  dolphin: D('dolphin', 10, 1.2, 3, 0.9, 0.6, 'water', 'dolphin', 'entity/dolphin/dolphin', { water: true, neutral: true }, 1),
+  guardian: D('guardian', 30, 0.5, 6, 0.85, 0.85, 'hostile', 'guardian', 'entity/guardian/guardian', { water: true, melee: true }, 10),
+  bat: D('bat', 6, 0.3, 0, 0.5, 0.9, 'ambient', 'bat', 'entity/bat/bat', { fly: true }, 0),
   villager: D('villager', 20, 0.5, 0, 0.6, 1.95, 'passive', 'villager', 'entity/villager/villager', { flee: true }, 0),
-  wandering_trader: D('wandering_trader', 20, 0.5, 0, 0.6, 1.95, 'passive', 'villager', 'entity/wandering_trader', { flee: true }, 0),
+  wandering_trader: D('wandering_trader', 20, 0.5, 0, 0.6, 1.95, 'passive', 'villager', 'entity/wandering_trader/wandering_trader', { flee: true }, 0),
   iron_golem: D('iron_golem', 100, 0.25, 15, 1.4, 2.7, 'neutral', 'iron_golem', 'entity/iron_golem/iron_golem', { melee: true, golem: true, followRange: 16 }, 0),
-  snow_golem: D('snow_golem', 4, 0.2, 0, 0.7, 1.9, 'neutral', 'snow_golem', 'entity/snow_golem', { ranged: 'snowball', rangedInterval: 20, golem: true }, 0),
+  snow_golem: D('snow_golem', 4, 0.2, 0, 0.7, 1.9, 'neutral', 'snow_golem', 'entity/snow_golem/snow_golem', { ranged: 'snowball', rangedInterval: 20, golem: true }, 0),
   pillager: D('pillager', 24, 0.35, 5, 0.6, 1.95, 'hostile', 'villager', 'entity/illager/pillager', { ranged: 'arrow', rangedInterval: 30 }, 5),
   vindicator: D('vindicator', 24, 0.35, 5, 0.6, 1.95, 'hostile', 'villager', 'entity/illager/vindicator', { melee: true }, 5),
   evoker: D('evoker', 24, 0.5, 6, 0.6, 1.95, 'hostile', 'villager', 'entity/illager/evoker', { melee: true }, 10),
-  silverfish: D('silverfish', 8, 0.25, 1, 0.4, 0.3, 'hostile', 'silverfish', 'entity/silverfish', { melee: true, arthropod: true }, 5),
-  endermite: D('endermite', 8, 0.25, 2, 0.4, 0.3, 'hostile', 'silverfish', 'entity/endermite', { melee: true, arthropod: true }, 3),
+  silverfish: D('silverfish', 8, 0.25, 1, 0.4, 0.3, 'hostile', 'silverfish', 'entity/silverfish/silverfish', { melee: true, arthropod: true }, 5),
+  endermite: D('endermite', 8, 0.25, 2, 0.4, 0.3, 'hostile', 'silverfish', 'entity/endermite/endermite', { melee: true, arthropod: true }, 3),
   shulker: D('shulker', 30, 0, 4, 1, 1, 'hostile', 'shulker', 'entity/shulker/shulker', { noAI: true }, 5),
   vex: D('vex', 14, 0.7, 9, 0.4, 0.8, 'hostile', 'vex', 'entity/illager/vex', { fly: true, melee: true }, 3),
   ravager: D('ravager', 100, 0.3, 12, 1.95, 2.2, 'hostile', 'ravager', 'entity/illager/ravager', { melee: true }, 20),
@@ -177,7 +177,17 @@ export class Mob extends LivingEntity {
   knockbackResistance(): number { return this.def.ai.golem || this.type === 'ravager' || this.type === 'warden' ? 1 : this.type === 'hoglin' || this.type === 'zoglin' ? 0.6 : 0; }
   armorValue(): number { return this.type === 'zombie' && this.isBaby ? 0 : this.type === 'zombie' || this.type === 'husk' || this.type === 'drowned' ? 2 : this.type === 'skeleton' ? 0 : this.type === 'hoglin' ? 0 : 0; }
 
-  private get player(): Player | null { return this.game.player; }
+  /** Nearest player (host or remote) — mobs target and follow whoever is closest. */
+  private get player(): Player | null { return this.game.nearestPlayer(this.x, this.y, this.z); }
+
+  applySnapshot(s: any): void {
+    super.applySnapshot(s);
+    const ex = s.ex; if (!ex) return;
+    if (ex.baby !== undefined && ex.baby !== this.isBaby) this.setBaby(!!ex.baby);
+    this.sheared = !!ex.sheared; if (ex.wool) this.woolColor = ex.wool; this.tamed = !!ex.tamed; this.sitting = !!ex.sit;
+    this.prevSwell = this.swell; this.swell = ex.swell ?? 0; this.angerTicks = ex.anger ? 100 : 0; if (ex.size) this.slimeSize = ex.size; this.variant = ex.variant ?? this.variant;
+    this.charged = !!ex.charged; (this as any).customName = ex.name; this.eatTimer = ex.eat ?? 0; this.screaming = !!ex.scream; this.carriedBlock = ex.carried ?? 0; this.attackAnim = ex.attack ?? 0; this.saddled = !!ex.saddled;
+  }
   private sound(kind: 'ambient' | 'hurt' | 'death' | 'step', vol = 1, pitch?: number): void {
     const s = this.def.sounds[kind];
     if (!s) return;
@@ -190,7 +200,7 @@ export class Mob extends LivingEntity {
     if (r) {
       this.sound(this.health <= 0 ? 'death' : 'hurt');
       if (this.def.ai.flee) this.panicTicks = 100;
-      if (d.attacker instanceof LivingEntity && (this.def.ai.neutral || this.hostile || this.def.ai.melee || this.def.ai.ranged)) { this.target = d.attacker; this.angerTicks = 600; }
+      if (d.attacker instanceof LivingEntity && d.attacker !== this && (this.def.ai.neutral || this.hostile || this.def.ai.melee || this.def.ai.ranged)) { this.target = d.attacker; this.angerTicks = 600; }
       if (d.attacker && this.def.ai.pack && this.def.ai.neutral) for (const e of this.game.entities) if (e instanceof Mob && e.type === this.type && e.distSq(this.x, this.y, this.z) < 32 * 32) { e.target = d.attacker as LivingEntity; e.angerTicks = 600; }
       if (this.def.ai.teleport && Math.random() < 0.5 && d.source !== 'attack') this.teleportRandom();
       this.persistent = true;

@@ -28,16 +28,22 @@ import { Input } from './input';
 import { BlockTicker } from '../blocks/ticking';
 import { Redstone } from '../blocks/redstone';
 import { BlockEntityManager } from './blockEntities';
+import { mergeOptions, type Options } from './options';
 import { Weather } from './weather';
+import { NetHost, type HostOptions } from '../net/host';
+import { NetClient } from '../net/client';
+import { RemotePlayer } from '../entity/remotePlayer';
+import { BoatEntity } from '../entity/boat';
+import { EnderDragonEntity, WitherEntity, EndCrystalEntity, AreaEffectCloud } from '../entity/boss';
 import { Spawner } from './spawning';
-import { runCommand, completeCommand } from './commands';
+import { runCommand, completeCommand, suggestCommand, COMMAND_USAGE } from './commands';
 import { MIN_Y, MAX_Y, SEA_LEVEL, SECTION_COUNT, type Chunk } from '../world/chunk';
 import { VERTEX_STRIDE } from '../render/mesher';
 import { createTexture } from '../render/gl';
 import { TitleScreen } from './gui/screens';
+import { DisconnectedScreen } from './gui/multiplayer';
 import { facingOffset } from '../blocks/placement';
 
-export interface Options { fov: number; renderDistance: number; gamma: number; sensitivity: number; guiScale: number; clouds: boolean; viewBobbing: boolean; attackIndicator: boolean; subtitles: boolean; autoJump: boolean; volumes: Record<string, number>; bindings?: Record<string, string> }
 
 export class Game {
   version = '0.1.0';
@@ -53,7 +59,7 @@ export class Game {
   sounds: SoundManager;
   gui: Gui;
   input: Input;
-  options: Options = { fov: 70, renderDistance: 10, gamma: 0.5, sensitivity: 0.5, guiScale: 0, clouds: true, viewBobbing: true, attackIndicator: true, subtitles: false, autoJump: false, volumes: { master: 0.7, music: 0.5, record: 1, weather: 1, block: 1, hostile: 1, neutral: 1, player: 1, ambient: 1 } };
+  options: Options = mergeOptions(null);
   // world state
   world!: World;
   chunks!: ChunkManager;
@@ -73,17 +79,28 @@ export class Game {
   worldSpawn: [number, number, number] = [0, 70, 0];
   lightningBolts: { x: number; y: number; z: number; life: number }[] = [];
   private otherDims = new Map<Dimension, { entities: any[]; time: number }>();
+  /** multiplayer */
+  host: NetHost | null = null;
+  client: NetClient | null = null;
+  /** saved state of guests that visited this world (by name) */
+  playerData = new Map<string, any>();
+  get isRemote(): boolean { return this.client !== null; }
+  allPlayers(): Player[] { const out: Player[] = []; if (this.player && !this.player.removed) out.push(this.player); for (const e of this.entities) if (e instanceof RemotePlayer && !e.removed) out.push(e); return out; }
+  nearestPlayer(x: number, y: number, z: number): Player | null { let best: Player | null = null, bd = Infinity; for (const p of this.allPlayers()) { const d = p.distSq(x, y, z); if (d < bd) { bd = d; best = p; } } return best; }
   biomeColors!: Uint8Array;
   // loop
   private lastTime = 0; private tickAcc = 0; private running = false;
   targetBlock: BlockHit | null = null;
-  targetEntity: LivingEntity | null = null;
+  targetEntity: (LivingEntity | BoatEntity) | null = null;
   private partial = 0;
   private swingT = 0; private equipProgress = 0; private lastHeldName = '';
   private cameraTilt = 0;
   private sprintFov = 0;
+  private sneakToggled = false; private sprintToggled = false;
+  private lastFrameTime = 0;
   private saveTimer = 0;
   private panoramaTex: (WebGLTexture | null)[] = [];
+  private panoramaAngle = 0;
   private paused = false;
 
   constructor(public assets: Assets, public canvas: HTMLCanvasElement, public guiCanvas: HTMLCanvasElement) {
@@ -107,7 +124,8 @@ export class Game {
 
   async start(): Promise<void> {
     const saved = await storage.loadOptions<Options>().catch(() => undefined);
-    if (saved) { this.options = { ...this.options, ...saved, volumes: { ...this.options.volumes, ...(saved.volumes ?? {}) } }; if (saved.bindings) for (const [k, v] of Object.entries(saved.bindings)) this.input.bindings.set(k, v); }
+    this.options = mergeOptions(saved);
+    if (saved?.bindings) for (const [k, v] of Object.entries(saved.bindings)) this.input.bindings.set(k, v);
     // migrate options saved by an early build whose mouse-button defaults were wrong (use=Mouse1, pick=Mouse2)
     if (this.input.bindings.get('use') === 'Mouse1' && this.input.bindings.get('pickBlock') === 'Mouse2') { this.input.bindings.set('use', 'Mouse2'); this.input.bindings.set('pickBlock', 'Mouse1'); }
     for (const [k, v] of Object.entries(this.options.volumes)) (this.sounds.volumes as any)[k] = v;
@@ -120,6 +138,19 @@ export class Game {
     this.running = true;
     this.lastTime = performance.now();
     requestAnimationFrame((t) => this.frame(t));
+    // Background tabs throttle requestAnimationFrame/timers; a worker timer keeps the simulation (and a hosted
+    // multiplayer world) ticking at 20 TPS while the tab is hidden. Rendering is skipped until it is visible again.
+    try {
+      const w = new Worker(URL.createObjectURL(new Blob(['setInterval(() => postMessage(0), 50)'], { type: 'text/javascript' })));
+      w.onmessage = () => { if (document.hidden && this.inWorld && this.running) this.backgroundTick(); };
+    } catch { /* no worker support */ }
+  }
+  private backgroundTick(): void {
+    try {
+      this.input.discardTick();
+      if (!this.paused) this.tick();
+      this.lastTime = performance.now(); this.tickAcc = 0;
+    } catch (e) { console.error(e); }
   }
 
   saveOptions(): void {
@@ -129,10 +160,22 @@ export class Game {
     this.applyOptions();
   }
   applyOptions(): void {
-    if (this.chunks) { this.chunks.viewDistance = this.options.renderDistance; this.renderer.viewDistance = this.options.renderDistance; }
-    this.renderer.cloudsEnabled = this.options.clouds;
-    this.renderer.camera.fov = this.options.fov;
+    const o = this.options;
+    if (this.chunks) { this.chunks.viewDistance = o.renderDistance; this.renderer.viewDistance = o.renderDistance; this.chunks.simulationDistance = o.simulationDistance; }
+    this.renderer.cloudsEnabled = o.clouds !== 'off';
+    this.renderer.fancyClouds = o.clouds === 'fancy';
+    this.renderer.camera.fov = o.fov;
+    this.renderer.setMipmapLevels(o.mipmapLevels);
+    for (const [k, v] of Object.entries(o.volumes)) (this.sounds.volumes as any)[k] = v;
+    this.sounds.applyVolumes();
+    this.gui.showSubtitles = o.subtitles;
+    this.input.rawInput = o.rawInput;
+    if (o.fullscreen !== !!document.fullscreenElement) { if (o.fullscreen) document.documentElement.requestFullscreen?.().catch(() => {}); else if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); }
+    // mesh-affecting options need the chunks rebuilt
+    const meshKey = `${o.smoothLighting}|${o.graphics}|${o.biomeBlend}`;
+    if (this.chunks && meshKey !== this.meshOptionsKey) { this.meshOptionsKey = meshKey; this.chunks.setMeshOptions({ smoothLighting: o.smoothLighting, fancy: o.graphics !== 'fast', biomeBlend: o.biomeBlend }); }
   }
+  private meshOptionsKey = '';
 
   // ---------- world lifecycle ----------
   async loadWorld(meta: WorldMeta): Promise<void> {
@@ -142,10 +185,13 @@ export class Game {
     const state = await storage.loadState<any>(meta.id, 'world').catch(() => undefined);
     if (state?.rules) Object.assign(this.rules, state.rules);
     if (state?.worldSpawn) this.worldSpawn = state.worldSpawn;
+    this.playerData = new Map(Object.entries(state?.playerData ?? {}));
+    this.dragonKills = state?.dragonKills ?? 0;
     const dim: Dimension = state?.player?.dimension ?? 'overworld';
     await this.setupDimension(dim, meta.seed, state?.time?.[dim]);
     this.player = new Player();
     this.player.world = this.world; this.player.game = this;
+    this.player.name = this.options.playerName || 'Player';
     this.player.cheats = this.cheats;
     this.player.setGameMode(meta.gameMode);
     this.player.inventory.onChange = () => this.gui.onHeldItemChanged();
@@ -181,10 +227,11 @@ export class Game {
     this.spawner = new Spawner(this);
     this.world.listeners = [this.blocks];
     this.renderer.sections.clear();
-    this.chunks = new ChunkManager(this.world, this.assets, this.renderer, this.worldMeta!.id, this.biomeColors);
+    this.chunks = new ChunkManager(this.world, this.assets, this.renderer, this.worldMeta!.id, this.biomeColors, this.client);
     this.chunks.viewDistance = this.options.renderDistance; this.renderer.viewDistance = this.options.renderDistance;
     this.chunks.onChunkLoaded = (c) => { this.blockEntities.loadChunk(c); if ((c as any).fresh) this.spawner.populateChunk(c); };
-    this.chunks.onChunkUnloaded = (c) => { this.blockEntities.unloadChunk(c); this.unloadEntitiesIn(c); };
+    this.chunks.onChunkUnloaded = (c) => { this.blockEntities.unloadChunk(c); this.unloadEntitiesIn(c); this.host?.onChunkUnloaded(c); };
+    if (this.client) this.chunks.simulationDistance = 0;
     this.entities = [];
     await this.chunks.ready();
   }
@@ -201,22 +248,25 @@ export class Game {
   }
 
   saveAll(): void {
-    if (!this.inWorld || !this.worldMeta) return;
+    if (!this.inWorld || !this.worldMeta || this.isRemote) return;
     this.blockEntities.flushAll();
     this.chunks.saveAll();
     const entities: Record<string, any[]> = {};
     for (const [d, v] of this.otherDims) entities[d] = v.entities;
-    entities[this.world.dimension] = this.entities.filter((e) => !e.removed && !(e instanceof ExperienceOrb)).map((e) => e.serialize());
+    entities[this.world.dimension] = this.entities.filter((e) => !e.removed && !(e instanceof ExperienceOrb) && !(e instanceof RemotePlayer)).map((e) => e.serialize());
     const time: Record<string, any> = {};
     for (const [d, v] of this.otherDims) time[d] = { time: v.time, dayTime: this.world.dayTime };
     time[this.world.dimension] = { time: this.world.time, dayTime: this.world.dayTime };
-    storage.saveState(this.worldMeta.id, 'world', { player: this.player.serialize(), weather: this.weather.serialize(), entities, time, rules: this.rules, worldSpawn: this.worldSpawn }).catch(console.error);
+    this.host?.saveAllPlayers();
+    storage.saveState(this.worldMeta.id, 'world', { player: this.player.serialize(), weather: this.weather.serialize(), entities, time, rules: this.rules, worldSpawn: this.worldSpawn, playerData: Object.fromEntries(this.playerData), dragonKills: this.dragonKills }).catch(console.error);
     this.worldMeta.lastPlayed = Date.now();
     storage.saveWorldMeta(this.worldMeta).catch(() => {});
   }
 
   quitToTitle(): void {
     this.saveAll();
+    if (this.host) { this.host.stop(); this.host = null; }
+    if (this.client) { this.client.send({ t: 'move', x: this.player.x, y: this.player.y, z: this.player.z, yaw: this.player.yaw, pitch: this.player.pitch, saved: this.player.serialize() }); this.client.close(); this.client = null; }
     this.chunks.dispose();
     this.renderer.sections.clear();
     this.entities = [];
@@ -230,6 +280,7 @@ export class Game {
   // ---------- dimensions ----------
   async travelDimension(target: Dimension): Promise<void> {
     const p = this.player;
+    if (this.isRemote) { this.gui.showActionBar('Dimension travel is not available while playing on a server'); p.portalCooldown = 100; return; }
     const from = this.world.dimension;
     this.gui.open(new LoadingScreen(target === 'the_nether' ? 'Entering the Nether…' : target === 'the_end' ? 'Entering the End…' : 'Returning to the Overworld…'));
     this.blockEntities.flushAll();
@@ -249,26 +300,74 @@ export class Game {
     if (saved) { this.restoreEntities(saved.entities); this.otherDims.delete(target); }
     await this.waitForChunks();
     if (target === 'the_nether' || (target === 'overworld' && from === 'the_nether')) this.placePortalNear(Math.floor(x), Math.floor(z), target);
-    if (target === 'the_end') { for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) { this.world.setBlock(100 + dx, 48, dz, this.registry.defaultState('obsidian'), 0); for (let dy = 49; dy < 52; dy++) this.world.setBlock(100 + dx, dy, dz, 0, 0); } p.setPos(100.5, 49, 0.5); }
+    if (target === 'the_end') {
+      for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) { this.world.setBlock(100 + dx, 48, dz, this.registry.defaultState('obsidian'), 0); for (let dy = 49; dy < 52; dy++) this.world.setBlock(100 + dx, dy, dz, 0, 0); } p.setPos(100.5, 49, 0.5);
+      // the dragon (and its crystals) await on the first visit
+      if (this.dragonKills === 0 && !this.entities.some((e) => e instanceof EnderDragonEntity)) { const d = this.spawnMob('ender_dragon', 0, 90, 0); if (d) { d.yaw = 0; } }
+    }
     this.gui.close();
     this.sounds.playAt('block.portal.travel', p.x, p.y, p.z, 0.5, 1);
     p.portalCooldown = 300;
+    this.host?.onDimensionChanged();
   }
 
+  /** vanilla PortalForcer: reuse a portal within 16 blocks, else search for a spot with ground and headroom for a
+   *  4x5 frame (radius 16); if nothing fits, force one at the target on a small obsidian platform. */
   private placePortalNear(x: number, z: number, dim: Dimension): void {
     const reg = this.registry, w = this.world, p = this.player;
-    // look for an existing portal nearby
-    for (let dx = -32; dx <= 32; dx += 1) for (let dz = -32; dz <= 32; dz += 1) for (let y = dim === 'the_nether' ? 30 : 40; y < (dim === 'the_nether' ? 120 : 200); y++) {
+    const yMin = dim === 'the_nether' ? 5 : MIN_Y + 5, yMax = dim === 'the_nether' ? 122 : Math.min(MAX_Y - 10, 250);
+    // 1. existing portal within 16 blocks: enter at its lowest block
+    let best: [number, number, number] | null = null, bd = Infinity;
+    for (let dx = -16; dx <= 16; dx++) for (let dz = -16; dz <= 16; dz++) for (let y = yMin; y < yMax; y++) {
       const s = w.getBlock(x + dx, y, z + dz);
-      if (s && reg.nameOf(s) === 'nether_portal' && this.canStandAt(x + dx + 0.5, y, z + dz + 0.5)) { p.setPos(x + dx + 0.5, y, z + dz + 0.5); return; }
+      if (!s || reg.nameOf(s) !== 'nether_portal') continue;
+      const d = dx * dx + dz * dz + (y - p.y) * (y - p.y) * 0.1;
+      if (d < bd) { bd = d; best = [x + dx, y, z + dz]; }
+      break;
     }
-    // build a new one
-    let y = dim === 'the_nether' ? 64 : w.getHeight(x, z);
-    if (dim === 'the_nether') { y = 70; while (y > 34 && (w.getBlock(x, y - 1, z) === 0 || reg.isFluid(w.getBlock(x, y - 1, z)))) y--; while (y < 110 && w.getBlock(x, y, z) !== 0) y++; if (y >= 110) y = 70; }
-    const obs = reg.defaultState('obsidian'), portal = reg.stateWith(reg.blockByName('nether_portal')!, { axis: 'x' });
-    for (let dx = -1; dx <= 2; dx++) for (let dy = -1; dy <= 3; dy++) { const edge = dx === -1 || dx === 2 || dy === -1 || dy === 3; w.setBlock(x + dx, y + dy, z, edge ? obs : portal, 0); for (const oz of [-1, 1]) if (dy >= 0 && dy < 3 && dx >= 0 && dx < 2) w.setBlock(x + dx, y + dy, z + oz, 0, 0); }
-    for (let dx = -1; dx <= 2; dx++) for (const oz of [-1, 1]) w.setBlock(x + dx, y - 1, z + oz, obs, 0);
-    p.setPos(x + 0.5, y, z + 1.5);
+    if (best) { p.setPos(best[0] + 0.5, best[1], best[2] + 0.5); return; }
+    const solid = (bx: number, by: number, bz: number) => { const s = w.getBlock(bx, by, bz); return s !== 0 && reg.fullCube[s] && !reg.isFluid(s); };
+    const empty = (bx: number, by: number, bz: number) => { const s = w.getBlock(bx, by, bz); return s === 0 || (!reg.fullCube[s] && !reg.isFluid(s) && reg.block(s).hardness >= 0); };
+    // 2. search: frame along axis a needs 4 (along) x 5 (tall) x 1 with 1 block of air on each side and ground under
+    const axes: ('x' | 'z')[] = ['x', 'z'];
+    let found: { x: number; y: number; z: number; axis: 'x' | 'z' } | null = null; let fd = Infinity;
+    for (let dx = -16; dx <= 16 && !found; dx++) for (let dz = -16; dz <= 16; dz++) {
+      const bx = x + dx, bz = z + dz;
+      if (!w.isLoaded(bx, bz)) continue;
+      for (let y = Math.min(yMax, w.getHeight(bx, bz) + 1); y > yMin; y--) {
+        if (!solid(bx, y - 1, bz) || !empty(bx, y, bz)) continue;
+        for (const axis of axes) {
+          const ax = axis === 'x' ? 1 : 0, az = axis === 'x' ? 0 : 1;
+          let ok = true;
+          for (let i = -1; i < 3 && ok; i++) for (let j = -1; j < 4 && ok; j++) for (let k = -1; k <= 1 && ok; k++) {
+            const px = bx + i * ax + k * az, py = y + j, pz = bz + i * az + k * ax;
+            if (j === -1) { if (k === 0 && i >= 0 && i < 2 && !solid(px, py, pz)) ok = false; }
+            else if (!empty(px, py, pz)) ok = false;
+          }
+          if (!ok) continue;
+          const d = dx * dx + dz * dz + (y - p.y) * (y - p.y) * 0.25;
+          if (d < fd) { fd = d; found = { x: bx, y, z: bz, axis }; }
+        }
+        break;
+      }
+    }
+    const obs = reg.defaultState('obsidian');
+    let fx = x, fy: number, fz = z, axis: 'x' | 'z' = 'x';
+    if (found) { fx = found.x; fy = found.y; fz = found.z; axis = found.axis; }
+    else {
+      // 3. forced: clamp height, build a 3x2 obsidian platform with air above it
+      fy = dim === 'the_nether' ? Math.max(yMin + 1, Math.min(yMax - 6, 70)) : Math.max(yMin + 1, Math.min(yMax - 6, w.getHeight(x, z)));
+      const ax = 1, az = 0;
+      for (let i = -1; i < 2; i++) for (let j = 0; j < 2; j++) for (let k = -1; k < 3; k++) w.setBlock(fx + j * ax + i * az, fy + k, fz + j * az + i * ax, k < 0 ? obs : 0, 0);
+    }
+    const ax = axis === 'x' ? 1 : 0, az = axis === 'x' ? 0 : 1;
+    const portal = reg.stateWith(reg.blockByName('nether_portal')!, { axis });
+    for (let i = -1; i < 3; i++) for (let j = -1; j < 4; j++) {
+      const edge = i === -1 || i === 2 || j === -1 || j === 3;
+      w.setBlock(fx + i * ax, fy + j, fz + i * az, edge ? obs : portal, 0);
+    }
+    p.setPos(fx + 0.5 + ax * 0.5, fy, fz + 0.5 + az * 0.5);
+    p.portalCooldown = 300;
   }
 
   /** Flint & steel on obsidian: detect a valid frame around (x,y,z) and light it. */
@@ -298,11 +397,34 @@ export class Game {
   }
 
   // ---------- entities ----------
-  addEntity(e: Entity): void { e.world = this.world; e.game = this; e.updateBB(); this.entities.push(e); }
+  addEntity(e: Entity): void {
+    e.world = this.world; e.game = this; e.updateBB();
+    if (this.client && !e.remote && !(e instanceof RemotePlayer)) { this.forwardSpawn(e); return; }
+    this.entities.push(e);
+  }
+  /** Guest-created entities (drops, projectiles, spawn eggs) are created by the host instead. */
+  private forwardSpawn(e: Entity): void {
+    const c = this.client!;
+    if (e instanceof ItemEntity) c.send({ t: 'drop', stack: e.stack.serialize(), x: e.x, y: e.y, z: e.z, dir: [e.vx, e.vy, e.vz] });
+    else if (e instanceof BoatEntity) c.send({ t: 'spawn', kind: 'boat', x: e.x, y: e.y, z: e.z, v: [0, 0, 0], yaw: e.yaw, extra: { wood: e.wood, chest: e.chest } });
+    else if (e instanceof ArrowEntity || e instanceof ThrownProjectile || e instanceof Mob) c.send({ t: 'spawn', e: e.serialize(), x: e.x, y: e.y, z: e.z, v: [e.vx, e.vy, e.vz], kind: e instanceof ArrowEntity ? 'arrow' : e instanceof ThrownProjectile ? 'thrown' : 'mob', extra: e instanceof ArrowEntity ? { damage: e.damage, akind: e.kind, trident: (e as any).trident?.serialize?.(), effect: (e as any).effect } : e instanceof ThrownProjectile ? { tkind: e.kind, stack: e.stack?.serialize() ?? null } : { type: e.type, baby: (e as Mob).isBaby } });
+  }
+  /** number of dragon kills in this world (first kill drops far more XP and opens the gateway) */
+  dragonKills = 0;
+  onDragonKilled(d: Mob): void {
+    this.dragonKills++;
+    const reg = this.registry, w = this.world;
+    // the exit portal lights up and the dragon egg appears on the bedrock pillar
+    for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) if (dx * dx + dz * dz <= 6) w.setBlock(dx, 61, dz, reg.defaultState('end_portal'), 0);
+    if (this.dragonKills === 1) w.setBlock(0, 66, 0, reg.defaultState('dragon_egg'), 0);
+    for (const e of this.entities) if (e instanceof EndCrystalEntity) e.remove();
+    this.gui.addChat('§dThe End is free once more.');
+    void d;
+  }
   spawnMob(name: string, x: number, y: number, z: number, baby = false): Mob | null {
     const def = MOB_DEFS[name];
     if (!def) return null;
-    const m = new Mob(def);
+    const m = name === 'ender_dragon' ? new EnderDragonEntity() : name === 'wither' ? new WitherEntity() : new Mob(def);
     m.setPos(x, y, z); m.yaw = Math.random() * 360; m.bodyYaw = m.yaw;
     if (baby) m.setBaby(true);
     if (name === 'sheep' && Math.random() < 0.0 ) m.woolColor = 'pink';
@@ -332,10 +454,14 @@ export class Game {
     for (const d of list) {
       try {
         let e: Entity | null = null;
-        if (MOB_DEFS[d.type]) e = new Mob(MOB_DEFS[d.type]);
+        if (d.type === 'ender_dragon') e = new EnderDragonEntity();
+        else if (d.type === 'wither') e = new WitherEntity();
+        else if (d.type === 'end_crystal') e = new EndCrystalEntity();
+        else if (MOB_DEFS[d.type]) e = new Mob(MOB_DEFS[d.type]);
         else if (d.type === 'item') { const s = ItemStack.deserialize(d.stack, this.items); if (s) e = new ItemEntity(s); }
         else if (d.type === 'falling_block') e = new FallingBlockEntity(d.blockState);
         else if (d.type === 'tnt') e = new PrimedTnt(d.fuse);
+        else if (d.type === 'boat') e = new BoatEntity(d.wood, !!d.chest);
         if (!e) continue;
         e.world = this.world; e.game = this;
         e.deserialize(d);
@@ -351,6 +477,7 @@ export class Game {
   onPlayerDied(): void { this.gui.openDeath(); }
   respawnPlayer(): void {
     const p = this.player;
+    this.client?.send({ t: 'respawn' });
     let spawn: [number, number, number] | null = p.spawnPos;
     // bed still there?
     if (spawn && !p.spawnForced) { const s = this.world.getBlock(spawn[0], spawn[1], spawn[2]); if (!s || !this.registry.nameOf(s).endsWith('_bed')) { spawn = null; this.gui.addChat(this.assets.lang['block.minecraft.spawn.not_valid'] ?? 'You have no home bed or charged respawn anchor, or it was obstructed'); } }
@@ -398,7 +525,7 @@ export class Game {
     if (n === 'birch_leaves') return 0x80a755; if (n === 'spruce_leaves') return 0x619961;
     return 0xffffff;
   }
-  project(x: number, y: number, z: number): [number, number] | null {
+  project(x: number, y: number, z: number): [number, number, number] | null {
     const cb = this.renderer.camBase;
     const v = [0, 0, 0] as [number, number, number];
     const m = this.renderer.vp;
@@ -406,7 +533,7 @@ export class Game {
     const cw = m[3] * px + m[7] * py + m[11] * pz + m[15];
     if (cw <= 0) return null;
     transformPoint(v, m, px, py, pz);
-    return [(v[0] / cw * 0.5 + 0.5) * this.canvas.width, (1 - (v[1] / cw * 0.5 + 0.5)) * this.canvas.height];
+    return [(v[0] / cw * 0.5 + 0.5) * this.canvas.width, (1 - (v[1] / cw * 0.5 + 0.5)) * this.canvas.height, cw];
   }
 
   /** DDA raycast against block collision/outline shapes. */
@@ -464,6 +591,15 @@ export class Game {
     const b = reg.block(s);
     const n = b.name;
     if (b.hardness < 0 && player && !player.isCreative) return;
+    if (this.client && player === this.player) {
+      // guest: predict locally (no drops), the host breaks it for real and broadcasts the change
+      if (!silentPlayer) { this.sounds.playAt(`block.${b.soundType}.break`, x + 0.5, y + 0.5, z + 0.5, 1, 0.8); this.particles.spawnBlockBreak(x, y, z, s); }
+      this.client.applying = true; try { w.setBlock(x, y, z, reg.isWaterlogged(s) && !reg.implicitWater[reg.stateBlock[s]] ? reg.WATER : 0, SET_UPDATE_NEIGHBORS); } finally { this.client.applying = false; }
+      this.client.send({ t: 'break', x, y, z });
+      const tool = player.heldItem();
+      if (tool && !player.isCreative && tool.item.tool !== 'none' && b.hardness > 0) player.damageHeld(tool, tool.item.tool === 'sword' ? 2 : 1);
+      return;
+    }
     const tool = player?.heldItem() ?? null;
     // drops
     if (drops && !(player?.isCreative) && this.rules.doTileDrops !== false) {
@@ -597,14 +733,25 @@ export class Game {
   }
 
   // ---------- chat ----------
-  handleChat(text: string): void { if (text.startsWith('/')) runCommand(this, text); else this.gui.addChat(`<${this.player.name}> ${text}`); }
-  completeCommand(text: string): string | null { return completeCommand(text); }
+  handleChat(text: string): void {
+    if (this.client) { this.client.send({ t: 'chat', text }); if (!text.startsWith('/')) this.gui.addChat(`<${this.player.name}> ${text}`); return; }
+    if (text.startsWith('/')) runCommand(this, text);
+    else { const line = `<${this.player.name}> ${text}`; this.gui.addChat(line); this.host?.broadcast({ t: 'chat', text: line }); }
+  }
+  completeCommand(text: string): string | null { return completeCommand(this, text); }
+  commandSuggestions(text: string): string[] { return suggestCommand(this, text); }
+  commandUsage(text: string): string | null { const name = text.slice(1).split(' ')[0]; return COMMAND_USAGE[name] ?? null; }
   setDifficulty(d: number): void { this.difficulty = d; if (this.worldMeta) { this.worldMeta.difficulty = d; storage.saveWorldMeta(this.worldMeta).catch(() => {}); } if (d === 0) for (const e of this.entities) if (e instanceof Mob && e.hostile) e.remove(); }
-  onScreenChanged(): void { this.paused = !!this.gui.screen && this.gui.screen.pausesGame; }
+  /** Menus pause singleplayer only; a world open to LAN (or a server we joined) keeps running like vanilla. */
+  onScreenChanged(): void { this.paused = !!this.gui.screen && this.gui.screen.pausesGame && !this.host && !this.client; }
 
   // ---------- main loop ----------
   private frame(t: number): void {
     if (!this.running) return;
+    // Max Framerate option: skip frames that come too early
+    const maxFps = this.options.maxFps;
+    if (maxFps > 0 && maxFps < 260 && t - this.lastFrameTime < 1000 / maxFps - 1) { requestAnimationFrame((tt) => this.frame(tt)); return; }
+    this.lastFrameTime = t;
     const dt = Math.min(0.25, (t - this.lastTime) / 1000);
     this.lastTime = t;
     try {
@@ -658,7 +805,7 @@ export class Game {
     const sens = 0.6 * this.options.sensitivity + 0.2;
     const f = sens * sens * sens * 8 * 0.15 * (this.gui.spyglass ? 0.1 : 1);
     if (input.mouseDx || input.mouseDy) {
-      p.yaw += input.mouseDx * f; p.pitch = Math.max(-90, Math.min(90, p.pitch + input.mouseDy * f));
+      p.yaw += input.mouseDx * f; p.pitch = Math.max(-90, Math.min(90, p.pitch + input.mouseDy * f * (this.options.invertMouse ? -1 : 1)));
       p.prevYaw = p.yaw; p.prevPitch = p.pitch;
     }
   }
@@ -684,25 +831,35 @@ export class Game {
     const p = this.player;
     const w = this.world;
     this.gui.tick();
+    if (this.client) { this.tickRemote(); return; }
     // time
     w.time++;
     if (this.rules.doDaylightCycle !== false && w.dimension === 'overworld') w.dayTime++;
     // player input
     this.updatePlayerInput();
     // chunks stream
+    if (this.host) this.chunks.extraCenters = this.host.extraCenters();
     this.chunks.update(p.x, p.z, 0.05);
     // sleeping skips night
-    if (p.sleeping && p.sleepTimer >= 100) { w.dayTime = Math.floor(w.dayTime / 24000) * 24000 + 24000; this.weather.raining = false; this.weather.thundering = false; p.wakeUp(); this.gui.sleepFade = 0; }
+    if (p.sleeping && p.sleepTimer >= 100 && (!this.host || this.host.allSleeping())) { w.dayTime = Math.floor(w.dayTime / 24000) * 24000 + 24000; this.weather.raining = false; this.weather.thundering = false; p.wakeUp(); this.gui.sleepFade = 0; this.host?.broadcast({ t: 'wake' }); }
     // scheduled ticks
     for (const t of w.popDueTicks()) if (w.isLoaded(t.x, t.z)) this.blocks.scheduledTick(t.x, t.y, t.z, t.state);
     // random ticks
     this.randomTicks();
-    // entities
-    for (const e of this.entities) { if (e.removed) continue; if (!w.isLoaded(Math.floor(e.x), Math.floor(e.z))) continue; e.tick(); }
+    // entities (only within the simulation distance)
+    const simD = this.chunks.simulationDistance, pcx = Math.floor(p.x) >> 4, pcz = Math.floor(p.z) >> 4;
+    for (const e of this.entities) {
+      if (e.removed) continue;
+      if (!w.isLoaded(Math.floor(e.x), Math.floor(e.z))) continue;
+      if (!(e instanceof RemotePlayer) && !this.host && (Math.abs((Math.floor(e.x) >> 4) - pcx) > simD || Math.abs((Math.floor(e.z) >> 4) - pcz) > simD)) continue;
+      e.tick();
+    }
     if (this.entities.some((e) => e.removed)) this.entities = this.entities.filter((e) => !e.removed);
     // player
     p.tick();
     if (p.health <= 0 && !this.gui.isOpen) this.gui.openDeath();
+    this.host?.tick();
+    if (this.host && this.host.status === 'closed') { this.gui.addChat('§cLost connection to the relay: the world is no longer open to other players'); this.host = null; }
     // block entities, weather, spawning
     this.blockEntities.tick();
     this.weather.tick();
@@ -739,13 +896,91 @@ export class Game {
     // mob attacks on player use pressure plates via mobs; nothing here
   }
 
+  /** Guest tick: our player runs locally, the host drives everything else. */
+  private tickRemote(): void {
+    const p = this.player, w = this.world, c = this.client!;
+    if (c.status === 'closed') { const reason = c.disconnectReason || 'Disconnected'; this.client = null; this.leaveRemoteWorld(reason); return; }
+    this.updatePlayerInput();
+    this.chunks.update(p.x, p.z, 0.05);
+    for (const e of this.entities) { if (e.removed) continue; if (e.remote) e.remoteTick(); }
+    if (this.entities.some((e) => e.removed)) this.entities = this.entities.filter((e) => !e.removed);
+    p.tick();
+    if (p.health <= 0 && !this.gui.isOpen) this.gui.openDeath();
+    c.tick();
+    for (const b of this.lightningBolts) b.life--;
+    this.lightningBolts = this.lightningBolts.filter((b) => b.life > 0);
+    this.particles.tick();
+    this.renderer.tickAnimations();
+    this.sounds.updateListener(p.x, p.eyeY, p.z, p.yaw, p.pitch);
+    this.sounds.setUnderwater(p.eyeInWater);
+    this.sounds.tickMusic(p.isCreative ? 'creative' : p.eyeInWater ? 'under_water' : 'game', 1);
+    this.updateTargets();
+    const hn = p.heldItem()?.item.name ?? '';
+    if (hn !== this.lastHeldName) { this.lastHeldName = hn; this.equipProgress = 1; this.gui.onHeldItemChanged(); }
+    this.equipProgress = Math.max(0, this.equipProgress - 0.25);
+    if (p.eyeInWater && Math.random() < 0.2) this.particles.spawnBubble(p.x + (Math.random() - 0.5), p.eyeY, p.z + (Math.random() - 0.5));
+    if (p.flying) p.fallDistance = 0;
+    void w;
+  }
+
+  /** Publish the current singleplayer world through a relay so others can join. */
+  async openToLan(opts: HostOptions): Promise<NetHost> {
+    if (this.host) this.host.stop();
+    const h = new NetHost(this, opts);
+    await h.start();
+    this.host = h;
+    this.cheats = opts.cheats || this.cheats;
+    this.onScreenChanged();
+    return h;
+  }
+
+  /** Join a hosted world as a guest. */
+  async joinServer(relayUrl: string, serverId: string): Promise<void> {
+    const c = new NetClient(this, relayUrl);
+    this.gui.open(new LoadingScreen('Connecting…'));
+    const { welcome } = await c.connect(serverId, this.options.playerName || 'Player', this.options.skin);
+    this.gui.open(new LoadingScreen('Joining world…'));
+    this.client = c;
+    this.worldMeta = { id: 'remote', name: welcome.hostName + "'s world", seed: welcome.seed, created: Date.now(), lastPlayed: Date.now(), gameMode: welcome.gameMode, difficulty: welcome.difficulty, cheats: welcome.cheats, version: this.version };
+    this.difficulty = welcome.difficulty; this.cheats = welcome.cheats;
+    Object.assign(this.rules, welcome.rules ?? {});
+    this.worldSpawn = welcome.spawn;
+    await this.setupDimension(welcome.dimension, welcome.seed, { time: welcome.time, dayTime: welcome.day });
+    this.world.listeners = [c];
+    this.player = new Player();
+    this.player.world = this.world; this.player.game = this;
+    this.player.name = welcome.name; this.player.cheats = welcome.cheats;
+    this.player.setGameMode(welcome.gameMode);
+    this.player.inventory.onChange = () => this.gui.onHeldItemChanged();
+    if (welcome.saved) { try { this.player.deserialize(welcome.saved); } catch { /* fresh */ } }
+    else { this.player.setPos(welcome.spawn[0] + 0.5, welcome.spawn[1], welcome.spawn[2] + 0.5); this.player.setSpawn(welcome.spawn[0], welcome.spawn[1], welcome.spawn[2], false); }
+    this.weather.deserialize(welcome.weather);
+    this.inWorld = true;
+    this.gui.close();
+    this.input.lockPointer();
+    this.gui.onHeldItemChanged();
+    await this.waitForChunks();
+    this.sounds.stopMusic();
+    this.gui.addChat(`§eJoined ${welcome.hostName}'s world`);
+  }
+
+  private leaveRemoteWorld(reason: string): void {
+    this.chunks.dispose();
+    this.renderer.sections.clear();
+    this.entities = [];
+    this.inWorld = false;
+    this.particles.list = [];
+    this.sounds.stopRecord(); this.sounds.setUnderwater(false); this.sounds.setRain(0);
+    this.gui.open(new DisconnectedScreen(reason));
+  }
+
   private randomTicks(): void {
     const w = this.world;
     const speed = this.rules.randomTickSpeed ?? 3;
     if (speed <= 0) return;
     const p = this.player;
     const pcx = Math.floor(p.x) >> 4, pcz = Math.floor(p.z) >> 4;
-    const sim = Math.min(6, this.chunks.viewDistance);
+    const sim = Math.min(this.chunks.simulationDistance, this.chunks.viewDistance);
     for (const c of w.chunks.values()) {
       if (Math.abs(c.cx - pcx) > sim || Math.abs(c.cz - pcz) > sim) continue;
       c.inhabitedTime++;
@@ -782,9 +1017,12 @@ export class Game {
     if (input.isDown('forward')) fwd += 1; if (input.isDown('back')) fwd -= 1;
     if (input.isDown('left')) strafe += 1; if (input.isDown('right')) strafe -= 1;
     const flyToggle = input.wasDoubleTapped('jump') && (p.isCreative || p.isSpectator);
-    p.applyInput(fwd, strafe, input.isDown('jump'), input.isDown('sneak'), input.isDown('sprint'), input.wasDoubleTapped('forward') && fwd > 0, flyToggle);
+    // toggle sneak / sprint options (vanilla ToggleKeyMapping)
+    if (this.options.toggleSneak) { if (input.wasPressed('sneak')) this.sneakToggled = !this.sneakToggled; } else this.sneakToggled = false;
+    if (this.options.toggleSprint) { if (input.wasPressed('sprint')) this.sprintToggled = !this.sprintToggled; } else this.sprintToggled = false;
+    p.applyInput(fwd, strafe, input.isDown('jump'), this.options.toggleSneak ? this.sneakToggled : input.isDown('sneak'), this.options.toggleSprint ? this.sprintToggled : input.isDown('sprint'), input.wasDoubleTapped('forward') && fwd > 0, flyToggle);
     // hotbar
-    if (input.tickWheel) { p.selectedSlot = ((p.selectedSlot + input.tickWheel) % 9 + 9) % 9; this.gui.onHeldItemChanged(); }
+    if (input.tickWheel) { const steps = this.options.discreteScroll ? Math.sign(input.tickWheel) : Math.round(input.tickWheel * this.options.wheelSensitivity); if (steps) { p.selectedSlot = ((p.selectedSlot + steps) % 9 + 9) % 9; this.gui.onHeldItemChanged(); } }
     for (let i = 1; i <= 9; i++) if (input.wasPressed('hotbar' + i)) { p.selectedSlot = i - 1; this.gui.onHeldItemChanged(); }
     if (input.wasPressed('drop')) p.dropHeld(input.keys.has('ControlLeft') || input.keys.has('MetaLeft'));
     if (input.wasPressed('swapHands')) { const a = p.inventory.get(p.selectedSlot), b = p.offhand.get(0); p.inventory.set(p.selectedSlot, b); p.offhand.set(0, a); }
@@ -792,7 +1030,11 @@ export class Game {
     // attack / break
     const attackDown = input.isDown('attack');
     if (attackDown && input.pointerLocked) {
-      if (this.targetEntity && (input.wasPressed('attack') || p.isCreative && false)) { if (input.wasPressed('attack')) { p.attack(this.targetEntity); p.stopBreaking(); } }
+      if (this.targetEntity && input.wasPressed('attack')) {
+        if (this.client) { this.client.send({ t: 'attack', id: this.targetEntity.remoteId }); p.swing(); p.attackCooldownTicks = 0; p.stopBreaking(); }
+        else if (this.targetEntity instanceof BoatEntity) { this.targetEntity.hurt({ amount: p.isCreative ? 100 : Math.max(1, p.heldItem()?.item.attackDamage ?? 1), source: 'attack', attacker: p }); p.swing(); p.attackCooldownTicks = 0; p.stopBreaking(); }
+        else { p.attack(this.targetEntity); p.stopBreaking(); }
+      }
       else if (!this.targetEntity) p.continueBreaking(this.targetBlock);
       else p.stopBreaking();
       if (input.wasPressed('attack') && !this.targetBlock && !this.targetEntity) p.swing();
@@ -801,7 +1043,10 @@ export class Game {
     const useDown = input.isDown('use');
     if (input.wasPressed('use') || (useDown && p.useCooldown === 0 && !p.usingItem && input.pointerLocked)) {
       if (input.pointerLocked) {
-        if (this.targetEntity && (this.targetEntity as any).interact && input.wasPressed('use')) { if ((this.targetEntity as Mob).interact(p, p.heldItem())) { p.swing(); p.useCooldown = 4; } else p.use(this.targetBlock); }
+        if (this.targetEntity && (this.targetEntity as any).interact && input.wasPressed('use')) {
+          if (this.client) { this.client.send({ t: 'interact', id: this.targetEntity.remoteId, held: p.heldItem()?.serialize() ?? null }); p.swing(); p.useCooldown = 4; }
+          else if ((this.targetEntity as Mob | BoatEntity).interact(p, p.heldItem())) { p.swing(); p.useCooldown = 4; } else p.use(this.targetBlock);
+        }
         else p.use(this.targetBlock);
       }
     }
@@ -830,9 +1075,11 @@ export class Game {
     const reach = p.isCreative ? 5 : 3;
     let best = this.targetBlock ? this.targetBlock.t : reach;
     for (const e of this.entities) {
-      if (!(e instanceof LivingEntity) || e.removed || e.health <= 0) continue;
+      if (e.removed || e === p.vehicle) continue;
+      if (!(e instanceof LivingEntity || e instanceof BoatEntity)) continue;
+      if (e instanceof LivingEntity && e.health <= 0) continue;
       const r = e.bb.clone().grow(0.1, 0.1, 0.1).rayIntersect(p.x, p.eyeY, p.z, d[0], d[1], d[2]);
-      if (r && r[0] < best && r[0] <= reach) { best = r[0]; this.targetEntity = e; }
+      if (r && r[0] < best && r[0] <= reach) { best = r[0]; this.targetEntity = e as any; }
     }
   }
 
@@ -844,8 +1091,15 @@ export class Game {
     const ex = p.prevX + (p.x - p.prevX) * partial, ey = p.prevY + (p.y - p.prevY) * partial + (p.prevCameraEye + (p.cameraEye - p.prevCameraEye) * partial), ez = p.prevZ + (p.z - p.prevZ) * partial;
     cam.yaw = p.yaw; cam.pitch = p.pitch;
     // fov: sprint & bow
-    const targetFov = (p.isSprinting && !p.usingItem ? 1.1 : 1) * (p.usingItem?.item.name === 'bow' ? 1 - Math.min(1, p.itemUseTicks / 20) * 0.15 : 1) * (p.flying && p.isSprinting ? 1.1 : 1) * (this.gui.spyglass ? 0.1 : 1);
-    this.sprintFov += (targetFov - this.sprintFov) * 0.5;
+    // vanilla getFieldOfViewModifier: sprint/fly 1.1, bow draw, speed effects; scaled by the FOV Effects option
+    let fovMod = 1;
+    if ((p.isSprinting && !p.usingItem) || (p.flying && p.isSprinting)) fovMod *= 1.1;
+    if (p.usingItem?.item.name === 'bow') fovMod *= 1 - Math.min(1, p.itemUseTicks / 20) ** 2 * 0.15;
+    if (p.hasEffect('speed')) fovMod *= 1 + 0.1 * p.effectLevel('speed');
+    if (p.hasEffect('slowness')) fovMod *= 1 - 0.1 * p.effectLevel('slowness');
+    fovMod = 1 + (fovMod - 1) * this.options.fovEffects;
+    if (this.gui.spyglass) fovMod = 0.1;
+    this.sprintFov += (fovMod - this.sprintFov) * 0.5;
     cam.fov = this.options.fov * this.sprintFov;
     // view bobbing (vanilla GameRenderer.bobView): walkDist-driven, bob <= 0.1
     r.cameraRoll = 0; r.cameraPitchOffset = 0; r.cameraShift[0] = 0; r.cameraShift[1] = 0;
@@ -859,7 +1113,12 @@ export class Game {
       r.cameraPitchOffset = Math.abs(Math.cos(f * Math.PI - 0.2) * bob) * 5;
     }
     // hurt tilt
-    if (p.hurtTime > 0) r.cameraRoll += Math.sin((p.hurtTime - partial) / p.hurtDuration * Math.PI) * 14 * 0.3;
+    // portal / nausea whirl (vanilla: confusionAnimationTick * 20 deg, 7 with the nausea effect)
+    { const pt = (p.prevPortalTime + (p.portalTime - p.prevPortalTime) * partial) * this.options.screenEffects; r.nausea[0] = pt; if (pt > 0) r.nausea[1] = (w.time + partial) * (p.hasEffect('nausea') ? 7 : 20); }
+    // vanilla GameRenderer.bobHurt: tilt towards the damage direction, sin(f^4 * PI) * 14 degrees; death roll
+    r.hurtTilt[0] = 0; r.hurtTilt[1] = 0; r.deathRoll = 0;
+    if (p.deathTime > 0) r.deathRoll = 40 - 8000 / (p.deathTime + partial + 200);
+    if (p.hurtTime > 0) { let f = (p.hurtTime - partial) / p.hurtDuration; f = Math.sin(f * f * f * f * Math.PI); r.hurtTilt[0] = p.hurtDir; r.hurtTilt[1] = -f * 14 * (this.options.damageTilt ?? 1); }
     // third person camera
     if (this.gui.thirdPerson > 0) {
       const dir = lookDir(p.yaw, p.pitch);
@@ -875,7 +1134,8 @@ export class Game {
     const medium = eyeBlock !== 0 && this.registry.hasWater(eyeBlock) && cam.y < by + 0.9 ? 'water' : eyeBlock !== 0 && this.registry.isLava(eyeBlock) ? 'lava' : eyeBlock !== 0 && this.registry.nameOf(eyeBlock) === 'powder_snow' ? 'powder_snow' : 'air';
     const wc = this.biomeColors; const wo = w.getBiome(bx, bz) * 12;
     const waterColor = (wc[wo + 6] << 16) | (wc[wo + 7] << 8) | wc[wo + 8];
-    let sky = computeSky(w.dayTime, w.dimension, skyColorFor(biome), biome.fogColor, r.viewDistance, this.weather.rainLevel, this.weather.thunderLevel, cam.y, medium as any, waterColor);
+    const dayTimeF = this.rules.doDaylightCycle !== false && !this.paused ? w.dayTime + partial : w.dayTime;
+    let sky = computeSky(dayTimeF, w.dimension, skyColorFor(biome), biome.fogColor, r.viewDistance, this.weather.rainLevel, this.weather.thunderLevel, cam.y, medium as any, waterColor);
     if (p.hasEffect('blindness')) { sky.fogStart = 0; sky.fogEnd = 5; }
     if (this.weather.flash > 0) { sky.skyColor = [1, 1, 1]; sky.fogColor = sky.fogColor.map((v) => Math.min(1, v + 0.5)) as any; }
     // darkness in caves: vanilla sky light drives lightmap
@@ -935,10 +1195,10 @@ export class Game {
           vi++;
         }
       }
+      // vanilla RenderType.crumbling: blend(DST_COLOR, SRC_COLOR) with the block's own light, alpha < 0.1 discarded
       const gl = this.renderer.gl;
-      gl.enable(gl.BLEND); gl.blendFunc(gl.DST_COLOR, gl.SRC_COLOR);
-      this.renderer.drawChunkFormatBuffer(buf, quads, mat4Identity(new Float32Array(16)), sky, { light: 0xff, alphaCut: 0.01, blend: true, noCull: true });
-      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); gl.disable(gl.BLEND);
+      const nl = this.world.getLight(t.x + (t.face === 5 ? 1 : t.face === 4 ? -1 : 0), t.y + (t.face === 1 ? 1 : t.face === 0 ? -1 : 0), t.z + (t.face === 3 ? 1 : t.face === 2 ? -1 : 0));
+      this.renderer.drawChunkFormatBuffer(buf, quads, mat4Identity(new Float32Array(16)), sky, { light: nl, alphaCut: 0.1, blend: true, blendFunc: [gl.DST_COLOR, gl.SRC_COLOR], noCull: true });
     }
   }
 
@@ -961,9 +1221,10 @@ export class Game {
     r.resize();
     gl.clearColor(0.1, 0.1, 0.1, 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     if (!this.panoramaTex[0]) return;
-    const cam = r.camera; cam.fov = 85; cam.pitch = -5 + Math.sin(timeSec * 0.1) * 3; cam.yaw = (timeSec * 3) % 360; cam.x = cam.y = cam.z = 0;
+    const cam = r.camera; cam.fov = 85; this.panoramaAngle += (this.options.panoramaSpeed ?? 1) * 0.05; cam.pitch = -5 + Math.sin(timeSec * 0.1) * 3; cam.yaw = this.panoramaAngle % 360; cam.x = cam.y = cam.z = 0;
     r.updateMatrices();
     gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.CULL_FACE); // the mirrored cube faces would otherwise be back-face culled
     r.quadProg.use();
     gl.uniformMatrix4fv(r.quadProg.u('uVP'), false, r.vp);
     gl.uniform4f(r.quadProg.u('uColor'), 1, 1, 1, 1);
@@ -981,6 +1242,7 @@ export class Game {
     }
     gl.bindVertexArray(null);
     gl.enable(gl.DEPTH_TEST);
+    gl.enable(gl.CULL_FACE);
     void mat4Mul;
   }
 }

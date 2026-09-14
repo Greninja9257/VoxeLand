@@ -263,8 +263,11 @@ export class BlockTicker implements WorldListener {
       world.setBlock(x, y - 1, z, this.fluidState(lava, 8, true));
       return;
     }
-    const canSpreadSideways = below !== 0 && (!this.fluidCanReplace(below) || (reg.isFluid(below) && reg.isLava(below) === lava));
-    if (!canSpreadSideways && y - 1 >= MIN_Y) return;
+    // vanilla FlowingFluid.spread: only sources spread sideways over a "water hole" (air or the same fluid below);
+    // flowing water above other water just keeps falling
+    const source = reg.fluidLevel(state) === 0 || reg.isWaterlogged(state);
+    const waterHole = below === 0 || this.fluidCanReplace(below) || (reg.isFluid(below) && reg.isLava(below) === lava);
+    if (!source && waterHole && y - 1 >= MIN_Y) return;
     const next = amount - decay;
     if (next <= 0) return;
     // prefer directions that lead to a drop within 4 blocks

@@ -56,6 +56,8 @@ const SHADE = [0.5, 1.0, 0.8, 0.8, 0.6, 0.6];
 const TINT_GRASS = 1, TINT_FOLIAGE = 2, TINT_WATER = 3, TINT_DRY = 4, TINT_CONST = 5, TINT_REDSTONE = 6, TINT_STEM = 7, TINT_NONE = 0;
 
 export class Mesher {
+  /** Video options that change mesh output (set via the worker 'options' message). */
+  options = { smoothLighting: true, fancy: true };
   private writers = [new VertexWriter(), new VertexWriter(), new VertexWriter()];
   private occl: Uint8Array;      // per state: 6-bit mask | 0x80 computed
   private tintKind: Uint8Array;  // per block id
@@ -169,7 +171,9 @@ export class Mesher {
       for (let m = 0; m < models.length; m++) {
         const model = models[m];
         const quads = model.quads;
-        const useAO = model.ao;
+        const useAO = model.ao && this.options.smoothLighting;
+        // fast graphics: leaves are opaque (vanilla draws them in the solid layer without alpha testing)
+        const fastLeaves = !this.options.fancy && this.isLeaves[bid];
         for (let q = 0; q < quads.length; q++) {
           const quad = quads[q];
           if (quad.cull >= 0) {
@@ -184,7 +188,7 @@ export class Mesher {
               if (quad.fullFace && quad.layer === LAYER_SOLID && reg.stateBlock[ns] === bid && this.occlusion(s) & (1 << quad.cull)) continue;
             }
           }
-          this.emitQuad(input, x, y, z, quad, useAO, quad.tint >= 0 ? tintColor : 0xffffff);
+          this.emitQuad(input, x, y, z, quad, useAO, quad.tint >= 0 ? tintColor : 0xffffff, fastLeaves ? LAYER_SOLID : -1);
         }
       }
     }
@@ -207,9 +211,9 @@ export class Mesher {
   }
 
   /** Emit one baked quad with smooth lighting + AO. */
-  private emitQuad(input: MeshInput, x: number, y: number, z: number, quad: BakedQuad, useAO: boolean, tint: number): void {
+  private emitQuad(input: MeshInput, x: number, y: number, z: number, quad: BakedQuad, useAO: boolean, tint: number, forceLayer = -1): void {
     const { blocks, light } = input;
-    const w = this.writers[quad.layer];
+    const w = this.writers[forceLayer >= 0 ? forceLayer : quad.layer];
     w.ensure(4);
     const face = quad.face;
     const d = DIR_VEC[face];

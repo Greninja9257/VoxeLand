@@ -1,6 +1,6 @@
 // WebGL2 world renderer: chunk sections, atlas animation, lightmap, sky, sun/moon, clouds, outlines.
 import type { Assets, AtlasAnimation } from '../assets';
-import { Frustum, mat4Identity, mat4Invert, mat4Mul, mat4Perspective, mat4RotateX, mat4RotateY, mat4RotateZ as mat4RotZ, mat4Translate, mat4Scale, DEG, type Mat4 } from '../math';
+import { mat4Rotate, Frustum, mat4Identity, mat4Invert, mat4Mul, mat4Perspective, mat4RotateX, mat4RotateY, mat4RotateZ as mat4RotZ, mat4Translate, mat4Scale, DEG, type Mat4 } from '../math';
 import { MIN_Y, SECTION_COUNT } from '../world/chunk';
 import { Program, createTexture, buildMips, imageToData } from './gl';
 import { CHUNK_FS, CHUNK_VS, ENTITY_FS, ENTITY_VS, LINE_FS, LINE_VS, SKY_FS, SKY_VS, QUAD_FS, QUAD_VS, CLOUD_FS, CLOUD_VS } from './shaders';
@@ -36,12 +36,26 @@ export class Renderer implements SectionMeshTarget {
   private animData: ImageData;
   private animState: { a: AtlasAnimation; frame: number; tick: number; seq: number[]; times: number[] }[] = [];
   private atlasMipLevels = 4;
+  private atlasData!: ImageData;
   stats = { drawCalls: 0, sections: 0, quads: 0 };
   viewDistance = 8;
   private sortedTranslucent: SectionGpu[] = [];
   private visible: SectionGpu[] = [];
   fancyClouds = true;
+  private cloudMeshFancy = true;
   cloudsEnabled = true;
+  /** Rebuild the atlas mip chain with a different level count (Mipmap Levels option). */
+  setMipmapLevels(levels: number): void {
+    levels = Math.max(0, Math.min(4, Math.round(levels)));
+    if (levels === this.atlasMipLevels) return;
+    this.atlasMipLevels = levels;
+    const gl = this.gl;
+    const mips = buildMips(new Uint8Array(this.atlasData.data.buffer), this.atlasData.width, this.atlasData.height, levels);
+    gl.bindTexture(gl.TEXTURE_2D, this.atlasTex);
+    for (let l = 0; l < mips.length; l++) gl.texImage2D(gl.TEXTURE_2D, l, gl.RGBA, mips[l].width, mips[l].height, 0, gl.RGBA, gl.UNSIGNED_BYTE, mips[l].data);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, levels);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, levels > 0 ? gl.NEAREST_MIPMAP_LINEAR : gl.NEAREST);
+  }
 
   constructor(public canvas: HTMLCanvasElement, public assets: Assets) {
     const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, depth: true, stencil: false, powerPreference: 'high-performance', preserveDrawingBuffer: false })!;
@@ -61,6 +75,7 @@ export class Renderer implements SectionMeshTarget {
 
     // atlas with alpha-weighted mips
     const atlasData = imageToData(assets.atlasImage);
+    this.atlasData = atlasData;
     const mips = buildMips(new Uint8Array(atlasData.data.buffer), atlasData.width, atlasData.height, this.atlasMipLevels);
     this.atlasTex = gl.createTexture()!;
     gl.bindTexture(gl.TEXTURE_2D, this.atlasTex);
@@ -124,6 +139,7 @@ export class Renderer implements SectionMeshTarget {
       ...['new_moon', 'waxing_crescent', 'first_quarter', 'waxing_gibbous', 'full_moon', 'waning_gibbous', 'last_quarter', 'waning_crescent'].map((m) => load('moon_' + m, `environment/celestial/moon/${m}.png`)),
       load('moon_phases', 'environment/moon_phases.png'),
       load('clouds', 'environment/clouds.png'),
+      load('shadow', 'misc/shadow.png'),
     ]);
     if (this.celestial.clouds) this.cloudTex = this.celestial.clouds;
   }
@@ -190,6 +206,10 @@ export class Renderer implements SectionMeshTarget {
   cameraRoll = 0; cameraPitchOffset = 0;
   /** View-space scene shift (view bobbing), applied before the roll. */
   cameraShift = [0, 0];
+  /** Damage tilt: [direction degrees, roll degrees] and the death-screen roll (vanilla bobHurt). */
+  hurtTilt = [0, 0]; deathRoll = 0;
+  /** Nausea / portal whirl (vanilla GameRenderer confusion): [intensity 0..1, animation angle degrees] */
+  nausea = [0, 0];
   /** Integer part of the camera position; chunk offsets are relative to this so shared vertices are bit-identical. */
   camBase = [0, 0, 0];
   updateMatrices(): void {
@@ -197,9 +217,20 @@ export class Renderer implements SectionMeshTarget {
     const aspect = this.canvas.width / Math.max(1, this.canvas.height);
     mat4Perspective(this.proj, c.fov * DEG, aspect, 0.05, Math.max(256, this.viewDistance * 16 * 2.5));
     mat4Identity(this.view);
+    if (this.deathRoll) mat4RotZ(this.view, this.view, this.deathRoll * DEG);
+    if (this.hurtTilt[1]) { mat4RotateY(this.view, this.view, -this.hurtTilt[0] * DEG); mat4RotZ(this.view, this.view, this.hurtTilt[1] * DEG); mat4RotateY(this.view, this.view, this.hurtTilt[0] * DEG); }
     if (this.cameraShift[0] || this.cameraShift[1]) mat4Translate(this.view, this.view, this.cameraShift[0], this.cameraShift[1], 0);
     if (this.cameraRoll) mat4RotZ(this.view, this.view, this.cameraRoll * DEG);
-    mat4RotateX(this.view, this.view, (c.pitch + this.cameraPitchOffset) * DEG);
+    if (this.cameraPitchOffset) mat4RotateX(this.view, this.view, this.cameraPitchOffset * DEG);
+    if (this.nausea[0] > 0) {
+      const f = this.nausea[0];
+      let f1 = 5 / (f * f + 5) - f * 0.04; f1 *= f1;
+      const a = this.nausea[1] * DEG, s2 = Math.SQRT1_2;
+      mat4Rotate(this.view, this.view, a, 0, s2, s2);
+      mat4Scale(this.view, this.view, 1 / f1, 1, 1);
+      mat4Rotate(this.view, this.view, -a, 0, s2, s2);
+    }
+    mat4RotateX(this.view, this.view, c.pitch * DEG);
     mat4RotateY(this.view, this.view, (c.yaw + 180) * DEG);
     this.camBase = [Math.floor(c.x), Math.floor(c.y), Math.floor(c.z)];
     mat4Translate(this.view, this.view, -(c.x - this.camBase[0]), -(c.y - this.camBase[1]), -(c.z - this.camBase[2]));
@@ -278,6 +309,33 @@ export class Renderer implements SectionMeshTarget {
   /** Sun direction: noon = straight up (angle 0); rises in the east (+x), sets in the west (-x). */
   sunDir(angle: number): [number, number, number] {
     return [-Math.sin(angle), Math.cos(angle), 0];
+  }
+
+  /** Entity blob shadows (vanilla EntityRenderDispatcher.renderShadow, simplified to one quad per entity). */
+  drawShadows(list: { x: number; y: number; z: number; radius: number; alpha: number }[]): void {
+    const gl = this.gl, tex = this.celestial.shadow;
+    if (!tex || !list.length) return;
+    gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.depthMask(false);
+    gl.disable(gl.CULL_FACE);
+    this.quadProg.use();
+    gl.uniformMatrix4fv(this.quadProg.u('uVP'), false, this.vp);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex); gl.uniform1i(this.quadProg.u('uTex'), 0);
+    gl.bindVertexArray(this.quadVao);
+    const m = new Float32Array(16), cb = this.camBase;
+    for (const s of list) {
+      mat4Identity(m);
+      mat4Translate(m, m, s.x - cb[0], s.y - cb[1] + 0.005, s.z - cb[2]);
+      mat4Scale(m, m, s.radius, 1, s.radius);
+      mat4RotateX(m, m, -Math.PI / 2);
+      gl.uniformMatrix4fv(this.quadProg.u('uModel'), false, m);
+      gl.uniform4f(this.quadProg.u('uColor'), 1, 1, 1, s.alpha);
+      gl.drawArrays(gl.TRIANGLE_FAN, 0, 4);
+    }
+    gl.bindVertexArray(null);
+    gl.enable(gl.CULL_FACE);
+    gl.depthMask(true);
+    gl.disable(gl.BLEND);
   }
 
   private drawSunMoon(sky: SkyState): void {
@@ -395,7 +453,7 @@ export class Renderer implements SectionMeshTarget {
   }
 
   /** Draw a batch of chunk-format vertices (items, particles, held item) with a model matrix (camera-relative). */
-  drawChunkFormatBuffer(data: ArrayBuffer, quads: number, model: Mat4, sky: SkyState, opts: { light?: number; alphaCut?: number; blend?: boolean; colorMul?: [number, number, number, number]; noCull?: boolean; noDepth?: boolean; noFog?: boolean } = {}): void {
+  drawChunkFormatBuffer(data: ArrayBuffer, quads: number, model: Mat4, sky: SkyState, opts: { light?: number; alphaCut?: number; blend?: boolean; blendFunc?: [number, number]; colorMul?: [number, number, number, number]; noCull?: boolean; noDepth?: boolean; noFog?: boolean } = {}): void {
     const gl = this.gl;
     if (quads === 0) return;
     this.useChunkProgram(sky);
@@ -405,7 +463,7 @@ export class Renderer implements SectionMeshTarget {
     gl.uniform1f(this.chunkProg.u('uAlphaCut'), opts.alphaCut ?? 0.1);
     if (opts.colorMul) gl.uniform4fv(this.chunkProg.u('uColorMul'), opts.colorMul);
     if (opts.noFog) gl.uniform2f(this.chunkProg.u('uFogRange'), 1e6, 1e6 + 1);
-    if (opts.blend) { gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); }
+    if (opts.blend) { gl.enable(gl.BLEND); if (opts.blendFunc) gl.blendFunc(opts.blendFunc[0], opts.blendFunc[1]); else gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); }
     if (opts.noCull) gl.disable(gl.CULL_FACE);
     if (opts.noDepth) gl.disable(gl.DEPTH_TEST);
     const vao = this.scratchVao(data);
@@ -485,7 +543,7 @@ export class Renderer implements SectionMeshTarget {
   drawClouds(sky: SkyState, timeSec: number, cloudY: number): void {
     if (!this.cloudsEnabled || !this.cloudTex) return;
     const gl = this.gl;
-    if (!this.cloudVao) this.buildCloudMesh();
+    if (!this.cloudVao || this.cloudMeshFancy !== this.fancyClouds) this.buildCloudMesh();
     if (!this.cloudVao || this.cloudQuads === 0) return;
     const cam = { x: this.camBase[0], y: this.camBase[1], z: this.camBase[2] };
     this.cloudProg.use();
@@ -522,6 +580,8 @@ export class Renderer implements SectionMeshTarget {
   private buildCloudMesh(): void {
     // Build box clouds (fancy) from the clouds.png alpha: each opaque pixel = 12x4x12 block box.
     const gl = this.gl;
+    if (this.cloudVao) { gl.deleteVertexArray(this.cloudVao); this.cloudVao = null; }
+    if (this.cloudVbo) { gl.deleteBuffer(this.cloudVbo); this.cloudVbo = null; }
     const img = this.assets.atlas.tiles['environment/clouds'];
     const atlasData = imageToData(this.assets.atlasImage);
     if (!img) return;
@@ -535,9 +595,12 @@ export class Renderer implements SectionMeshTarget {
       for (const [x, y, z] of [[x0, y0, z0], [x1, y1, z1], [x2, y2, z2], [x3, y3, z3]]) verts.push(x, y, z, u, v, shade, shade, shade);
       quads++;
     };
+    const fancy = this.fancyClouds;
+    this.cloudMeshFancy = fancy;
     for (let z = 0; z < H; z++) for (let x = 0; x < W; x++) {
       if (!solid(x, z)) continue;
       const x0 = x * cell, z0 = z * cell, x1 = x0 + cell, z1 = z0 + cell;
+      if (!fancy) { push(x0, 0, z1, x0, 0, z0, x1, 0, z0, x1, 0, z1, 1.0); push(x0, 0, z0, x0, 0, z1, x1, 0, z1, x1, 0, z0, 1.0); continue; } // fast: flat sheet
       push(x0, height, z0, x0, height, z1, x1, height, z1, x1, height, z0, 1.0); // top
       push(x0, 0, z1, x0, 0, z0, x1, 0, z0, x1, 0, z1, 0.7); // bottom
       if (!solid(x - 1, z)) push(x0, height, z0, x0, 0, z0, x0, 0, z1, x0, height, z1, 0.9);

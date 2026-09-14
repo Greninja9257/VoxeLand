@@ -3,12 +3,15 @@ import type { Renderer } from './renderer';
 import type { SkyState } from './sky';
 import { getModel, type ModelDef, type PartDef, type BoxDef } from './entityModels';
 import { Entity, ItemEntity, LivingEntity, ExperienceOrb } from '../entity/entity';
+import { RemotePlayer } from '../entity/remotePlayer';
+import { BoatEntity } from '../entity/boat';
+import { EndCrystalEntity, EnderDragonEntity, WitherEntity } from '../entity/boss';
 import { Mob } from '../entity/mobs';
 import { FallingBlockEntity, PrimedTnt, ArrowEntity, ThrownProjectile } from '../entity/misc';
 import { Player } from '../entity/player';
 import type { ItemRenderer } from './itemRenderer';
 import type { Game } from '../game/game';
-import { mat4Identity, mat4Mul, mat4Perspective, mat4RotateX, mat4RotateY, mat4RotateZ, mat4Scale, mat4Translate, DEG, type Mat4 } from '../math';
+import { mat4Rotate, mat4Identity, mat4Mul, mat4Perspective, mat4RotateX, mat4RotateY, mat4RotateZ, mat4Scale, mat4Translate, DEG, type Mat4 } from '../math';
 import { createTexture } from './gl';
 import { ItemStack } from '../items/stack';
 import { DYE_COLORS } from './mesher';
@@ -101,10 +104,24 @@ export class EntityRenderer {
   drawAll(entities: Entity[], player: Player, sky: SkyState, partial: number, firstPerson: boolean): void {
     const gl = this.renderer.gl;
     this.time += 1 / 60;
+    const o = this.game.options;
+    const maxD = (this.renderer.viewDistance * 16 + 32) * o.entityDistance;
+    const shadows: { x: number; y: number; z: number; radius: number; alpha: number }[] = [];
+    const shadowFor = (e: Entity, radius: number) => {
+      if (!o.entityShadows || e instanceof ExperienceOrb) return;
+      const pos = this.lerpPos(e, partial); const cb = this.renderer.camBase;
+      const ex = pos[0] + cb[0], ey = pos[1] + cb[1], ez = pos[2] + cb[2];
+      // ground within 2 blocks below the feet
+      let gy = -1e9; for (let y = Math.floor(ey); y >= Math.floor(ey) - 2; y--) { const s = this.game.world.getBlock(Math.floor(ex), y, Math.floor(ez)); if (s && this.game.registry.fullCube[s]) { gy = y + 1; break; } }
+      if (gy < -1e8) return;
+      const a = Math.max(0, Math.min(1, (1 - (ey - gy) / 2))) * 0.5;
+      if (a > 0.01) shadows.push({ x: ex, y: gy, z: ez, radius, alpha: a });
+    };
     for (const e of entities) {
       if (e.removed) continue;
       const dx = e.x - this.renderer.camera.x, dz = e.z - this.renderer.camera.z;
-      if (dx * dx + dz * dz > (this.renderer.viewDistance * 16 + 32) ** 2) continue;
+      if (dx * dx + dz * dz > maxD * maxD) continue;
+      if (!(e instanceof ArrowEntity || e instanceof ThrownProjectile)) shadowFor(e, Math.min(2, e.width * 0.6 + 0.1));
       if (e instanceof Mob) this.drawMob(e, sky, partial);
       else if (e instanceof ItemEntity) this.drawItemEntity(e, sky, partial);
       else if (e instanceof FallingBlockEntity) this.drawBlockEntity(e.blockState, e, sky, partial, false);
@@ -112,9 +129,13 @@ export class EntityRenderer {
       else if (e instanceof ArrowEntity) this.drawArrow(e, sky, partial);
       else if (e instanceof ThrownProjectile) this.drawThrown(e, sky, partial);
       else if (e instanceof ExperienceOrb) this.drawXp(e, sky, partial);
+      else if (e instanceof RemotePlayer) this.drawPlayer(e, sky, partial);
+      else if (e instanceof BoatEntity) this.drawBoat(e, sky, partial);
+      else if (e instanceof EndCrystalEntity) this.drawCrystal(e, sky, partial);
     }
-    if (!firstPerson && !player.removed) this.drawPlayer(player, sky, partial);
+    if (!firstPerson && !player.removed) { this.drawPlayer(player, sky, partial); shadowFor(player, 0.5); }
     gl.bindVertexArray(null);
+    this.renderer.drawShadows(shadows);
   }
 
   private lerpPos(e: Entity, partial: number): [number, number, number] {
@@ -276,6 +297,7 @@ export class EntityRenderer {
         }
         pose.rightLeg = { rx: swing }; pose.leftLeg = { rx: swing2 };
         if (!zombieArms) this.humanoidAttack(pose, e.swingAnim(partial), hp);
+        if (e.vehicle) { pose.rightLeg = { rx: -1.4137167, ry: Math.PI / 10, rz: 0.07853982 }; pose.leftLeg = { rx: -1.4137167, ry: -Math.PI / 10, rz: -0.07853982 }; pose.rightArm = { ...(pose.rightArm ?? {}), rx: (pose.rightArm?.rx ?? 0) - Math.PI / 5 }; pose.leftArm = { ...(pose.leftArm ?? {}), rx: (pose.leftArm?.rx ?? 0) - Math.PI / 5 }; }
         if (e instanceof Player && e.isSneaking) {
           pose.body = { ...(pose.body ?? {}), rx: 0.5, ty: 3.2 }; pose.head = { ry: hy, rx: hp, ty: 4.2 };
           pose.rightArm = { ...(pose.rightArm ?? {}), rx: (pose.rightArm?.rx ?? 0) + 0.4, ty: 3.2 }; pose.leftArm = { ...(pose.leftArm ?? {}), rx: (pose.leftArm?.rx ?? 0) + 0.4, ty: 3.2 };
@@ -302,6 +324,7 @@ export class EntityRenderer {
         if (model === 'sheep' && e instanceof Mob && e.eatTimer > 0) pose.head = { ry: hy, rx: 0.8, ty: 3 };
         if (model === 'wolf' && e instanceof Mob) { pose.tail = { rx: e.angerTicks > 0 || e.tamed ? 0.6 : Math.PI / 4 + Math.sin(t * 3) * 0.1 }; if (e.sitting) { pose.body = { rx: Math.PI / 4 * 2, ty: 4 }; pose.leg0 = { rx: -1.3, ty: 4 }; pose.leg1 = { rx: -1.3, ty: 4 }; pose.leg2 = { rx: 0, ty: 4 }; pose.leg3 = { rx: 0, ty: 4 }; pose.mane = { ty: 4, rx: Math.PI / 2 }; pose.head = { ry: hy, rx: hp, ty: 4 }; } }
         if (model === 'wolf' && e instanceof Mob && e.attackAnim > 0) pose.head = { ry: hy, rx: hp + 0.3 };
+        if (model === 'turtle') { pose.leg0 = { rx: swing2 }; pose.leg1 = { rx: swing }; pose.leg2 = { rz: swing2 }; pose.leg3 = { rz: swing }; }
         if (model === 'rabbit') { const j = e.onGround ? 0 : 1; pose.leg0 = { rx: swing * 0.5 + j * -0.5 }; pose.leg1 = { rx: swing * 0.5 + j * -0.5 }; pose.leg2 = { rx: swing2 * 0.5 }; pose.leg3 = { rx: swing2 * 0.5 }; }
         break;
       }
@@ -328,38 +351,21 @@ export class EntityRenderer {
   }
 
   private drawMobHeldItem(e: Mob, base: Mat4, pose: Record<string, any>, stack: ItemStack, sky: SkyState, light: [number, number], model: string): void {
-    // right arm pivot in model space (-5, 2, 0) + arm rotation, then hand offset (-1, 10, 0 in arm space)
-    const m = this.tmp2;
-    m.set(base);
-    const arm = pose.rightArm ?? {};
-    const piv = model === 'villager' ? [-6, 6, 0] : [-5, 2, 0];
-    mat4Translate(m, m, piv[0], piv[1], piv[2]);
-    if (arm.rz) mat4RotateZ(m, m, arm.rz); if (arm.ry) mat4RotateY(m, m, arm.ry); if (arm.rx) mat4RotateX(m, m, arm.rx);
-    mat4Translate(m, m, -1, 10, -1);
-    // item: scale 16 (model units), vanilla third-person transform
-    const mesh = this.items.getMesh(stack);
-    const disp = new Float32Array(16);
-    this.items.applyDisplay(disp, mesh, 'thirdperson_righthand');
-    const item = new Float32Array(16);
-    mat4Identity(item);
-    mat4Scale(item, item, -16, -16, 16); // undo the -1/16 flip of the base matrix so the item is right-side up
-    mat4RotateX(item, item, -Math.PI / 2 * 0);
-    mat4Mul(item, m, item);
-    mat4Mul(item, item, disp);
-    this.renderer.drawChunkFormatBuffer(mesh.data, mesh.quads, item, sky, { light: (light[1] << 4) | light[0], alphaCut: 0.1, noCull: mesh.flat });
-    void e;
+    this.drawHandItem(base, pose, stack, sky, light, false, false, e.hurtTime > 0, model === 'villager' ? [-6, 6, 0] : null);
   }
 
   drawPlayer(p: Player, sky: SkyState, partial: number): void {
     const gl = this.renderer.gl;
-    const m = this.model('player');
+    const skin: string = (p as any).skin ?? this.game.options.skin;
+    const slim = skin === 'alex';
+    const m = this.model(slim ? 'player_slim' : 'player');
     const pos = this.lerpPos(p, partial);
     const bodyYaw = p.prevBodyYaw + ((((p.bodyYaw - p.prevBodyYaw) % 360) + 540) % 360 - 180) * partial;
     const headYaw = p.prevYaw + ((((p.yaw - p.prevYaw) % 360) + 540) % 360 - 180) * partial;
     const pitch = p.prevPitch + (p.pitch - p.prevPitch) * partial;
     const light = this.lightAt(p);
     const hurt = p.hurtTime > 0 || p.deathTime > 0;
-    this.beginEntityProgram(sky, this.texture('entity/player/wide/steve'), light, hurt ? [1, 0.5, 0.5, 1] : [1, 1, 1, 1]);
+    this.beginEntityProgram(sky, this.texture(slim ? 'entity/player/slim/alex' : 'entity/player/wide/steve'), light, hurt ? [1, 0.5, 0.5, 1] : [1, 1, 1, 1]);
     const base = this.entityMatrix(this.tmp, pos, bodyYaw, 1);
     if (p.deathTime > 0) { const t = Math.min(1, (p.deathTime + partial) / 20); mat4Translate(base, base, 0, 24, 0); mat4RotateZ(base, base, t * Math.PI / 2); mat4Translate(base, base, 0, -24, 0); }
     if (p.sleeping) { mat4Translate(base, base, 0, 24, 0); mat4RotateX(base, base, Math.PI / 2); mat4Translate(base, base, 0, -24, 0); }
@@ -385,19 +391,31 @@ export class EntityRenderer {
       for (const k of ['head', 'body', 'rightArm', 'leftArm', 'rightLeg', 'leftLeg']) if (!hide[k]) armorPose[k] = { ...(armorPose[k] ?? {}), scale: 1 + inflate / 8 * 0.5 };
       this.drawParts(m, base, armorPose, gl);
     }
-    // held item third person
+    // held items (vanilla ItemInHandLayer)
     const held = p.heldItem();
-    if (held) {
-      const mm = this.tmp2; mm.set(base);
-      const arm = pose.rightArm ?? {};
-      mat4Translate(mm, mm, -5, 2, 0);
-      if (arm.rz) mat4RotateZ(mm, mm, arm.rz); if (arm.ry) mat4RotateY(mm, mm, arm.ry); if (arm.rx) mat4RotateX(mm, mm, arm.rx);
-      mat4Translate(mm, mm, -1, 10, -1);
-      const mesh = this.items.getMesh(held);
-      const disp = new Float32Array(16); this.items.applyDisplay(disp, mesh, 'thirdperson_righthand');
-      const item = new Float32Array(16); mat4Identity(item); mat4Scale(item, item, -16, -16, 16); mat4Mul(item, mm, item); mat4Mul(item, item, disp);
-      this.renderer.drawChunkFormatBuffer(mesh.data, mesh.quads, item, sky, { light: (light[1] << 4) | light[0], alphaCut: 0.1, noCull: mesh.flat });
-    }
+    if (held) this.drawHandItem(base, pose, held, sky, light, false, slim, hurt);
+    const off = p.offhandItem();
+    if (off) this.drawHandItem(base, pose, off, sky, light, true, slim, hurt);
+    // name tag for other players
+    if ((p as any).isRemote && !p.sleeping) this.game.gui.queueNameTag(p.name, p.x, p.y + p.height + 0.5, p.z);
+  }
+
+  /** vanilla ItemInHandLayer.renderArmWithItem: hand transform in the (flipped) model space, then the item's
+   *  third-person display transform. All translations in pixels (model units). */
+  private drawHandItem(base: Mat4, pose: Record<string, any>, stack: ItemStack, sky: SkyState, light: [number, number], left: boolean, slim: boolean, hurt = false, armPivot: [number, number, number] | null = null): void {
+    const mm = this.tmp2; mm.set(base);
+    const arm = (left ? pose.leftArm : pose.rightArm) ?? {};
+    const piv = armPivot ?? [left ? 5 : -5, 2, 0];
+    mat4Translate(mm, mm, piv[0] + (arm.tx ?? 0), piv[1] + (arm.ty ?? 0), piv[2] + (arm.tz ?? 0));
+    if (arm.rz) mat4RotateZ(mm, mm, arm.rz); if (arm.ry) mat4RotateY(mm, mm, arm.ry); if (arm.rx) mat4RotateX(mm, mm, arm.rx);
+    if (slim) mat4Translate(mm, mm, left ? -0.5 : 0.5, 0, 0);
+    mat4RotateX(mm, mm, -Math.PI / 2);
+    mat4RotateY(mm, mm, Math.PI);
+    mat4Translate(mm, mm, left ? -1 : 1, 2, -10);
+    const mesh = this.items.getMesh(stack);
+    const disp = new Float32Array(16); this.items.applyDisplay(disp, mesh, left ? 'thirdperson_lefthand' : 'thirdperson_righthand', left);
+    const item = new Float32Array(16); mat4Identity(item); mat4Scale(item, item, 16, 16, 16); mat4Mul(item, mm, item); mat4Mul(item, item, disp);
+    this.renderer.drawChunkFormatBuffer(mesh.data, mesh.quads, item, sky, { light: (light[1] << 4) | light[0], alphaCut: 0.1, noCull: mesh.flat, colorMul: hurt ? [1, 0.5, 0.5, 1] : undefined });
   }
 
   private drawItemEntity(e: ItemEntity, sky: SkyState, partial: number): void {
@@ -495,10 +513,80 @@ export class EntityRenderer {
     this.renderer.drawChunkFormatBuffer(mesh.data, mesh.quads, m, sky, { light: (light[1] << 4) | light[0], noCull: true });
   }
 
+  /** vanilla BoatRenderer: translate 0.375 up, yaw, hurt wobble, scale(-1,-1,1), rotate 90, paddles rowing. */
+  private drawBoat(b: BoatEntity, sky: SkyState, partial: number): void {
+    const gl = this.renderer.gl;
+    const raft = b.isRaft;
+    const m = this.model(raft ? 'raft' : b.chest ? 'chest_boat' : 'boat');
+    const tex = this.texture(`entity/${b.chest ? 'chest_boat' : 'boat'}/${b.wood}`);
+    const pos = this.lerpPos(b, partial);
+    const yaw = b.prevYaw + ((((b.yaw - b.prevYaw) % 360) + 540) % 360 - 180) * partial;
+    const light = this.lightAt(b);
+    this.beginEntityProgram(sky, tex, light, [1, 1, 1, 1]);
+    const base = this.tmp;
+    mat4Identity(base);
+    mat4Translate(base, base, pos[0], pos[1] + 0.375, pos[2]);
+    mat4RotateY(base, base, (180 - yaw) * DEG);
+    const ht = b.hurtTime - partial;
+    if (ht > 0) mat4RotateX(base, base, Math.sin(ht) * ht * Math.min(40, b.damage) / 10 * b.hurtDir * DEG);
+    mat4Scale(base, base, -1 / 16, -1 / 16, 1 / 16);
+    mat4RotateY(base, base, Math.PI / 2);
+    const pose: Record<string, any> = {};
+    for (let i = 0; i < 2; i++) {
+      const rowing = i === 0 ? b.paddleLeft : b.paddleRight;
+      const t = rowing ? b.prevPaddlePos[i] + (b.paddlePos[i] - b.prevPaddlePos[i]) * partial : 0;
+      // vanilla BoatModel.animatePaddle (rotations are added to the part's base pose by drawParts)
+      const lerp = (a: number, c: number, f: number) => a + (c - a) * Math.max(0, Math.min(1, f));
+      const rx = lerp(-Math.PI / 3, -0.2617994, (Math.sin(-t) + 1) / 2);
+      let ry = lerp(-Math.PI / 4, Math.PI / 4, (Math.sin(-t + 1) + 1) / 2);
+      if (i === 1) ry = -ry; // the right paddle's base pose already carries the PI turn
+      pose[i === 0 ? 'paddleL' : 'paddleR'] = { rx, ry };
+    }
+    this.drawParts(m, base, pose, gl);
+    // water-mask: hide water inside the hull is a vanilla trick we approximate by drawing nothing extra
+  }
+
+  /** vanilla EndCrystalRenderer: bobbing, spinning nested cubes on a base, plus the healing beam to the dragon. */
+  private drawCrystal(c: EndCrystalEntity, sky: SkyState, partial: number): void {
+    const gl = this.renderer.gl;
+    const m = this.model('end_crystal');
+    const pos = this.lerpPos(c, partial);
+    const light: [number, number] = [15, 15];
+    this.beginEntityProgram(sky, this.texture('entity/end_crystal/end_crystal'), light, [1, 1, 1, 1]);
+    const t = c.age + partial;
+    const f = Math.sin(t * 0.2) / 2 + 0.5; const bob = f * f + f; // vanilla getY
+    const spin = t * 3 * DEG;
+    const base = new Float32Array(16);
+    const S45 = Math.SQRT1_2;
+    const build = (scale: number, extra: (mm: Mat4) => void) => {
+      mat4Identity(base);
+      mat4Translate(base, base, pos[0], pos[1], pos[2]);
+      mat4Scale(base, base, 2, 2, 2); mat4Translate(base, base, 0, -0.5, 0);
+      extra(base);
+      mat4Scale(base, base, scale / 16, scale / 16, scale / 16);
+      mat4Scale(base, base, -1, -1, 1); // vanilla entity flip so the model's y-down matches
+      return base;
+    };
+    // base plate
+    if (c.showBottom) this.drawParts(m, build(1, () => {}), { glass: { hidden: true }, cube: { hidden: true } }, gl);
+    // outer glass
+    this.drawParts(m, build(1, (mm) => { mat4RotateY(mm, mm, spin); mat4Translate(mm, mm, 0, -(1.5 + bob / 2), 0); mat4Rotate(mm, mm, 60 * DEG, S45, 0, S45); }), { cube: { hidden: true }, base: { hidden: true } }, gl);
+    // inner glass
+    this.drawParts(m, build(0.875, (mm) => { mat4RotateY(mm, mm, spin); mat4Translate(mm, mm, 0, -(1.5 + bob / 2), 0); mat4Rotate(mm, mm, 60 * DEG, S45, 0, S45); mat4Rotate(mm, mm, 60 * DEG, S45, 0, S45); mat4RotateY(mm, mm, spin); }), { cube: { hidden: true }, base: { hidden: true } }, gl);
+    // core cube
+    this.drawParts(m, build(0.875 * 0.875, (mm) => { mat4RotateY(mm, mm, spin); mat4Translate(mm, mm, 0, -(1.5 + bob / 2), 0); mat4Rotate(mm, mm, 60 * DEG, S45, 0, S45); mat4Rotate(mm, mm, 60 * DEG, S45, 0, S45); mat4RotateY(mm, mm, spin); mat4Rotate(mm, mm, 60 * DEG, S45, 0, S45); mat4RotateY(mm, mm, spin); }), { glass: { hidden: true }, base: { hidden: true } }, gl);
+    // healing beam
+    if (c.beamTarget) {
+      const cb = this.renderer.camBase;
+      const y0 = pos[1] + 2 + bob;
+      this.renderer.drawLines(new Float32Array([pos[0], y0, pos[2], c.beamTarget[0] - cb[0], c.beamTarget[1] - cb[1], c.beamTarget[2] - cb[2]]), [0.9, 0.3, 1, 0.8], 4);
+    }
+  }
+
   private drawXp(e: ExperienceOrb, sky: SkyState, partial: number): void {
     const pos = this.lerpPos(e, partial);
     const gl = this.renderer.gl;
-    const tex = this.texture('entity/experience_orb');
+    const tex = this.texture('entity/experience/experience_orb');
     const t = (e.age + partial) / 20;
     // 4x4 sprite sheet (16px each in 64x64); frame by time; colour pulse
     const frame = Math.floor(t * 10) % 16; const fx = (frame % 4) / 4, fy = Math.floor(frame / 4) / 4;
@@ -592,26 +680,30 @@ export class EntityRenderer {
     gl.clear(gl.DEPTH_BUFFER_BIT);
     const swing = swingProgress;
     const f1 = Math.sin(swing * swing * Math.PI), f2 = Math.sin(Math.sqrt(swing) * Math.PI);
+    // main hand option: everything is mirrored on x for left-handed players (vanilla HumanoidArm sign)
+    const left = this.game.options.mainHand === 'left';
+    const i = left ? -1 : 1;
+    const slim = this.game.options.skin === 'alex';
     if (held) {
       const mesh = this.items.getMesh(held);
       const m = new Float32Array(16);
       mat4Identity(m);
-      // vanilla ItemInHandRenderer.renderArmWithItem (right hand)
+      // vanilla ItemInHandRenderer.renderArmWithItem
       const f5 = -0.4 * Math.sin(Math.sqrt(swing) * Math.PI), f6 = 0.2 * Math.sin(Math.sqrt(swing) * Math.PI * 2), f10 = -0.2 * Math.sin(swing * Math.PI);
-      mat4Translate(m, m, f5, f6, f10);
+      mat4Translate(m, m, i * f5, f6, f10);
       const using = p.usingItem === held;
       const useT = using ? Math.min(1, (p.itemUseTicks + partial) / Math.max(1, p.useDuration)) : 0;
-      mat4Translate(m, m, 0.56, -0.52 - equipProgress * 0.6, -0.72); // applyItemArmTransform
+      mat4Translate(m, m, i * 0.56, -0.52 - equipProgress * 0.6, -0.72); // applyItemArmTransform
       if (using && held.item.food) {
         // applyEatTransform
         const f = (p.useDuration - p.itemUseTicks) - partial + 1, fr = f / p.useDuration;
         if (fr < 0.8) mat4Translate(m, m, 0, Math.abs(Math.cos(f / 4 * Math.PI) * 0.1), 0);
         const fe = 1 - Math.pow(fr, 27);
-        mat4Translate(m, m, fe * 0.6, fe * -0.5, 0);
-        mat4RotateY(m, m, fe * 90 * DEG); mat4RotateX(m, m, fe * 10 * DEG); mat4RotateY(m, m, fe * 30 * DEG);
+        mat4Translate(m, m, i * fe * 0.6, fe * -0.5, 0);
+        mat4RotateY(m, m, i * fe * 90 * DEG); mat4RotateX(m, m, fe * 10 * DEG); mat4RotateY(m, m, i * fe * 30 * DEG);
       } else if (using && (held.item.name === 'bow' || held.item.name === 'crossbow' || held.item.name === 'trident')) {
-        mat4Translate(m, m, -0.2785682, 0.18344387, 0.15731531);
-        mat4RotateX(m, m, -13.935 * DEG); mat4RotateY(m, m, 35.3 * DEG); mat4RotateZ(m, m, -9.785 * DEG);
+        mat4Translate(m, m, i * -0.2785682, 0.18344387, 0.15731531);
+        mat4RotateX(m, m, -13.935 * DEG); mat4RotateY(m, m, i * 35.3 * DEG); mat4RotateZ(m, m, i * -9.785 * DEG);
         const pull = Math.min(1, useT * 20 / 20 * (p.useDuration > 100 ? 20 / 20 : 1));
         const f = Math.min(1, (p.itemUseTicks + partial) / 20);
         const f7 = f > 0.1 ? Math.sin((f - 0.1) * 1.3) * 0.01 : 0;
@@ -620,12 +712,12 @@ export class EntityRenderer {
         void pull;
       } else {
         // applyItemArmAttackTransform
-        mat4RotateY(m, m, (45 + f1 * -20) * DEG);
-        mat4RotateZ(m, m, f2 * -20 * DEG);
+        mat4RotateY(m, m, i * (45 + f1 * -20) * DEG);
+        mat4RotateZ(m, m, i * f2 * -20 * DEG);
         mat4RotateX(m, m, f2 * -80 * DEG);
-        mat4RotateY(m, m, -45 * DEG);
+        mat4RotateY(m, m, i * -45 * DEG);
       }
-      const disp = new Float32Array(16); this.items.applyDisplay(disp, mesh, 'firstperson_righthand');
+      const disp = new Float32Array(16); this.items.applyDisplay(disp, mesh, left ? 'firstperson_lefthand' : 'firstperson_righthand', left);
       mat4Mul(m, m, disp);
       // view bobbing of the hand (vanilla renderHandsWithItems)
       const bobM = new Float32Array(16); mat4Identity(bobM);
@@ -637,22 +729,24 @@ export class EntityRenderer {
       this.renderer.drawChunkFormatBuffer(mesh.data, mesh.quads, m, sky, { light: (light[1] << 4) | light[0], alphaCut: 0.1, noCull: mesh.flat, noFog: true });
     } else {
       // arm (vanilla ItemInHandRenderer.renderPlayerArm transform sequence)
-      const m = this.model('player');
-      this.beginEntityProgram(sky, this.texture('entity/player/wide/steve'), light, [1, 1, 1, 1]);
+      const m = this.model(slim ? 'player_slim' : 'player');
+      this.beginEntityProgram(sky, this.texture(slim ? 'entity/player/slim/alex' : 'entity/player/wide/steve'), light, [1, 1, 1, 1]);
       gl.uniform2f(this.renderer.entityProg.u('uFogRange'), 1e6, 1e6 + 1);
       const base = new Float32Array(16);
       mat4Identity(base);
-      mat4Translate(base, base, 0.64, -0.6 - equipProgress * 0.6, -0.72);
-      mat4RotateY(base, base, 45 * DEG);
-      mat4RotateY(base, base, f2 * 70 * DEG);
-      mat4RotateZ(base, base, f1 * -20 * DEG);
-      mat4Translate(base, base, -1, 3.6, 3.5);
-      mat4RotateZ(base, base, 120 * DEG);
+      mat4Translate(base, base, i * 0.64, -0.6 - equipProgress * 0.6, -0.72);
+      mat4RotateY(base, base, i * 45 * DEG);
+      mat4RotateY(base, base, i * f2 * 70 * DEG);
+      mat4RotateZ(base, base, i * f1 * -20 * DEG);
+      mat4Translate(base, base, i * -1, 3.6, 3.5);
+      mat4RotateZ(base, base, i * 120 * DEG);
       mat4RotateX(base, base, 200 * DEG);
-      mat4RotateY(base, base, -135 * DEG);
-      mat4Translate(base, base, 5.6, 0, 0);
+      mat4RotateY(base, base, i * -135 * DEG);
+      mat4Translate(base, base, i * 5.6, 0, 0);
       mat4Scale(base, base, 1 / 16, 1 / 16, 1 / 16);
-      const pose = { head: { hidden: true }, hat: { hidden: true }, body: { hidden: true }, leftArm: { hidden: true }, rightLeg: { hidden: true }, leftLeg: { hidden: true } };
+      const pose: Record<string, any> = { head: { hidden: true }, hat: { hidden: true }, body: { hidden: true }, rightLeg: { hidden: true }, leftLeg: { hidden: true } };
+      pose[left ? 'rightArm' : 'leftArm'] = { hidden: true };
+      if (left) pose.leftArm = { tx: -10 };
       this.drawParts(m, base, pose, gl);
     }
     vp.set(savedVp);

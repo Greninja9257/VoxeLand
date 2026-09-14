@@ -57,7 +57,6 @@ export class EndGen implements Generator {
       if (Math.abs(px - x0 - 8) > 16 + r || Math.abs(pz - z0 - 8) > 16 + r) continue;
       for (let dx = -r; dx <= r; dx++) for (let dz = -r; dz <= r; dz++) if (dx * dx + dz * dz <= r * r + 1) for (let y = 40; y < h; y++) sink.set(px + dx, y, pz + dz, S.obsidian);
       sink.set(px, h, pz, S.bedrock);
-      sink.set(px, h + 1, pz, S.torch);
     }
     // exit portal frame at origin
     if (Math.abs(x0 + 8) < 24 && Math.abs(z0 + 8) < 24) {

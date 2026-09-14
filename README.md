@@ -18,16 +18,37 @@ npm run dev              # http://localhost:5173
 
 `npm run build` produces a static site in `dist/` (serve it from any static host; workers and IndexedDB saves work out of the box).
 
+## Multiplayer (LAN and public servers)
+
+VoxeLand ships a tiny relay server (`server/index.mjs`, Node + `ws`) that also serves the built game. The browser
+that opens a world is the authoritative host; guests join through the relay, so nobody needs to forward ports.
+
+```bash
+npm run build
+npm run server           # http://localhost:8080  (game + relay on /ws)
+```
+
+- **Open to LAN** — in a world, press Esc → *Open to LAN* → pick game mode / cheats → *Start LAN World*. Everyone on
+  your network opens `http://<your-ip>:8080/` in a browser and picks the world from **Multiplayer**. The relay only
+  lists LAN worlds to clients on private addresses.
+- **Public** — deploy the same server to the internet (see Railway below), enter its address under
+  Multiplayer → *Public Server Address…*, and choose *Visibility: Public* when opening the world. Public worlds are
+  listed for everyone using that relay.
+- **Direct Connection** takes a relay URL (`ws://host:8080/ws`) optionally followed by `#serverId`.
+- Guests run their own player physics and inventory; the host runs the world (blocks, mobs, items, time, weather,
+  containers). Guest player data is saved in the host's world under the guest's name. Dimension travel is host-only
+  for now, and the tab list (Tab) shows everyone online.
+
+While the host's tab is in the background a worker timer keeps the world ticking at 20 TPS.
+
 ## Railway deployment
 
-Connect this repository to a Railway service and deploy it. The checked-in
-`railway.json` tells Railway to fetch the git-ignored game assets, create the
-production build, start the bundled static server, and check `/healthz` before
-routing traffic to it. The server automatically listens on Railway's `PORT`.
+Connect this repository to a Railway service and deploy it. The checked-in `railway.json` fetches the git-ignored
+game assets, builds, and starts `server/index.mjs` (game + relay) on Railway's `PORT`. The relay detects the
+Railway environment and switches to public mode, so worlds opened with *Visibility: Public* appear in the
+Multiplayer list of everyone who points their client at `wss://<your-app>.up.railway.app/ws`.
 
-The full asset download is roughly 450 MB and makes the first build relatively
-slow. Subsequent build cache hits may be faster, but Railway does not guarantee
-that a build cache is available.
+The full asset download is roughly 450 MB and makes the first build relatively slow.
 
 **Browsers:** Chrome / Edge / Firefox (desktop). Safari lacks Ogg Vorbis decoding for Web Audio, so sounds are silent there.
 
@@ -74,6 +95,11 @@ that a build cache is available.
 - Vanilla font renderer (ascii/accented/non-latin providers, `§` formatting), sounds for every action with positional audio, background music & records, ambient cave / underwater / rain loops.
 - Particles (block cracks, smoke, flames, crits, hearts, notes, portals, splash, bubbles, explosions, sweep, campfire smoke, enchant glyphs, rain splashes).
 - Chat commands: `/gamemode /time /tp /give /weather /difficulty /kill /seed /clear /effect /xp /summon /setblock /fill /gamerule /spawnpoint /locate /enchant /say`.
+- **Multiplayer:** LAN / public worlds through the bundled relay, tab list, chat & commands relayed, container sync, boats and mobs mirrored.
+- **Bosses:** the Ender Dragon (crystals heal it, circling / strafing fireballs / perching + breath, exit portal & dragon egg on death) and the Wither (spawn charge, three heads shooting skulls, block breaking, armoured phase, nether star).
+- **Boats & rafts:** vanilla boat physics, two passengers, chest boats, rowing animation.
+- **Settings:** every vanilla options screen (Video, Music & Sounds, Controls/Mouse/Key Binds, Chat, Skin Customization, Accessibility, Language) with working options (simulation distance, smooth lighting, mipmaps, clouds fast/fancy, biome blend, FOV/distortion effects, damage tilt, particles, main hand, skin, chat scale/width/opacity, toggle sneak/sprint, …).
+- **Recipe book** in the inventory and crafting table, command suggestions with tab completion and vanilla syntax (`/give @s diamond 3`, selectors, relative coordinates).
 
 ## Performance notes
 
@@ -81,7 +107,9 @@ Chunk generation and meshing run in Web Workers (pool sized to your CPU). Each 1
 
 ## Not (yet) implemented
 
-Structures (villages, strongholds, fortresses, temples, ancient cities), the Ender Dragon fight and Wither behaviour (they exist as mobs only), villager professions/real trades, maps, books, banners patterns, boats & minecarts, elytra flight, fishing, advancements & statistics, multiplayer.
+Structures (villages, strongholds, fortresses, temples, ancient cities), villager professions/real trades, maps,
+books, banner patterns, minecarts, elytra flight, fishing, advancements & statistics, guest dimension travel in
+multiplayer, resource-pack switching at runtime.
 
 ## Credits
 

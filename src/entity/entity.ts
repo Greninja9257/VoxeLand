@@ -42,6 +42,29 @@ export abstract class Entity {
   world!: World;
   game!: Game;
   glowing = false;
+  /** Multiplayer guest: this entity mirrors one simulated on the host (id on the host side). */
+  remote = false;
+  remoteId = 0;
+  protected snap: { x: number; y: number; z: number; yaw: number; pitch: number } | null = null;
+
+  /** Store a host snapshot; remoteTick() interpolates towards it. */
+  applySnapshot(s: any): void {
+    if (!this.snap || Math.abs(s.x - this.x) + Math.abs(s.y - this.y) + Math.abs(s.z - this.z) > 12) { this.setPos(s.x, s.y, s.z); this.yaw = this.prevYaw = s.yaw; this.pitch = this.prevPitch = s.pitch; }
+    this.snap = { x: s.x, y: s.y, z: s.z, yaw: s.yaw, pitch: s.pitch };
+    if (s.vx !== undefined) { this.vx = s.vx; this.vy = s.vy; this.vz = s.vz; }
+    if (s.og !== undefined) this.onGround = !!s.og;
+  }
+  /** Guest-side tick: smooth interpolation instead of simulation. */
+  remoteTick(): void {
+    this.prevX = this.x; this.prevY = this.y; this.prevZ = this.z; this.prevYaw = this.yaw; this.prevPitch = this.pitch;
+    this.age++;
+    if (!this.snap) return;
+    const f = 0.5;
+    this.x += (this.snap.x - this.x) * f; this.y += (this.snap.y - this.y) * f; this.z += (this.snap.z - this.z) * f;
+    let dy = this.snap.yaw - this.yaw; while (dy > 180) dy -= 360; while (dy < -180) dy += 360;
+    this.yaw += dy * f; this.pitch += (this.snap.pitch - this.pitch) * f;
+    this.updateBB();
+  }
 
   setPos(x: number, y: number, z: number): void {
     this.x = x; this.y = y; this.z = z;
@@ -56,7 +79,8 @@ export abstract class Entity {
 
   /** Called each game tick (20/s). */
   tick(): void {
-    this.prevX = this.x; this.prevY = this.y; this.prevZ = this.z;
+    // a vehicle moves its passengers before they tick and records their previous position itself
+    if (!this.vehicle) { this.prevX = this.x; this.prevY = this.y; this.prevZ = this.z; }
     this.prevYaw = this.yaw; this.prevPitch = this.pitch;
     this.age++;
     if (this.portalCooldown > 0) this.portalCooldown--;
@@ -97,7 +121,7 @@ export abstract class Entity {
 
   /** Move with collision. */
   move(dx: number, dy: number, dz: number): void {
-    if (this.noClip) { this.x += dx; this.y += dy; this.z += dz; this.updateBB(); return; }
+    if (this.noClip) { this.x += dx; this.y += dy; this.z += dz; this.updateBB(); this.onGround = false; this.horizontalCollision = false; this.verticalCollision = false; return; }
     const ox = dx, oy = dy, oz = dz;
     const bb = this.bb;
     // sneaking edge protection (don't fall off edges)
@@ -108,21 +132,25 @@ export abstract class Entity {
       while (dz !== 0 && !this.collides(test.copy(bb).offset(0, -1, dz))) { dz = Math.abs(dz) < step ? 0 : dz > 0 ? dz - step : dz + step; }
       while (dx !== 0 && dz !== 0 && !this.collides(test.copy(bb).offset(dx, -1, dz))) { dx = Math.abs(dx) < step ? 0 : dx > 0 ? dx - step : dx + step; dz = Math.abs(dz) < step ? 0 : dz > 0 ? dz - step : dz + step; }
     }
+    // vanilla Entity.collide: sweep from the original box; step attempts also start from the ORIGINAL box
+    const orig = bb.clone();
     const moved = this.sweep(bb, dx, dy, dz);
     let [mx, my, mz] = moved;
-    // step up
-    if (this.stepHeight > 0 && this.onGround !== false && (mx !== dx || mz !== dz) && (this.onGround || (oy !== my && oy < 0))) {
-      const stepBB = bb.clone();
-      const [sx, sy, sz] = this.sweep(stepBB, dx, this.stepHeight, dz);
-      const [sx2, sy2, sz2] = this.sweep(stepBB, 0, this.stepHeight, 0);
-      let bestX = sx, bestZ = sz, bestY = sy, bestBB = stepBB.clone();
-      // alternative: step up first, then move
-      const alt = bb.clone(); const up = this.sweep(alt, 0, this.stepHeight, 0); const hm = this.sweep(alt, dx, 0, dz);
-      if (hm[0] * hm[0] + hm[2] * hm[2] > bestX * bestX + bestZ * bestZ) { bestX = hm[0]; bestZ = hm[2]; bestY = up[1]; bestBB = alt.clone(); }
-      void sx2; void sy2; void sz2;
+    // step up (vanilla: only when on the ground, or moving down into the ground)
+    if (this.stepHeight > 0 && (this.onGround || (oy !== my && oy < 0)) && (mx !== dx || mz !== dz)) {
+      const stepBB = orig.clone();
+      const [sx, , sz] = this.sweep(stepBB, dx, this.stepHeight, dz);
+      const sy = stepBB.minY - orig.minY;
+      let bestX = sx, bestZ = sz, bestY = sy, bestBB = stepBB;
+      // alternative: step up first, then move horizontally
+      const alt = orig.clone(); const up = this.sweep(alt, 0, this.stepHeight, 0);
+      if (up[1] < this.stepHeight) {
+        const hm = this.sweep(alt, dx, 0, dz);
+        if (hm[0] * hm[0] + hm[2] * hm[2] > bestX * bestX + bestZ * bestZ) { bestX = hm[0]; bestZ = hm[2]; bestY = up[1]; bestBB = alt; }
+      }
       if (bestX * bestX + bestZ * bestZ > mx * mx + mz * mz) {
-        // step down to ground
-        const down = this.sweep(bestBB, 0, -this.stepHeight - 0.001, 0);
+        // settle back down by (stepped height - requested dy): a jump keeps its upward motion
+        const down = this.sweep(bestBB, 0, -bestY + oy, 0);
         mx = bestX; mz = bestZ; my = bestY + down[1];
         bb.copy(bestBB);
       }
@@ -270,13 +298,10 @@ export abstract class LivingEntity extends Entity {
     this.health -= amount;
     if (d.attacker) this.lastAttacker = d.attacker;
     // knockback
+    // vanilla LivingEntity.hurt -> knockback(0.4, attacker.x - x, attacker.z - z): pushed AWAY from the attacker
     if (d.knockbackX !== undefined || d.attacker) {
-      let kx = d.knockbackX ?? (d.attacker ? this.x - d.attacker.x : 0), kz = d.knockbackZ ?? (d.attacker ? this.z - d.attacker.z : 0);
-      const len = Math.hypot(kx, kz) || 1;
-      kx /= len; kz /= len;
-      const strength = 0.4 * (1 - this.knockbackResistance());
-      this.vx = this.vx / 2 - kx * strength; this.vz = this.vz / 2 - kz * strength;
-      if (this.onGround) this.vy = Math.min(0.4, this.vy / 2 + strength);
+      const kx = d.knockbackX ?? (d.attacker ? d.attacker.x - this.x : 0), kz = d.knockbackZ ?? (d.attacker ? d.attacker.z - this.z : 0);
+      this.knockback(0.4, kx, kz);
     }
     this.onHurt(d, amount);
     if (this.health <= 0) this.die(d);
@@ -284,6 +309,17 @@ export abstract class LivingEntity extends Entity {
   }
 
   knockbackResistance(): number { return 0; }
+  /** vanilla LivingEntity.knockback(strength, x, z): velocity halves and gets -normalize(x,z)*strength; on the ground the
+   *  vertical part becomes min(0.4, vy/2 + strength). */
+  knockback(strength: number, x: number, z: number): void {
+    strength *= 1 - this.knockbackResistance();
+    if (strength <= 0) return;
+    const len = Math.hypot(x, z);
+    if (len < 1e-4) return;
+    const nx = x / len * strength, nz = z / len * strength;
+    this.vx = this.vx / 2 - nx; this.vz = this.vz / 2 - nz;
+    this.vy = this.onGround ? Math.min(0.4, this.vy / 2 + strength) : this.vy;
+  }
   protected onHurt(_d: EntityDamage, _amount: number): void {}
   die(_d: EntityDamage): void { this.health = 0; this.isDead = true; }
 
@@ -335,9 +371,12 @@ export abstract class LivingEntity extends Entity {
     }
     // block contact effects
     this.checkBlockContacts();
+    // riding: the vehicle moves us
+    if (this.vehicle) { if (this.vehicle.removed) this.vehicle = null; else { this.aiStep(); this.fallDistance = 0; this.headYaw = this.yaw; const hd = wrapDegrees(this.yaw - this.bodyYaw); if (Math.abs(hd) > 50) this.bodyYaw = this.yaw - Math.sign(hd) * 50; return; } }
     // movement
     this.aiStep();
     this.travel();
+    this.pushEntities();
     // limb animation
     const dx = this.x - this.prevX, dz = this.z - this.prevZ;
     let amt = Math.min(1, Math.sqrt(dx * dx + dz * dz) * 4);
@@ -350,9 +389,58 @@ export abstract class LivingEntity extends Entity {
     this.headYaw = this.yaw;
   }
 
+  /** vanilla LivingEntity.pushEntities / Entity.push: overlapping entities shove each other apart horizontally. */
+  protected pushEntities(): void {
+    if (this.noClip || this.remote || (this as any).isSpectator) return;
+    const list = this.game.entities;
+    for (const e of list) {
+      if (e === this || e.removed || e.noClip || !(e instanceof LivingEntity || e.type === 'boat') || (e as any).isSpectator) continue;
+      if (e === this.vehicle || e.vehicle === this) continue;
+      if (!e.bb.intersects(this.bb)) continue;
+      let dx = e.x - this.x, dz = e.z - this.z;
+      let d = Math.max(Math.abs(dx), Math.abs(dz));
+      if (d < 0.01) continue;
+      d = Math.sqrt(d); dx /= d; dz /= d;
+      const inv = Math.min(1, 1 / d); dx *= inv * 0.05; dz *= inv * 0.05;
+      if (!this.passengers.length && !this.vehicle) { this.vx -= dx; this.vz -= dz; }
+      if (!e.passengers.length && !e.remote) { e.vx += dx; e.vz += dz; }
+    }
+    // the host's own player is not in the entity list
+    const p = this.game.player;
+    if (p && p !== (this as any) && !p.isSpectator && !p.vehicle && !p.noClip && p.bb.intersects(this.bb)) {
+      let dx = p.x - this.x, dz = p.z - this.z; let d = Math.max(Math.abs(dx), Math.abs(dz));
+      if (d >= 0.01) { d = Math.sqrt(d); dx /= d; dz /= d; const inv = Math.min(1, 1 / d); dx *= inv * 0.05; dz *= inv * 0.05; if (!this.vehicle) { this.vx -= dx; this.vz -= dz; } p.vx += dx; p.vz += dz; }
+    }
+  }
+
   protected onDeathFinished(): void {}
   canBreatheUnderwater(): boolean { return false; }
   respirationLevel(): number { return 0; }
+
+  applySnapshot(s: any): void {
+    super.applySnapshot(s);
+    if (s.h !== undefined) this.health = s.h;
+    if (s.hurt && this.hurtTime === 0) this.hurtTime = this.hurtDuration;
+    if (s.dt !== undefined) this.deathTime = s.dt;
+    if (s.swing) this.swing();
+    if (s.hy !== undefined) this.snapHead = s.hy;
+    if (s.by !== undefined) this.snapBody = s.by;
+  }
+  private snapHead: number | null = null; private snapBody: number | null = null;
+  remoteTick(): void {
+    this.prevBodyYaw = this.bodyYaw; this.prevHeadYaw = this.headYaw; this.prevSwingProgress = this.swingProgress; this.prevLimbSwingAmount = this.limbSwingAmount;
+    const ox = this.x, oz = this.z;
+    super.remoteTick();
+    const f = 0.5;
+    if (this.snapHead !== null) { let d = this.snapHead - this.headYaw; while (d > 180) d -= 360; while (d < -180) d += 360; this.headYaw += d * f; } else this.headYaw = this.yaw;
+    if (this.snapBody !== null) { let d = this.snapBody - this.bodyYaw; while (d > 180) d -= 360; while (d < -180) d += 360; this.bodyYaw += d * f; } else this.bodyYaw = this.yaw;
+    const amt = Math.min(1, Math.hypot(this.x - ox, this.z - oz) * 4);
+    this.limbSwingAmount += (amt - this.limbSwingAmount) * 0.4;
+    this.limbSwing += this.limbSwingAmount;
+    this.updateSwing();
+    if (this.hurtTime > 0) this.hurtTime--;
+    if (this.deathTime > 0 && this.deathTime < 20) this.deathTime++;
+  }
 
   protected updateSwing(): void {
     if (this.swinging) {

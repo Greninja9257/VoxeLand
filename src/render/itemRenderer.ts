@@ -3,6 +3,7 @@
 import type { Assets } from '../assets';
 import type { ItemStack } from '../items/stack';
 import type { ModelBaker, BakedModel } from './models';
+import { Mesher, PAD, pidx, type MeshInput } from './mesher';
 import { VERTEX_STRIDE } from './mesher';
 import type { Renderer } from './renderer';
 import { mat4Identity, mat4Mul, mat4Ortho, mat4RotateX, mat4RotateY, mat4RotateZ, mat4Scale, mat4Translate, DEG, type Mat4 } from '../math';
@@ -75,9 +76,37 @@ export class ItemRenderer {
     if (!layers.length) {
       const blockModel = this.baker.firstModel(this.baker.registry.defaultState(name));
       if (blockModel && blockModel.quads.length) return this.bakeBlockModel(blockModel, tint, blockModel.display, blockModel.guiLight);
+      // chests, shulker boxes, heads, banners, pots, bells: mesh the block-entity model with the world mesher
+      const special = this.bakeSpecialBlock(name, resolved?.display ?? {});
+      if (special) return special;
       layers.push(this.baker.tileUv.has('item/' + name) ? 'item/' + name : 'block/' + name);
     }
     return this.bakeFlat(layers, tint, resolved?.display ?? {}, name);
+  }
+
+  private mesher: Mesher | null = null;
+  /** Mesh a single block state with the chunk mesher (used for blocks drawn by custom code, not JSON models). */
+  private bakeSpecialBlock(name: string, display: any): ItemMesh | null {
+    const reg = this.baker.registry;
+    const block = reg.blockByName(name);
+    if (!block) return null;
+    if (!this.mesher) this.mesher = new Mesher(reg, this.baker, this.assets.mcdata.tints.redstone.data);
+    const input: MeshInput = { cx: 0, sy: 0, cz: 0, blocks: new Uint16Array(PAD * PAD * PAD), light: new Uint8Array(PAD * PAD * PAD).fill(0xff), tints: new Uint8Array(16 * 16 * 12).fill(255) };
+    input.blocks[pidx(1, 1, 1)] = reg.defaultState(name);
+    const out = this.mesher.mesh(input);
+    let quads = 0; for (const l of out.layers) if (l) quads += l.quads;
+    if (!quads) return null;
+    const buf = new ArrayBuffer(quads * 4 * VERTEX_STRIDE);
+    const f32 = new Float32Array(buf), u8 = new Uint8Array(buf);
+    let o = 0;
+    for (const l of out.layers) {
+      if (!l) continue;
+      u8.set(new Uint8Array(l.data, 0, l.quads * 4 * VERTEX_STRIDE), o);
+      o += l.quads * 4 * VERTEX_STRIDE;
+    }
+    for (let i = 0; i < quads * 4; i++) { const b = i * 5; f32[b] -= 1.5; f32[b + 1] -= 1.5; f32[b + 2] -= 1.5; u8[i * VERTEX_STRIDE + 19] = 0xff; }
+    const disp = Object.keys(display ?? {}).length ? display : (this.baker.resolve('block/block')?.display ?? {});
+    return { data: buf, quads, flat: false, display: disp, guiLight: 'side' };
   }
 
   private itemTint(stack: ItemStack): number[] {
@@ -170,11 +199,12 @@ export class ItemRenderer {
   applyDisplay(out: Mat4, mesh: ItemMesh, kind: string, leftHand = false): Mat4 {
     const d = mesh.display[kind] ?? (kind === 'firstperson_lefthand' ? mesh.display.firstperson_righthand : kind === 'thirdperson_lefthand' ? mesh.display.thirdperson_righthand : undefined) ?? {};
     const rot = d.rotation ?? [0, 0, 0], tr = d.translation ?? [0, 0, 0], sc = d.scale ?? [1, 1, 1];
+    // vanilla ItemTransform.apply(leftHand): x translation and y/z rotations are mirrored for the left hand
+    const i = leftHand ? -1 : 1;
     mat4Identity(out);
-    mat4Translate(out, out, tr[0] / 16, tr[1] / 16, tr[2] / 16);
-    mat4RotateX(out, out, rot[0] * DEG); mat4RotateY(out, out, rot[1] * DEG); mat4RotateZ(out, out, rot[2] * DEG);
+    mat4Translate(out, out, i * tr[0] / 16, tr[1] / 16, tr[2] / 16);
+    mat4RotateX(out, out, rot[0] * DEG); mat4RotateY(out, out, i * rot[1] * DEG); mat4RotateZ(out, out, i * rot[2] * DEG);
     mat4Scale(out, out, sc[0], sc[1], sc[2]);
-    if (leftHand) { /* mirrored in vanilla */ }
     return out;
   }
 

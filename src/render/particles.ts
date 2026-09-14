@@ -38,6 +38,9 @@ export class Particles {
 
   private add(p: Partial<Particle> & { x: number; y: number; z: number }): Particle | null {
     if (this.list.length >= this.max) return null;
+    // Particles option: Decreased drops most cosmetic particles, Minimal keeps only a few
+    const lvl = this.game.options.particles;
+    if (lvl > 0 && p.kind !== 'rain' && p.kind !== 'explosion') { if (lvl === 2 && Math.random() < 0.9) return null; if (lvl === 1 && Math.random() < 0.5) return null; }
     const q: Particle = { px: p.x, py: p.y, pz: p.z, vx: 0, vy: 0, vz: 0, age: 0, life: 20, size: 0.1, gravity: 0, drag: 0.98, r: 1, g: 1, b: 1, alpha: 1, u0: 0, v0: 0, u1: 0, v1: 0, physics: true, fullBright: false, fade: false, kind: 'generic', ...p };
     this.list.push(q);
     return q;
@@ -52,6 +55,27 @@ export class Particles {
     for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) for (let k = 0; k < 4; k++) {
       const x = bx + (i + 0.5) / 4, y = by + (j + 0.5) / 4, z = bz + (k + 0.5) / 4;
       this.spawnCrack(x, y, z, x - bx - 0.5, y - by - 0.5, z - bz - 0.5, u0, v0, u1, v1, tint);
+    }
+  }
+  /** vanilla LivingEntity.spawnItemParticles: bits of the eaten item fly out of the mouth towards the ground. */
+  spawnItemCrumbs(e: { x: number; y: number; z: number; eyeY: number; yaw: number; pitch: number; width: number }, stack: any, count: number): void {
+    const mesh = this.game.itemRenderer.getMesh(stack);
+    const tex = (mesh as any).texture ?? ('item/' + stack.item.name);
+    const tile = this.tile(tex) ?? this.tile('block/' + stack.item.name);
+    if (!tile) return;
+    const W = this.game.assets.atlas.width, H = this.game.assets.atlas.height;
+    for (let i = 0; i < count; i++) {
+      // random 4x4 px patch of the item texture
+      const px = Math.floor(Math.random() * 12), py = Math.floor(Math.random() * 12);
+      const u0 = (tile.x + px) / W, v0 = (tile.y + py) / H, u1 = (tile.x + px + 4) / W, v1 = (tile.y + py + 4) / H;
+      let vx = (Math.random() - 0.5) * 0.1, vy = Math.random() * 0.1 + 0.1, vz = 0;
+      // rotate by pitch/yaw like vanilla and push 0.3 in front of the mouth
+      const pr = -e.pitch * Math.PI / 180, yr = -e.yaw * Math.PI / 180;
+      let x = (Math.random() - 0.5) * 0.3, y = -Math.random() * 0.6 - 0.3, z = 0.6;
+      { const cy = Math.cos(pr), sy = Math.sin(pr); const y2 = y * cy - z * sy, z2 = y * sy + z * cy; y = y2; z = z2; const vy2 = vy * cy - vz * sy, vz2 = vy * sy + vz * cy; vy = vy2; vz = vz2; }
+      { const c = Math.cos(yr), sn = Math.sin(yr); const x2 = x * c - z * sn, z2 = x * sn + z * c; x = x2; z = z2; const vx2 = vx * c - vz * sn, vz2 = vx * sn + vz * c; vx = vx2; vz = vz2; }
+      const p = this.add({ x: e.x + x, y: e.eyeY + y, z: e.z + z, kind: 'crumb', u0, v0, u1, v1, size: 0.08, life: 10 + Math.floor(Math.random() * 10), gravity: 0.04, drag: 0.98, r: 1, g: 1, b: 1, physics: true });
+      if (p) { p.vx = vx; p.vy = vy + 0.05; p.vz = vz; }
     }
   }
   spawnBlockHit(bx: number, by: number, bz: number, face: number, state: number): void {
@@ -88,6 +112,7 @@ export class Particles {
   spawnHappyVillager(x: number, y: number, z: number, n: number): void { const [u0, v0, u1, v1] = this.uv('particle/glint'); for (let i = 0; i < n; i++) this.add({ x: x + (Math.random() - 0.5), y: y + Math.random(), z: z + (Math.random() - 0.5), kind: 'happy', u0, v0, u1, v1, size: 0.1, life: 20 + Math.floor(Math.random() * 10), gravity: -0.002, physics: false, r: 0.5, g: 1, b: 0.5, fullBright: true }); }
   spawnHeart(x: number, y: number, z: number, n = 1): void { const [u0, v0, u1, v1] = this.uv('particle/heart'); for (let i = 0; i < n; i++) { const p = this.add({ x: x + (Math.random() - 0.5), y: y + Math.random() * 0.5, z: z + (Math.random() - 0.5), kind: 'heart', u0, v0, u1, v1, size: 0.15, life: 16 + Math.floor(Math.random() * 6), gravity: -0.002, physics: false, fullBright: true }); if (p) p.vy = 0.05; } }
   spawnNote(x: number, y: number, z: number, hue: number): void { const [u0, v0, u1, v1] = this.uv('particle/note'); const c = hsv(hue, 1, 1); const p = this.add({ x, y, z, kind: 'note', u0, v0, u1, v1, size: 0.15, life: 6 + Math.floor(Math.random() * 6), gravity: -0.002, physics: false, fullBright: true, r: c[0], g: c[1], b: c[2] }); if (p) p.vy = 0.1; }
+  spawnDragonBreath(x: number, y: number, z: number): void { const [u0, v0, u1, v1] = this.uv('particle/effect_0'); const p = this.add({ x, y, z, kind: 'breath', u0, v0, u1, v1, size: 0.15, life: 20 + Math.floor(Math.random() * 20), gravity: 0, drag: 0.96, physics: false, r: 0.75, g: 0.3, b: 0.9, fade: true, fullBright: true }); if (p) { p.vx = (Math.random() - 0.5) * 0.02; p.vy = 0.02 + Math.random() * 0.02; p.vz = (Math.random() - 0.5) * 0.02; } }
   spawnPortal(x: number, y: number, z: number, n: number): void { const [u0, v0, u1, v1] = this.uv('particle/glitter_0'); for (let i = 0; i < n; i++) { const p = this.add({ x: x + (Math.random() - 0.5) * 2, y: y + Math.random() * 2, z: z + (Math.random() - 0.5) * 2, kind: 'portal', u0, v0, u1, v1, size: 0.1, life: 20 + Math.floor(Math.random() * 20), gravity: 0, physics: false, r: 0.8, g: 0.3, b: 1, fullBright: true }); if (p) { p.vx = (x - p.x) * 0.05; p.vy = (y + 1 - p.y) * 0.05; p.vz = (z - p.z) * 0.05; } } }
   spawnSplash(x: number, y: number, z: number, color: number): void { const [u0, v0, u1, v1] = this.uv('particle/effect_0'); for (let i = 0; i < 30; i++) { const p = this.add({ x, y, z, kind: 'splash', u0, v0, u1, v1, size: 0.12, life: 15 + Math.floor(Math.random() * 10), gravity: 0.01, r: ((color >> 16) & 255) / 255, g: ((color >> 8) & 255) / 255, b: (color & 255) / 255, fade: true }); if (p) { p.vx = (Math.random() - 0.5) * 0.4; p.vy = Math.random() * 0.3; p.vz = (Math.random() - 0.5) * 0.4; } } }
   spawnBubble(x: number, y: number, z: number): void { const [u0, v0, u1, v1] = this.uv('particle/bubble'); const p = this.add({ x, y, z, kind: 'bubble', u0, v0, u1, v1, size: 0.08, life: 8 + Math.floor(Math.random() * 20), gravity: -0.005, physics: false }); if (p) p.vy = 0.05; }

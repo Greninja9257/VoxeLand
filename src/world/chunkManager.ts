@@ -17,23 +17,38 @@ export class ChunkManager {
   genPool: WorkerPool;
   meshPool: WorkerPool;
   viewDistance = 8;
+  simulationDistance = 8;
   private pendingGen = new Set<number>();
   private pendingMesh = new Set<number>();
   private meshQueue: { cx: number; sy: number; cz: number; d: number }[] = [];
   private lastCenter = { cx: 1e9, cz: 1e9 };
   private saveTimer = 0;
+  private unloadTimer = 0;
   stats = { genTime: 0, genCount: 0, meshTime: 0, meshCount: 0, loaded: 0 };
   private unloading = false;
   onChunkLoaded?: (c: Chunk) => void;
   onChunkUnloaded?: (c: Chunk) => void;
 
-  constructor(public world: World, public assets: Assets, public target: SectionMeshTarget, public worldId: string, public biomeColors: Uint8Array) {
+  /** Multiplayer guest: chunks come from the host instead of the generator. */
+  remote: { requestChunk(cx: number, cz: number): void; forgetChunk(cx: number, cz: number): void } | null;
+  /** Additional positions (other players) whose surroundings stay loaded (host). */
+  extraCenters: { x: number; z: number }[] = [];
+  constructor(public world: World, public assets: Assets, public target: SectionMeshTarget, public worldId: string, public biomeColors: Uint8Array, remote: { requestChunk(cx: number, cz: number): void; forgetChunk(cx: number, cz: number): void } | null = null) {
+    this.remote = remote;
     const hw = Math.max(2, Math.min(8, (navigator.hardwareConcurrency || 4)));
     const genCount = Math.max(1, Math.floor(hw / 2));
     const meshCount = Math.max(1, hw - genCount - 1);
-    this.genPool = new WorkerPool(() => new Worker(new URL('../workers/gen.worker.ts', import.meta.url), { type: 'module' }), genCount, { type: 'init', mcdata: assets.mcdata, seed: world.seed, dimension: world.dimension });
+    this.genPool = this.remote ? new WorkerPool(() => new Worker(new URL('../workers/gen.worker.ts', import.meta.url), { type: 'module' }), 0, null) : new WorkerPool(() => new Worker(new URL('../workers/gen.worker.ts', import.meta.url), { type: 'module' }), genCount, { type: 'init', mcdata: assets.mcdata, seed: world.seed, dimension: world.dimension });
     this.meshPool = new WorkerPool(() => new Worker(new URL('../workers/mesh.worker.ts', import.meta.url), { type: 'module' }), meshCount, { type: 'init', mcdata: assets.mcdata, models: assets.models, atlas: assets.atlas, redstoneTint: assets.mcdata.tints.redstone.data });
   }
+
+  /** Push mesh-affecting video options to the workers and rebuild every loaded section. */
+  setMeshOptions(o: { smoothLighting: boolean; fancy: boolean; biomeBlend: number }): void {
+    this.meshPool.broadcast({ type: 'options', options: { smoothLighting: o.smoothLighting, fancy: o.fancy } });
+    this.biomeBlend = o.biomeBlend;
+    for (const c of this.world.chunks.values()) { c.dirtySections = (1 << SECTION_COUNT) - 1; (c as any).tintsDirty = true; }
+  }
+  biomeBlend = 2;
 
   ready(): Promise<void> { return Promise.all([this.genPool.ready(), this.meshPool.ready()]).then(() => {}); }
 
@@ -49,45 +64,51 @@ export class ChunkManager {
     const ccx = Math.floor(px) >> 4, ccz = Math.floor(pz) >> 4;
     const vd = this.viewDistance;
     const world = this.world;
-    if (ccx !== this.lastCenter.cx || ccz !== this.lastCenter.cz) {
-      this.lastCenter = { cx: ccx, cz: ccz };
+    const centers = [{ cx: ccx, cz: ccz }, ...this.extraCenters.map((c) => ({ cx: Math.floor(c.x) >> 4, cz: Math.floor(c.z) >> 4 }))];
+    const nearAny = (cx: number, cz: number, r: number) => { for (const c of centers) { const dx = cx - c.cx, dz = cz - c.cz; if (dx * dx + dz * dz <= r * r) return true; } return false; };
+    if (ccx !== this.lastCenter.cx || ccz !== this.lastCenter.cz || this.extraCenters.length || this.unloadTimer++ > 40) {
+      this.lastCenter = { cx: ccx, cz: ccz }; this.unloadTimer = 0;
       // unload far chunks
       const toRemove: Chunk[] = [];
-      for (const c of world.chunks.values()) {
-        const dx = c.cx - ccx, dz = c.cz - ccz;
-        if (dx * dx + dz * dz > (vd + 2) * (vd + 2)) toRemove.push(c);
-      }
+      for (const c of world.chunks.values()) if (!nearAny(c.cx, c.cz, vd + 2)) toRemove.push(c);
       if (toRemove.length) {
         const save: ChunkData[] = [];
         for (const c of toRemove) {
           world.removeChunk(c.cx, c.cz);
           this.target.removeChunkMeshes(c.cx, c.cz);
           this.onChunkUnloaded?.(c);
-          if (c.modified) save.push(c.serialize());
+          this.remote?.forgetChunk(c.cx, c.cz);
+          if (c.modified && !this.remote) save.push(c.serialize());
         }
         if (save.length) storage.saveChunks(this.worldId, world.dimension, save).catch(console.error);
       }
     }
     // request generation for missing chunks, nearest first
-    const maxInFlight = this.genPool.size * 3;
+    const maxInFlight = this.remote ? 64 : this.genPool.size * 3;
     if (this.genPool.inFlight < maxInFlight) {
       const wanted: [number, number, number][] = [];
-      for (let dz = -vd; dz <= vd; dz++) for (let dx = -vd; dx <= vd; dx++) {
-        const d = dx * dx + dz * dz;
-        if (d > vd * vd) continue;
-        const cx = ccx + dx, cz = ccz + dz;
-        const key = chunkKey(cx, cz);
-        if (world.chunks.has(key) || this.pendingGen.has(key)) continue;
-        wanted.push([d, cx, cz]);
+      const seen = new Set<number>();
+      for (const c of centers) {
+        const r = c === centers[0] ? vd : Math.min(vd, 6);
+        for (let dz = -r; dz <= r; dz++) for (let dx = -r; dx <= r; dx++) {
+          const d = dx * dx + dz * dz;
+          if (d > r * r) continue;
+          const cx = c.cx + dx, cz = c.cz + dz;
+          const key = chunkKey(cx, cz);
+          if (seen.has(key) || world.chunks.has(key) || this.pendingGen.has(key)) continue;
+          seen.add(key);
+          wanted.push([d + (c === centers[0] ? 0 : 1000), cx, cz]);
+        }
       }
       wanted.sort((a, b) => a[0] - b[0]);
-      for (let i = 0; i < wanted.length && this.genPool.inFlight + i < maxInFlight; i++) this.requestChunk(wanted[i][1], wanted[i][2]);
+      if (this.remote) { for (let i = 0; i < wanted.length && i < 32; i++) this.remote.requestChunk(wanted[i][1], wanted[i][2]); }
+      else for (let i = 0; i < wanted.length && this.genPool.inFlight + i < maxInFlight; i++) this.requestChunk(wanted[i][1], wanted[i][2]);
     }
     // meshing
     this.dispatchMeshes(ccx, ccz);
     // periodic save
     this.saveTimer += dt;
-    if (this.saveTimer > 30) { this.saveTimer = 0; this.saveAll(); }
+    if (this.saveTimer > 30 && !this.remote) { this.saveTimer = 0; this.saveAll(); }
     this.stats.loaded = world.chunks.size;
   }
 
@@ -108,6 +129,13 @@ export class ChunkManager {
       if (!this.pendingGen.has(key)) return; // disposed
       this.addChunk(chunk);
     } finally { this.pendingGen.delete(key); }
+  }
+
+  /** A chunk received from the host (guest). */
+  addRemoteChunk(chunk: Chunk): void {
+    const old = this.world.chunks.get(chunkKey(chunk.cx, chunk.cz));
+    if (old) { this.world.removeChunk(old.cx, old.cz); this.target.removeChunkMeshes(old.cx, old.cz); }
+    this.addChunk(chunk);
   }
 
   private addChunk(chunk: Chunk): void {
@@ -197,10 +225,12 @@ export class ChunkManager {
     });
   }
 
-  /** Blended biome tint colours for each column of a chunk (3x3 smoothing). */
+  /** Blended biome tint colours for each column of a chunk ((2R+1)² smoothing, R = biome blend option). */
   chunkTints(c: Chunk): Uint8Array {
     const cached = (c as any).tints as Uint8Array | undefined;
-    if (cached) return cached;
+    if (cached && !(c as any).tintsDirty) return cached;
+    (c as any).tintsDirty = false;
+    const R = this.biomeBlend;
     const out = new Uint8Array(16 * 16 * 12);
     const world = this.world;
     const bc = this.biomeColors;
@@ -208,7 +238,7 @@ export class ChunkManager {
     for (let lz = 0; lz < 16; lz++) for (let lx = 0; lx < 16; lx++) {
       acc.fill(0);
       let n = 0;
-      for (let dz = -2; dz <= 2; dz++) for (let dx = -2; dx <= 2; dx++) {
+      for (let dz = -R; dz <= R; dz++) for (let dx = -R; dx <= R; dx++) {
         const wx = c.cx * 16 + lx + dx, wz = c.cz * 16 + lz + dz;
         const ch = world.getChunk(wx >> 4, wz >> 4) ?? c;
         const b = ch.biomes[((wz & 15) << 4) | (wx & 15)];
@@ -224,6 +254,7 @@ export class ChunkManager {
   }
 
   saveAll(): Promise<void> {
+    if (this.remote) return Promise.resolve();
     const save: ChunkData[] = [];
     for (const c of this.world.chunks.values()) if (c.modified) { save.push(c.serialize()); c.modified = false; }
     return storage.saveChunks(this.worldId, this.world.dimension, save).catch(console.error) as Promise<void>;

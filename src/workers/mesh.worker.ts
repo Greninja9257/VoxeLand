@@ -12,6 +12,8 @@ self.onmessage = (e: MessageEvent) => {
     const baker = new ModelBaker(m.models, m.atlas, reg);
     mesher = new Mesher(reg, baker, m.redstoneTint);
     (self as any).postMessage({ type: 'ready' });
+  } else if (m.type === 'options') {
+    mesher.options = { ...mesher.options, ...m.options };
   } else if (m.type === 'mesh') {
     const input = m.input as MeshInput;
     const out = mesher.mesh(input);

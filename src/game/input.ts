@@ -37,7 +37,7 @@ export class Input {
     for (const b of DEFAULT_BINDINGS) this.bindings.set(b.name, b.key);
     window.addEventListener('keydown', (e) => {
       if (this.wantLock && !this.pointerLocked && e.code !== 'Escape') this.lockPointer();
-      if (e.code === 'Tab' || e.code === 'F1' || e.code === 'F3' || e.code === 'F5' || e.code === 'F11' || e.code === 'Slash' || e.code === 'F2' || e.code === 'Space' || (e.code === 'KeyS' && e.ctrlKey)) e.preventDefault();
+      if (e.code === 'Tab' || e.code === 'F1' || e.code === 'F3' || e.code === 'F5' || e.code === 'F11' || e.code === 'Slash' || e.code === 'F2' || e.code === 'Space' || ((e.ctrlKey || e.metaKey) && (e.code === 'KeyS' || e.code === 'KeyW' || e.code === 'KeyD' || e.code === 'KeyA' || e.code === 'KeyQ' || e.code === 'KeyE' || e.code === 'KeyR' || e.code === 'KeyF' || e.code === 'KeyP'))) e.preventDefault();
       if (!this.keys.has(e.code)) {
         this.pressed.add(e.code); this.tickPressed.add(e.code);
         const now = performance.now();
@@ -53,8 +53,10 @@ export class Input {
     });
     window.addEventListener('keyup', (e) => { this.keys.delete(e.code); this.released.add(e.code); });
     window.addEventListener('blur', () => { this.keys.clear(); this.buttons.clear(); });
-    window.addEventListener('mousedown', (e) => { if (this.wantLock && !this.pointerLocked) this.lockPointer(); this.buttons.add(e.button); this.buttonsPressed.add(e.button); this.tickButtonsPressed.add(e.button); if (e.button === 1) e.preventDefault(); });
-    window.addEventListener('mouseup', (e) => { this.buttons.delete(e.button); this.buttonsReleased.add(e.button); });
+    // macOS: Ctrl+click is the right button (vanilla treats it the same way)
+    const mapButton = (e: MouseEvent) => (e.button === 0 && e.ctrlKey && /Mac/.test(navigator.platform) ? 2 : e.button);
+    window.addEventListener('mousedown', (e) => { if (this.wantLock && !this.pointerLocked) this.lockPointer(); const b = mapButton(e); this.buttons.add(b); this.buttonsPressed.add(b); this.tickButtonsPressed.add(b); if (b === 1) e.preventDefault(); });
+    window.addEventListener('mouseup', (e) => { const b = mapButton(e); this.buttons.delete(b); this.buttons.delete(e.button); this.buttonsReleased.add(b); });
     window.addEventListener('mousemove', (e) => {
       if (this.pointerLocked) {
         // while a screen is open the lock is kept and a software cursor is moved instead of the camera
@@ -65,11 +67,14 @@ export class Input {
     window.addEventListener('wheel', (e) => { this.wheel += Math.sign(e.deltaY); this.tickWheel += Math.sign(e.deltaY); if (this.pointerLocked) e.preventDefault(); }, { passive: false });
     window.addEventListener('contextmenu', (e) => e.preventDefault());
     document.addEventListener('pointerlockchange', () => { this.pointerLocked = document.pointerLockElement === canvas; });
+    // Ctrl/Cmd+W closes the tab in every browser (the page cannot cancel it); the confirmation dialog at least
+    // stops an accidental sprint+W from throwing away an unsaved world. Fullscreen + Keyboard Lock captures it fully.
+    window.addEventListener('beforeunload', (e) => { if (this.wantLock || this.softCursor) { e.preventDefault(); (e as any).returnValue = ''; } });
     // In fullscreen, Keyboard Lock lets the page receive Esc without the browser dropping the pointer lock.
     document.addEventListener('fullscreenchange', () => {
       const kb: any = (navigator as any).keyboard;
       if (!kb?.lock) return;
-      if (document.fullscreenElement) kb.lock(['Escape']).then(() => { this.keyboardLocked = !!document.fullscreenElement; }).catch(() => {});
+      if (document.fullscreenElement) kb.lock(['Escape', 'KeyW', 'KeyT', 'KeyN', 'Tab', 'F5']).then(() => { this.keyboardLocked = !!document.fullscreenElement; }).catch(() => {});
       else { kb.unlock?.(); this.keyboardLocked = false; }
     });
   }
@@ -95,7 +100,9 @@ export class Input {
   softCursor = false;
   /** Fullscreen Keyboard Lock is active: Esc reaches the page and does not drop the pointer lock. */
   keyboardLocked = false;
-  lockPointer(): void { this.lastLockRequest = performance.now(); if (!this.pointerLocked) { try { const r: any = this.canvas.requestPointerLock?.({ unadjustedMovement: true } as any); if (r && r.catch) r.catch(() => { try { this.canvas.requestPointerLock(); } catch { /* */ } }); } catch { try { this.canvas.requestPointerLock(); } catch { /* */ } } } }
+  /** Raw Input option: request unaccelerated mouse movement. */
+  rawInput = true;
+  lockPointer(): void { this.lastLockRequest = performance.now(); if (!this.pointerLocked) { try { const r: any = this.canvas.requestPointerLock?.({ unadjustedMovement: this.rawInput } as any); if (r && r.catch) r.catch(() => { try { this.canvas.requestPointerLock(); } catch { /* */ } }); } catch { try { this.canvas.requestPointerLock(); } catch { /* */ } } } }
   unlockPointer(): void { this.lastLockRequest = performance.now(); if (this.pointerLocked) document.exitPointerLock(); }
 
   /** Call at end of frame. */

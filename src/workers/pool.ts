@@ -24,7 +24,7 @@ export class WorkerPool {
   }
 
   ready(): Promise<void> {
-    if (this.readyCount === this.size) return Promise.resolve();
+    if (this.readyCount === this.size || this.size === 0) return Promise.resolve();
     return new Promise((r) => this.readyResolvers.push(r));
   }
 
@@ -40,6 +40,9 @@ export class WorkerPool {
       best.w.postMessage({ ...msg, id }, transfer ?? []);
     });
   }
+
+  /** Send a message to every worker (no reply expected). */
+  broadcast(msg: any): void { for (const w of this.workers) w.w.postMessage(msg); }
 
   terminate(): void { for (const w of this.workers) w.w.terminate(); this.workers = []; }
 }

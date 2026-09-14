@@ -1,4 +1,8 @@
 // Menus: title, world select/create, options, controls, pause, death, chat, confirm.
+import { OptionsScreen } from './settings';
+import { MultiplayerScreen, OpenToLanScreen, DisconnectedScreen } from './multiplayer';
+export { DisconnectedScreen };
+export { OptionsScreen };
 import { Screen, Button, Slider, TextField, Checkbox, CycleButton, ListWidget } from './widgets';
 import { storage, type WorldMeta } from '../../save/storage';
 import { DEFAULT_BINDINGS } from '../input';
@@ -12,25 +16,28 @@ export class TitleScreen extends Screen {
     if (!this.splash) { const s = g.assets.splashes; this.splash = s.length ? s[Math.floor(Math.random() * s.length)] : 'VoxeLand!'; }
     const cx = this.width / 2, y = this.height / 4 + 48;
     this.add(new Button(cx - 100, y, 200, 20, g.assets.lang['menu.singleplayer'] ?? 'Singleplayer', () => this.gui.open(new WorldSelectScreen())));
-    this.add(new Button(cx - 100, y + 24, 200, 20, g.assets.lang['menu.options'] ?? 'Options…', () => this.gui.open(new OptionsScreen(this))));
+    this.add(new Button(cx - 100, y + 24, 200, 20, g.assets.lang['menu.multiplayer'] ?? 'Multiplayer', () => this.gui.open(new MultiplayerScreen(this))));
     this.add(new Button(cx - 100, y + 48, 200, 20, 'Credits', () => this.gui.open(new CreditsScreen(this))));
-    this.add(new Button(cx - 100, y + 72, 200, 20, g.assets.lang['menu.quit'] ?? 'Quit Game', () => location.reload()));
+    this.add(new Button(cx - 100, y + 72 + 12, 98, 20, g.assets.lang['menu.options'] ?? 'Options...', () => this.gui.open(new OptionsScreen(this))));
+    this.add(new Button(cx + 2, y + 72 + 12, 98, 20, g.assets.lang['menu.quit'] ?? 'Quit Game', () => location.reload()));
   }
   render(ctx: CanvasRenderingContext2D, mx: number, my: number, partial: number): void {
     const g = this.gui.game;
     const cx = this.width / 2;
-    // logo
-    ctx.save(); ctx.translate(cx, this.height / 4 - 20); ctx.scale(4, 4);
-    this.gui.font.drawCentered(ctx, 'VoxeLand', 0, -8, 0xffffff, true);
+    // logo (vanilla: 274x44 at y=30; ours is the name at 4x, same vertical band)
+    const logoW = this.gui.font.width('VoxeLand') * 4;
+    ctx.save(); ctx.translate(cx, 30 + 22); ctx.scale(4, 4);
+    this.gui.font.drawCentered(ctx, 'VoxeLand', 0, -4, 0xffffff, true);
     ctx.restore();
-    // splash
-    const t = performance.now() / 1000;
-    const s = 1.8 - Math.abs(Math.sin(t * Math.PI * 2 / 1) * 0.1);
-    ctx.save(); ctx.translate(cx + 90, this.height / 4 + 6); ctx.rotate(-20 * Math.PI / 180); ctx.scale(s, s);
-    const sw = Math.min(1, 100 / Math.max(1, this.gui.font.width(this.splash) * 1.8));
-    ctx.scale(sw, sw);
-    this.gui.font.drawCentered(ctx, this.splash, 0, -4, 0xffff00, true);
-    ctx.restore();
+    // splash (vanilla SplashRenderer: rotated -20deg at the logo's lower-right corner, pulsing scale)
+    if (!g.options.hideSplashTexts) {
+      const t = performance.now() % 1000 / 1000;
+      let s = 1.8 - Math.abs(Math.sin(t * Math.PI * 2) * 0.1);
+      s = s * 100 / (this.gui.font.width(this.splash) + 32);
+      ctx.save(); ctx.translate(cx + logoW / 2 + 6, 30 + 39); ctx.rotate(-20 * Math.PI / 180); ctx.scale(s, s);
+      this.gui.font.drawCentered(ctx, this.splash, 0, -4, 0xffff00, true);
+      ctx.restore();
+    }
     super.render(ctx, mx, my, partial);
     this.gui.font.draw(ctx, `VoxeLand ${g.version} — assets: Minecraft ${g.assets.manifest?.mcVersion ?? ''}`, 2, this.height - 10, 0xffffff);
     this.gui.font.drawRight(ctx, 'Not affiliated with Mojang Studios', this.width - 2, this.height - 10, 0xffffff);
@@ -142,50 +149,6 @@ export class CreditsScreen extends Screen {
   keyDown(code: string, key: string, mods: any): boolean { if (code === 'Escape') { this.gui.open(this.parent); return true; } return super.keyDown(code, key, mods); }
 }
 
-export class OptionsScreen extends Screen {
-  hidesHud = true;
-  constructor(private parent: Screen | null) { super(); this.pausesGame = true; }
-  build(): void {
-    const g = this.gui.game, o = g.options;
-    const cx = this.width / 2;
-    let y = 30;
-    const L = cx - 155, R = cx + 5;
-    this.add(new Slider(L, y, 150, 20, (o.fov - 30) / 80, (v) => `FOV: ${Math.round(30 + v * 80) === 70 ? 'Normal' : Math.round(30 + v * 80) === 110 ? 'Quake Pro' : Math.round(30 + v * 80)}`, (v) => { o.fov = Math.round(30 + v * 80); }, 1 / 80));
-    this.add(new Slider(R, y, 150, 20, (o.renderDistance - 2) / 30, (v) => `Render Distance: ${Math.round(2 + v * 30)} chunks`, (v) => { o.renderDistance = Math.round(2 + v * 30); g.applyOptions(); }, 1 / 30));
-    y += 24;
-    this.add(new Slider(L, y, 150, 20, o.gamma, (v) => `Brightness: ${v <= 0 ? 'Moody' : v >= 1 ? 'Bright' : Math.round(v * 100) + '%'}`, (v) => { o.gamma = v; }));
-    this.add(new Slider(R, y, 150, 20, o.sensitivity, (v) => `Sensitivity: ${Math.round(v * 200)}%`, (v) => { o.sensitivity = v; }));
-    y += 24;
-    this.add(new CycleButton(L, y, 150, 20, 'GUI Scale: ', [{ value: 0, label: 'Auto' }, { value: 1, label: '1' }, { value: 2, label: '2' }, { value: 3, label: '3' }, { value: 4, label: '4' }], o.guiScale, (v) => { o.guiScale = v; }));
-    this.add(new CycleButton(R, y, 150, 20, 'Clouds: ', [{ value: true, label: 'ON' }, { value: false, label: 'OFF' }], o.clouds, (v) => { o.clouds = v; g.applyOptions(); }));
-    y += 24;
-    this.add(new CycleButton(L, y, 150, 20, 'View Bobbing: ', [{ value: true, label: 'ON' }, { value: false, label: 'OFF' }], o.viewBobbing, (v) => { o.viewBobbing = v; }));
-    this.add(new CycleButton(R, y, 150, 20, 'Attack Indicator: ', [{ value: true, label: 'Crosshair' }, { value: false, label: 'OFF' }], o.attackIndicator, (v) => { o.attackIndicator = v; }));
-    y += 24;
-    this.add(new CycleButton(L, y, 150, 20, 'Subtitles: ', [{ value: false, label: 'OFF' }, { value: true, label: 'ON' }], o.subtitles, (v) => { o.subtitles = v; this.gui.showSubtitles = v; }));
-    this.add(new CycleButton(R, y, 150, 20, 'Auto-Jump: ', [{ value: false, label: 'OFF' }, { value: true, label: 'ON' }], o.autoJump, (v) => { o.autoJump = v; }));
-    y += 24;
-    if (g.inWorld) {
-      this.add(new CycleButton(L, y, 150, 20, 'Difficulty: ', [{ value: 0, label: 'Peaceful' }, { value: 1, label: 'Easy' }, { value: 2, label: 'Normal' }, { value: 3, label: 'Hard' }], g.difficulty, (v) => { g.setDifficulty(v); }));
-      y += 24;
-    }
-    // volumes
-    const vols: [string, keyof typeof o.volumes][] = [['Master Volume', 'master'], ['Music', 'music'], ['Jukebox/Note Blocks', 'record'], ['Weather', 'weather'], ['Blocks', 'block'], ['Hostile Creatures', 'hostile'], ['Friendly Creatures', 'neutral'], ['Players', 'player'], ['Ambient/Environment', 'ambient']];
-    vols.forEach(([label, key], i) => {
-      this.add(new Slider(i % 2 === 0 ? L : R, y + Math.floor(i / 2) * 24, 150, 20, o.volumes[key], (v) => `${label}: ${v <= 0 ? 'OFF' : Math.round(v * 100) + '%'}`, (v) => { o.volumes[key] = v; (g.sounds.volumes as any)[key] = v; g.sounds.applyVolumes(); }));
-    });
-    y += Math.ceil(vols.length / 2) * 24;
-    this.add(new Button(L, y, 150, 20, 'Controls…', () => this.gui.open(new ControlsScreen(this))));
-    this.add(new Button(R, y, 150, 20, 'Done', () => this.done()));
-  }
-  private done(): void { this.gui.game.saveOptions(); if (this.parent) this.gui.open(this.parent); else this.gui.close(); }
-  render(ctx: CanvasRenderingContext2D, mx: number, my: number, partial: number): void {
-    this.gui.font.drawCentered(ctx, this.gui.game.assets.lang['options.title'] ?? 'Options', this.width / 2, 12, 0xffffff);
-    super.render(ctx, mx, my, partial);
-  }
-  keyDown(code: string, key: string, mods: any): boolean { if (code === 'Escape') { this.done(); return true; } return super.keyDown(code, key, mods); }
-}
-
 export class ControlsScreen extends Screen {
   hidesHud = true;
   waiting: string | null = null;
@@ -241,9 +204,12 @@ export class PauseScreen extends Screen {
     const g = this.gui.game;
     const cx = this.width / 2, y = this.height / 4 + 8;
     this.add(new Button(cx - 102, y, 204, 20, g.assets.lang['menu.returnToGame'] ?? 'Back to Game', () => this.gui.close()));
-    this.add(new Button(cx - 102, y + 24, 98, 20, g.assets.lang['menu.options'] ?? 'Options…', () => this.gui.open(new OptionsScreen(this))));
-    this.add(new Button(cx + 4, y + 24, 98, 20, 'Controls…', () => this.gui.open(new ControlsScreen(this))));
-    this.add(new Button(cx - 102, y + 48, 204, 20, g.assets.lang['menu.returnToMenu'] ?? 'Save and Quit to Title', () => g.quitToTitle()));
+    this.add(new Button(cx - 102, y + 24, 98, 20, 'Advancements', () => {}));
+    this.add(new Button(cx + 4, y + 24, 98, 20, 'Statistics', () => {}));
+    this.add(new Button(cx - 102, y + 48, 98, 20, g.assets.lang['menu.options'] ?? 'Options...', () => this.gui.open(new OptionsScreen(this))));
+    const lan = this.add(new Button(cx + 4, y + 48, 98, 20, g.host ? 'Open to LAN' : g.isRemote ? 'Player List' : 'Open to LAN', () => { if (g.isRemote) this.gui.showPlayerList = !this.gui.showPlayerList; else if (!g.host) this.gui.open(new OpenToLanScreen(this)); }));
+    if (g.host) lan.active = false;
+    this.add(new Button(cx - 102, y + 72, 204, 20, g.isRemote ? 'Disconnect' : g.assets.lang['menu.returnToMenu'] ?? 'Save and Quit to Title', () => g.quitToTitle()));
   }
   render(ctx: CanvasRenderingContext2D, mx: number, my: number, partial: number): void { this.gui.font.drawCentered(ctx, this.gui.game.assets.lang['menu.game'] ?? 'Game Menu', this.width / 2, this.height / 4 - 16, 0xffffff); super.render(ctx, mx, my, partial); }
 }
@@ -273,24 +239,61 @@ export class ChatScreen extends Screen {
   pausesGame = false; darkBackground = false;
   field!: TextField;
   histIndex = -1;
+  /** command suggestions (vanilla CommandSuggestions): list + selected index */
+  suggestions: string[] = [];
+  suggestIndex = 0;
   constructor(private initial = '') { super(); }
   build(): void {
-    this.field = this.add(new TextField(2, this.height - 14, this.width - 4, 12, this.initial));
+    // vanilla ChatScreen: EditBox(4, height - 12, width - 4, 12) without border over a box at height - 14
+    this.field = this.add(new TextField(4, this.height - 12, this.width - 8, 12, this.initial));
+    this.field.bordered = false;
     this.field.maxLength = 256;
     this.field.onEnter = (t) => { if (t.trim()) { this.gui.chatHistory.push(t); this.gui.game.handleChat(t); } this.gui.close(); };
+    this.field.onChange = () => this.updateSuggestions();
     this.focused = this.field;
     this.histIndex = this.gui.chatHistory.length;
+    this.gui.chatScroll = 0;
+    this.updateSuggestions();
+  }
+  onClose(): void { this.gui.chatScroll = 0; }
+  private updateSuggestions(): void {
+    const t = this.field.text;
+    this.suggestions = t.startsWith('/') && this.gui.game.options.commandSuggestions ? this.gui.game.commandSuggestions(t) : [];
+    this.suggestIndex = 0;
+  }
+  private applySuggestion(): void {
+    const sg = this.suggestions[this.suggestIndex]; if (!sg) return;
+    const t = this.field.text; const i = t.lastIndexOf(' ');
+    this.field.text = t.slice(0, i + 1) + sg + ' '; this.field.cursor = this.field.text.length;
+    this.updateSuggestions();
   }
   keyDown(code: string, key: string, mods: any): boolean {
+    if (this.suggestions.length && (code === 'ArrowUp' || code === 'ArrowDown')) { this.suggestIndex = (this.suggestIndex + (code === 'ArrowUp' ? -1 : 1) + this.suggestions.length) % this.suggestions.length; return true; }
     if (code === 'ArrowUp') { if (this.histIndex > 0) { this.histIndex--; this.field.text = this.gui.chatHistory[this.histIndex]; this.field.cursor = this.field.text.length; } return true; }
     if (code === 'ArrowDown') { if (this.histIndex < this.gui.chatHistory.length) { this.histIndex++; this.field.text = this.gui.chatHistory[this.histIndex] ?? ''; this.field.cursor = this.field.text.length; } return true; }
-    if (code === 'Tab' && this.field.text.startsWith('/')) { const c = this.gui.game.completeCommand(this.field.text); if (c) { this.field.text = c; this.field.cursor = c.length; } return true; }
+    if (code === 'Tab') { if (this.suggestions.length) this.applySuggestion(); else if (this.field.text.startsWith('/')) { const c = this.gui.game.completeCommand(this.field.text); if (c) { this.field.text = c; this.field.cursor = c.length; this.updateSuggestions(); } } return true; }
+    if (code === 'PageUp') { this.gui.chatScroll += 5; return true; }
+    if (code === 'PageDown') { this.gui.chatScroll = Math.max(0, this.gui.chatScroll - 5); return true; }
     return super.keyDown(code, key, mods);
   }
+  wheel(dy: number): void { this.gui.chatScroll = Math.max(0, this.gui.chatScroll - Math.sign(dy) * (this.gui.game.input.keys.has('ShiftLeft') ? 7 : 1)); }
   render(ctx: CanvasRenderingContext2D, mx: number, my: number, partial: number): void {
     this.gui.drawChat(ctx, true);
     ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(2, this.height - 14, this.width - 4, 12);
     super.render(ctx, mx, my, partial);
+    // suggestion popup above the input (vanilla: up to 10 rows, highlighted selection, usage hint)
+    if (this.suggestions.length) {
+      const rows = this.suggestions.slice(0, 10);
+      const prefix = this.field.text.slice(0, this.field.text.lastIndexOf(' ') + 1);
+      const x = 4 + this.gui.font.width(prefix);
+      let w = 0; for (const r of rows) w = Math.max(w, this.gui.font.width(r));
+      const y0 = this.height - 14 - rows.length * 12 - 2;
+      ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(x - 1, y0 - 1, w + 4, rows.length * 12 + 2);
+      rows.forEach((r, i) => this.gui.font.draw(ctx, r, x + 1, y0 + 2 + i * 12, i === this.suggestIndex ? 0xffff00 : 0xa0a0a0));
+    } else if (this.field.text.startsWith('/')) {
+      const usage = this.gui.game.commandUsage(this.field.text);
+      if (usage) { const w = this.gui.font.width(usage); ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(3, this.height - 28, w + 4, 12); this.gui.font.draw(ctx, usage, 5, this.height - 26, 0x808080); }
+    }
   }
 }
 

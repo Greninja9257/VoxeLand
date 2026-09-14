@@ -1,4 +1,5 @@
 // Falling blocks, primed TNT, arrows and thrown projectiles.
+import { AreaEffectCloud } from './boss';
 import { Entity, LivingEntity, type EntityDamage } from './entity';
 import type { ItemStack } from '../items/stack';
 import { ItemStack as Stack } from '../items/stack';
@@ -88,8 +89,10 @@ export class ArrowEntity extends Entity {
       let dmg = Math.ceil(Math.min(speed * this.damage, 2.147e9));
       if (this.critical) dmg += Math.floor(Math.random() * (dmg / 2 + 2));
       const kb = this.knockback;
-      const hurt = target.hurt({ amount: dmg, source: 'arrow', attacker: this.owner ?? this, knockbackX: kb > 0 ? -this.vx / speed * kb * 0.6 : undefined, knockbackZ: kb > 0 ? -this.vz / speed * kb * 0.6 : undefined });
+      const hurt = target.hurt({ amount: dmg, source: 'arrow', attacker: this.owner ?? this });
       if (hurt) {
+        // vanilla Punch: push along the arrow's travel direction by knockback * 0.6 (+0.1 up)
+        if (kb > 0 && speed > 0) { const h = Math.hypot(this.vx, this.vz) || 1; target.vx += this.vx / h * kb * 0.6; target.vz += this.vz / h * kb * 0.6; target.vy += 0.1; }
         if (this.fire) target.fireTicks = Math.max(target.fireTicks, 100);
         if (this.kind === 'tipped' && (this as any).effect) target.addEffect((this as any).effect);
         this.game.sounds.playAt('entity.arrow.hit', this.x, this.y, this.z, 1, 1.2 / (Math.random() * 0.2 + 0.9));
@@ -162,6 +165,19 @@ export class ThrownProjectile extends Entity {
       case 'splash_potion': case 'lingering_potion': { const effect = this.stack?.extra?.effect; g.sounds.playAt('entity.splash_potion.break', hx, hy, hz, 1, 1); g.particles.spawnSplash(hx, hy, hz, this.stack?.extra?.color ?? 0x385dc6); if (effect) for (const e of g.livingEntitiesIncludingPlayer()) { const d = e.distSq(hx, hy, hz); if (d < 16) e.addEffect({ id: effect.id, amplifier: effect.amplifier, duration: Math.floor(effect.duration * (1 - Math.sqrt(d) / 4)) }); } if (this.stack?.extra?.potion === 'water') { for (const e of g.livingEntitiesIncludingPlayer()) if (e.distSq(hx, hy, hz) < 16) e.fireTicks = 0; if (block) { const [bx, by, bz, face] = block; const dir = [[0, -1, 0], [0, 1, 0], [0, 0, -1], [0, 0, 1], [-1, 0, 0], [1, 0, 0]][face]; const fx = bx + dir[0], fy = by + dir[1], fz = bz + dir[2]; const fs = this.world.getBlock(fx, fy, fz); if (fs && (this.world.registry.nameOf(fs) === 'fire')) this.world.setBlock(fx, fy, fz, 0); } } break; }
       case 'fire_charge': { if (target) { target.hurt({ amount: 5, source: 'fire', attacker: this.owner }); target.fireTicks = 100; } if (block) { const [bx, by, bz, face] = block; const dir = [[0, -1, 0], [0, 1, 0], [0, 0, -1], [0, 0, 1], [-1, 0, 0], [1, 0, 0]][face]; const fx = bx + dir[0], fy = by + dir[1], fz = bz + dir[2]; if (this.world.getBlock(fx, fy, fz) === 0) this.world.setBlock(fx, fy, fz, g.blocks.fireStateFor(fx, fy, fz)); } break; }
       case 'wind_charge': g.explode(hx, hy, hz, 1.2, false, this, true); break;
+      case 'ghast_fireball': g.explode(hx, hy, hz, 1, g.rules.mobGriefing !== false, this.owner); if (target) target.fireTicks = Math.max(target.fireTicks, 100); break;
+      case 'wither_skull': case 'wither_skull_dangerous': {
+        const dangerous = this.kind === 'wither_skull_dangerous';
+        if (target) { target.hurt({ amount: 8, source: 'attack', attacker: this.owner }); target.addEffect({ id: 'wither', amplifier: 1, duration: [0, 200, 400, 800][g.difficulty] || 200 }); if (this.owner instanceof LivingEntity) this.owner.heal(5); }
+        g.explode(hx, hy, hz, 1, g.rules.mobGriefing !== false, this.owner, false);
+        if (dangerous && g.rules.mobGriefing !== false) { const reg = this.world.registry; for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) { const bx = Math.floor(hx) + dx, by = Math.floor(hy) + dy, bz = Math.floor(hz) + dz; const st = this.world.getBlock(bx, by, bz); if (st && !/bedrock|end_portal|command_block|barrier/.test(reg.nameOf(st))) g.breakBlock(bx, by, bz, null, true, true); } }
+        break;
+      }
+      case 'dragon_fireball': {
+        const c = new AreaEffectCloud(); c.effect = { id: 'instant_damage', amplifier: 0, duration: 1 }; c.duration = 600; c.setPos(hx, hy, hz); g.addEntity(c);
+        g.sounds.playAt('entity.ender_dragon.shoot', hx, hy, hz, 2, 1); for (let i = 0; i < 20; i++) g.particles.spawnDragonBreath(hx + (Math.random() - 0.5) * 2, hy + Math.random(), hz + (Math.random() - 0.5) * 2);
+        break;
+      }
     }
   }
   hurt(): boolean { return false; }

@@ -4,6 +4,7 @@ import { ArrowEntity, ThrownProjectile } from './misc';
 import { Inventory, ItemStack } from '../items/stack';
 import { TIER_SPEED, TIER_LEVEL, type Item } from '../items/registry';
 import { getPlacement, horizontalFacing, updateConnections, isReplaceable, canSurvive, facingOffset, oppositeFacing } from '../blocks/placement';
+import { BoatEntity } from './boat';
 import { useBlock } from '../blocks/interaction';
 import { clamp, lookDir, wrapDegrees } from '../math';
 import { SET_UPDATE_NEIGHBORS } from '../world/world';
@@ -12,6 +13,9 @@ import { MIN_Y, MAX_Y } from '../world/chunk';
 export type GameMode = 'survival' | 'creative' | 'adventure' | 'spectator';
 
 export interface BlockHit { x: number; y: number; z: number; face: number; hx: number; hy: number; hz: number; t: number; state: number }
+
+/** Blocks whose interaction only the multiplayer host may run (they open host-owned inventories or roll dice). */
+const HOST_ONLY_BLOCKS = /(chest$|barrel|shulker_box|furnace|smoker|dispenser|dropper|hopper|brewing_stand|jukebox|lectern|campfire|beehive|bee_nest|composter|cauldron|_bed$|spawner|beacon|respawn_anchor|end_portal_frame|note_block|chiseled_bookshelf|decorated_pot|crafter|vault|trial_spawner)/;
 
 export class Player extends LivingEntity {
   type = 'player';
@@ -59,6 +63,7 @@ export class Player extends LivingEntity {
   ticksSinceLastSleep = 0;
   itemCooldowns = new Map<string, number>();
   hotbarPrevSlot = 0;
+  private lastBoatInput = '';
 
   constructor() {
     super();
@@ -206,7 +211,10 @@ export class Player extends LivingEntity {
     if (this.usingItem) {
       this.itemUseTicks++;
       const it = this.usingItem.item;
-      if (it.food) { if (this.itemUseTicks % 4 === 0 && this.itemUseTicks > 4) g.sounds.playAt('entity.generic.eat', this.x, this.y, this.z, 0.5 + 0.5 * Math.random(), 0.9 + Math.random() * 0.2); if (this.itemUseTicks >= this.useDuration) this.finishUsing(); }
+      if (it.food) {
+        if (this.itemUseTicks % 4 === 0 && this.itemUseTicks > 4) { g.sounds.playAt('entity.generic.eat', this.x, this.y, this.z, 0.5 + 0.5 * Math.random(), 0.9 + Math.random() * 0.2); g.particles.spawnItemCrumbs(this, this.usingItem, 5); }
+        if (this.itemUseTicks >= this.useDuration) this.finishUsing();
+      }
     }
     // exhaustion from movement
     const dx = this.x - this.lastX, dz = this.z - this.lastZ; const dist = Math.hypot(dx, dz);
@@ -215,7 +223,7 @@ export class Player extends LivingEntity {
     super.tick();
     // vanilla Player.tick: bob amplitude follows the (post-friction) horizontal velocity while on the ground
     this.prevBob = this.bob;
-    { const fb = this.onGround && !this.swimmingPose ? Math.min(0.1, Math.hypot(this.vx, this.vz)) : 0; this.bob += (fb - this.bob) * 0.4; }
+    { const fb = this.onGround && !this.flying && !this.swimmingPose ? Math.min(0.1, Math.hypot(this.vx, this.vz)) : 0; this.bob += (fb - this.bob) * 0.4; }
     // vanilla Entity.move: walkDist accumulates whenever the entity moves horizontally (also mid-air)
     this.walkDist += Math.hypot(this.x - this.prevX, this.z - this.prevZ) * 0.6;
     // footsteps (vanilla: every ~1 block of walkDist) and sprinting particles
@@ -265,6 +273,16 @@ export class Player extends LivingEntity {
   /** Apply input each tick (called from Game). */
   applyInput(fwd: number, strafe: number, jump: boolean, sneak: boolean, sprintKey: boolean, sprintToggle: boolean, flyToggle: boolean): void {
     if (this.sleeping || this.health <= 0) { this.moveForward = this.moveStrafe = 0; this.jumping = false; return; }
+    // riding a boat: the movement keys steer it, sneak dismounts
+    if (this.vehicle instanceof BoatEntity) {
+      const b = this.vehicle;
+      this.isSneaking = false; this.isSprinting = false; this.moveForward = this.moveStrafe = 0; this.jumping = false;
+      if (b.passengers[0] === this) { b.inputUp = fwd > 0; b.inputDown = fwd < 0; b.inputLeft = strafe > 0; b.inputRight = strafe < 0; }
+      const c = this.game.client;
+      if (c && !(this as any).isRemote) { const key = `${fwd}|${strafe}`; if (key !== this.lastBoatInput) { this.lastBoatInput = key; c.send({ t: 'boatInput', up: fwd > 0, down: fwd < 0, left: strafe > 0, right: strafe < 0 }); } }
+      if (sneak) { if (c) c.send({ t: 'dismount' }); else b.ejectPassenger(this); }
+      return;
+    }
     const wasSneaking = this.isSneaking;
     this.isSneaking = sneak && !this.flying && !this.swimmingPose;
     if (this.isSneaking && !wasSneaking) { /* start */ }
@@ -379,7 +397,7 @@ export class Player extends LivingEntity {
     const d = lookDir(this.yaw, this.pitch);
     const reach = this.isCreative ? 5 : this.reachDistance;
     const held = this.heldItem();
-    const fluids = !!held && (held.item.name === 'bucket' || held.item.name === 'glass_bottle' || held.item.name === 'lily_pad' && false);
+    const fluids = !!held && (held.item.name === 'bucket' || held.item.name === 'glass_bottle' || held.item.name.endsWith('_boat') || held.item.name.endsWith('_raft'));
     return this.game.raycastBlocks(this.x, this.eyeY, this.z, d[0], d[1], d[2], reach, fluids);
   }
 
@@ -474,6 +492,13 @@ export class Player extends LivingEntity {
     if (hit) {
       const state = world.getBlock(hit.x, hit.y, hit.z);
       if (!(this.isSneaking && held)) {
+        if (g.client && !(this as any).isRemote) {
+          // multiplayer guest: the host runs the interaction (and opens container GUIs for us); simple toggles are also
+          // predicted locally so doors/buttons feel instant
+          const n = reg.nameOf(state);
+          g.client.send({ t: 'use', x: hit.x, y: hit.y, z: hit.z, face: hit.face, hit: [hit.hx, hit.hy, hit.hz], held: held?.serialize() ?? null });
+          if (HOST_ONLY_BLOCKS.test(n)) { this.useCooldown = 4; this.swing(); return true; }
+        }
         if (useBlock(g, hit.x, hit.y, hit.z, state, hit.face, [hit.hx, hit.hy, hit.hz], this)) { this.useCooldown = 4; this.swing(); return true; }
       }
     }
@@ -497,6 +522,20 @@ export class Player extends LivingEntity {
     if (!hit) {
       // buckets on fluids are handled by fluid raycast (hit present)
       return false;
+    }
+    // boats & rafts: placed on the hit point (vanilla BoatItem, fluid-aware raycast)
+    if (n.endsWith('_boat') || n.endsWith('_raft')) {
+      const bx = hit.x + hit.hx, bz = hit.z + hit.hz; let by = hit.y + hit.hy;
+      const ts = world.getBlock(hit.x, hit.y, hit.z);
+      if (ts && reg.hasWater(ts)) by = hit.y + 1 - 0.05; else if (hit.face === 1) by = hit.y + 1;
+      const m = /^(.*?)_(chest_)?(boat|raft)$/.exec(n)!;
+      const boat = new BoatEntity(m[1], !!m[2]);
+      boat.setPos(bx, by, bz); boat.yaw = this.yaw;
+      if (this.game.entities.some((e) => !e.removed && e !== this && e.bb.intersects(boat.bb))) return false;
+      this.game.addEntity(boat);
+      this.game.sounds.playAt('entity.boat.paddle_land', bx, by, bz, 0, 1);
+      consume(); this.swing();
+      return true;
     }
     const target = world.getBlock(hit.x, hit.y, hit.z);
     const tn = target ? reg.nameOf(target) : 'air';
@@ -744,10 +783,11 @@ export class Player extends LivingEntity {
     dmg += enchDmg;
     let kb = (held?.enchantLevel('knockback') ?? 0);
     if (this.isSprinting && cd > 0.9) { kb++; this.isSprinting = false; }
-    const dx = target.x - this.x, dz = target.z - this.z, len = Math.hypot(dx, dz) || 1;
-    const hurt = target.hurt({ amount: Math.max(0, dmg), source: 'attack', attacker: this, knockbackX: kb > 0 ? undefined : undefined, knockbackZ: undefined });
+    const hurt = target.hurt({ amount: Math.max(0, dmg), source: 'attack', attacker: this });
     if (hurt) {
-      if (kb > 0) { target.vx += dx / len * kb * 0.5; target.vz += dz / len * kb * 0.5; target.vy += 0.1; }
+      // vanilla Player.attack: extra knockback (sprint / Knockback enchant) along the attacker's look direction,
+      // and the attacker is slowed down
+      if (kb > 0) { const yr = this.yaw * Math.PI / 180; target.knockback(kb * 0.5, Math.sin(yr), -Math.cos(yr)); this.vx *= 0.6; this.vz *= 0.6; this.isSprinting = false; }
       if (held && held.enchantLevel('fire_aspect') > 0) target.fireTicks = Math.max(target.fireTicks, 80 * held.enchantLevel('fire_aspect'));
       if (crit) { g.sounds.playAt('entity.player.attack.crit', this.x, this.y, this.z, 1, 1); g.particles.spawnCrit(target.x, target.y + target.height / 2, target.z, 8); }
       else if (kb > 0) g.sounds.playAt('entity.player.attack.knockback', this.x, this.y, this.z, 1, 1);
@@ -773,6 +813,11 @@ export class Player extends LivingEntity {
   // ---------- sleeping ----------
   trySleep(x: number, y: number, z: number, state: number): boolean {
     const g = this.game, reg = this.world.registry;
+    if (g.client && !(this as any).isRemote) { const ok = this.trySleepLocal(x, y, z, state); if (ok) g.client.send({ t: 'sleep', sleeping: true }); return ok; }
+    return this.trySleepLocal(x, y, z, state);
+  }
+  private trySleepLocal(x: number, y: number, z: number, state: number): boolean {
+    const g = this.game, reg = this.world.registry;
     if (this.world.dimension !== 'overworld') { g.explode(x + 0.5, y + 0.5, z + 0.5, 5, true); g.world.setBlock(x, y, z, 0); return false; }
     const props = reg.getProps(state);
     // head position
@@ -793,6 +838,7 @@ export class Player extends LivingEntity {
     return true;
   }
   wakeUp(): void {
+    if (this.game.client && !(this as any).isRemote && this.sleeping) this.game.client.send({ t: 'sleep', sleeping: false });
     if (!this.sleeping) return;
     this.sleeping = false;
     if (this.bedPos) {
@@ -804,11 +850,16 @@ export class Player extends LivingEntity {
   }
   setSpawn(x: number, y: number, z: number, forced: boolean): void { this.spawnPos = [x, y, z]; this.spawnForced = forced; }
 
+  /** vanilla LocalPlayer portalTime / spinningEffectIntensity: drives the screen overlay and nausea whirl. */
+  portalTime = 0; prevPortalTime = 0;
   private checkPortal(): void {
     const g = this.game, reg = this.world.registry;
+    this.prevPortalTime = this.portalTime;
+    if (this.isInPortal) this.portalTime = Math.min(1, this.portalTime + 0.0125); else this.portalTime = Math.max(0, this.portalTime - 0.05);
+    if (this.hasEffect('nausea')) this.portalTime = Math.min(1, this.portalTime + 0.05);
     const s = this.world.getBlock(Math.floor(this.x), Math.floor(this.y + 0.5), Math.floor(this.z));
     const n = s ? reg.nameOf(s) : '';
-    if (n === 'nether_portal') { this.isInPortal = true; if (this.portalCooldown <= 0) { this.inPortalTicks++; if (this.inPortalTicks >= (this.isCreative ? 1 : 80)) { this.inPortalTicks = 0; this.portalCooldown = 300; g.travelDimension(this.world.dimension === 'the_nether' ? 'overworld' : 'the_nether'); } } }
+    if (n === 'nether_portal') { if (!this.isInPortal && this.portalTime === 0) g.sounds.playAt('block.portal.trigger', this.x, this.y, this.z, 1, Math.random() * 0.4 + 0.8, false); this.isInPortal = true; if (this.portalCooldown <= 0) { this.inPortalTicks++; if (this.inPortalTicks >= (this.isCreative ? 1 : 80)) { this.inPortalTicks = 0; this.portalCooldown = 300; g.travelDimension(this.world.dimension === 'the_nether' ? 'overworld' : 'the_nether'); } } }
     else if (n === 'end_portal') { if (this.portalCooldown <= 0) { this.portalCooldown = 300; g.travelDimension(this.world.dimension === 'the_end' ? 'overworld' : 'the_end'); } }
     else { this.isInPortal = false; if (this.inPortalTicks > 0) this.inPortalTicks = Math.max(0, this.inPortalTicks - 4); }
   }

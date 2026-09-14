@@ -248,6 +248,10 @@ export class ModelBaker {
         uvs[i * 2] = tile.u0 + (tile.u1 - tile.u0) * (u / 16);
         uvs[i * 2 + 1] = tile.v0 + (tile.v1 - tile.v0) * (v / 16);
       }
+      // shrink UVs towards the face centre (vanilla uvShrinkRatio) so the 16-bit quantisation and edge fragments
+      // never sample the neighbouring atlas tile (that showed as flickering dark lines along block edges)
+      { const eps = 2 / 65535; const cu = (uvs[0] + uvs[2] + uvs[4] + uvs[6]) / 4, cv = (uvs[1] + uvs[3] + uvs[5] + uvs[7]) / 4;
+        for (let i = 0; i < 4; i++) { uvs[i * 2] += Math.sign(cu - uvs[i * 2]) * eps; uvs[i * 2 + 1] += Math.sign(cv - uvs[i * 2 + 1]) * eps; } }
       const cull = f.cullface ? rotateDir(DIR_INDEX[f.cullface] ?? -1, xRot, yRot) : -1;
       // boundary / full-face detection (after rotation)
       const axis = outFace >> 1; // 0 y,1 z,2 x  => coordinate index: y=1, z=2, x=0
