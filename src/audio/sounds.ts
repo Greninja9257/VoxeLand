@@ -103,7 +103,9 @@ export class SoundManager {
 
   /** Positional sound. */
   playAt(event: string, x: number, y: number, z: number, volume = 1, pitch = 1, attenuate = true): void {
-    this.onSound?.(event, x, y, z, volume, pitch, attenuate);
+    // UI feedback belongs only to the player interacting with their local screen.
+    // Never forward it to multiplayer, even if a caller accidentally uses playAt.
+    if (this.category(event) !== 'ui') this.onSound?.(event, x, y, z, volume, pitch, attenuate);
     this.playAtRemote(event, x, y, z, volume, pitch, attenuate);
   }
 
