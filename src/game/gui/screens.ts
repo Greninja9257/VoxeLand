@@ -52,7 +52,7 @@ export class WorldSelectScreen extends Screen {
   build(): void {
     const g = this.gui.game;
     const cx = this.width / 2;
-    storage.listWorlds().then((w) => { this.worlds = w.filter((x) => x.id !== 'public'); }); // the server's world is joined from Multiplayer
+    storage.listWorlds().then((w) => { this.worlds = w.filter((x) => x.id !== 'public' && !x.id.startsWith('public-')); }); // hide legacy public-world caches
     this.list = this.add(new ListWidget(cx - 150, 32, 300, this.height - 100, 36, () => this.worlds.length, (ctx, i, x, y, w, sel, hov) => {
       const wm = this.worlds[i];
       if (sel) { ctx.fillStyle = '#808080'; ctx.fillRect(x - 2, y, w + 4, 36); ctx.fillStyle = '#000'; ctx.fillRect(x - 1, y + 1, w + 2, 34); }

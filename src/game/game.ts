@@ -38,7 +38,7 @@ import { BoatEntity } from '../entity/boat';
 import { EnderDragonEntity, WitherEntity, EndCrystalEntity, AreaEffectCloud } from '../entity/boss';
 import { Spawner } from './spawning';
 import { runCommand, completeCommand, suggestCommand, COMMAND_USAGE } from './commands';
-import { MIN_Y, MAX_Y, SEA_LEVEL, SECTION_COUNT, type Chunk } from '../world/chunk';
+import { MIN_Y, MAX_Y, SEA_LEVEL, SECTION_COUNT, type Chunk, type ChunkData } from '../world/chunk';
 import { VERTEX_STRIDE } from '../render/mesher';
 import { createTexture } from '../render/gl';
 import { TitleScreen } from './gui/screens';
@@ -63,6 +63,8 @@ export class Game {
   options: Options = mergeOptions(null);
   // world state
   world!: World;
+  /** Non-null for server-owned worlds that must never be persisted in this browser. */
+  private sessionChunks: Map<string, ChunkData> | null = null;
   chunks!: ChunkManager;
   blocks!: BlockTicker;
   redstone!: Redstone;
@@ -183,11 +185,12 @@ export class Game {
   private meshOptionsKey = '';
 
   // ---------- world lifecycle ----------
-  async loadWorld(meta: WorldMeta): Promise<void> {
+  async loadWorld(meta: WorldMeta, session?: { state: any; chunks: ChunkData[] }): Promise<void> {
+    this.sessionChunks = session ? new Map(session.chunks.map((c) => [`overworld:${c.cx},${c.cz}`, c])) : null;
     this.worldMeta = meta;
     this.gui.open(new LoadingScreen('Loading world…'));
     this.difficulty = meta.difficulty; this.cheats = meta.cheats || meta.gameMode === 'creative';
-    const state = await storage.loadState<any>(meta.id, 'world').catch(() => undefined);
+    const state = session ? session.state : await storage.loadState<any>(meta.id, 'world').catch(() => undefined);
     if (state?.rules) Object.assign(this.rules, state.rules);
     if (state?.worldSpawn) this.worldSpawn = state.worldSpawn;
     this.playerData = new Map(Object.entries(state?.playerData ?? {}));
@@ -217,7 +220,7 @@ export class Game {
     // wait until chunks around the player are ready
     await this.waitForChunks();
     meta.lastPlayed = Date.now();
-    storage.saveWorldMeta(meta).catch(() => {});
+    if (!session) storage.saveWorldMeta(meta).catch(() => {});
     this.sounds.stopMusic();
   }
 
@@ -232,7 +235,7 @@ export class Game {
     this.spawner = new Spawner(this);
     this.world.listeners = [this.blocks];
     this.renderer.sections.clear();
-    this.chunks = new ChunkManager(this.world, this.assets, this.renderer, this.worldMeta!.id, this.biomeColors, this.client);
+    this.chunks = new ChunkManager(this.world, this.assets, this.renderer, this.worldMeta!.id, this.biomeColors, this.client, this.sessionChunks);
     this.chunks.viewDistance = this.options.renderDistance; this.renderer.viewDistance = this.options.renderDistance;
     this.chunks.onChunkLoaded = (c) => { this.blockEntities.loadChunk(c); if ((c as any).fresh) this.spawner.populateChunk(c); };
     this.chunks.onChunkUnloaded = (c) => { this.blockEntities.unloadChunk(c); this.unloadEntitiesIn(c); this.host?.onChunkUnloaded(c); };
@@ -263,9 +266,9 @@ export class Game {
     for (const [d, v] of this.otherDims) time[d] = { time: v.time, dayTime: this.world.dayTime };
     time[this.world.dimension] = { time: this.world.time, dayTime: this.world.dayTime };
     this.host?.saveAllPlayers();
-    storage.saveState(this.worldMeta.id, 'world', { player: this.player.serialize(), weather: this.weather.serialize(), entities, time, rules: this.rules, worldSpawn: this.worldSpawn, playerData: Object.fromEntries(this.playerData), dragonKills: this.dragonKills }).catch(console.error);
+    if (!this.sessionChunks) storage.saveState(this.worldMeta.id, 'world', { player: this.player.serialize(), weather: this.weather.serialize(), entities, time, rules: this.rules, worldSpawn: this.worldSpawn, playerData: Object.fromEntries(this.playerData), dragonKills: this.dragonKills }).catch(console.error);
     this.worldMeta.lastPlayed = Date.now();
-    storage.saveWorldMeta(this.worldMeta).catch(() => {});
+    if (!this.sessionChunks) storage.saveWorldMeta(this.worldMeta).catch(() => {});
   }
 
   quitToTitle(): void {
@@ -276,6 +279,7 @@ export class Game {
     this.renderer.sections.clear();
     this.entities = [];
     this.otherDims.clear();
+    this.sessionChunks = null;
     this.inWorld = false;
     this.particles.list = [];
     this.sounds.stopRecord(); this.sounds.setUnderwater(false); this.sounds.setRain(0);
@@ -751,7 +755,7 @@ export class Game {
   completeCommand(text: string): string | null { return completeCommand(this, text); }
   commandSuggestions(text: string): string[] { return suggestCommand(this, text); }
   commandUsage(text: string): string | null { const name = text.slice(1).split(' ')[0]; return COMMAND_USAGE[name] ?? null; }
-  setDifficulty(d: number): void { this.difficulty = d; if (this.worldMeta) { this.worldMeta.difficulty = d; storage.saveWorldMeta(this.worldMeta).catch(() => {}); } if (d === 0) for (const e of this.entities) if (e instanceof Mob && e.hostile) e.remove(); }
+  setDifficulty(d: number): void { this.difficulty = d; if (this.worldMeta) { this.worldMeta.difficulty = d; if (!this.sessionChunks) storage.saveWorldMeta(this.worldMeta).catch(() => {}); } if (d === 0) for (const e of this.entities) if (e instanceof Mob && e.hostile) e.remove(); }
   /** Menus pause singleplayer only; a world open to LAN (or a server we joined) keeps running like vanilla. */
   onScreenChanged(): void { this.paused = !!this.gui.screen && this.gui.screen.pausesGame && !this.host && !this.client; }
 
@@ -994,11 +998,10 @@ export class Game {
   /** Coordinate live simulation from the authoritative snapshot owned by the backend. */
   private async coordinatePublicWorld(relayUrl: string, world: any, chunkFrames: Uint8Array[]): Promise<void> {
     this.gui.open(new LoadingScreen('Starting the public world…'));
-    // Never merge an authoritative backend snapshot with an older browser cache. Block state ids and serialized
-    // entities can change with the protocol; isolating the cache prevents stale records resolving to undefined.
-    const cacheId = `public-${world.seed}-v${PROTOCOL_VERSION}`;
-    // the backend's stored chunks are the authoritative copy: write them into local storage, then load normally
-    const data: any[] = [];
+    // Keep the authoritative backend snapshot isolated from normal saves. Block state ids and serialized entities
+    // can change with the protocol, so the session id also identifies the snapshot format without persisting it.
+    const sessionId = `public-${world.seed}-v${PROTOCOL_VERSION}`;
+    const data: ChunkData[] = [];
     for (const f of chunkFrames) {
       try {
         const { json, body } = unpackFrame(f);
@@ -1007,16 +1010,14 @@ export class Game {
         data.push({ ...d, decorated: true });
       } catch (e) { console.error('snapshot chunk', e); }
     }
-    const meta: WorldMeta = { id: cacheId, name: world.name ?? 'Public world', seed: world.seed, created: Date.now(), lastPlayed: Date.now(), gameMode: (world.gameMode ?? 'survival') as any, difficulty: world.difficulty ?? 2, cheats: false, version: this.version };
-    await storage.saveWorldMeta(meta).catch(() => {});
-    if (data.length) await storage.saveChunks(cacheId, 'overworld', data as any).catch((e) => console.error(e));
-    // world-level state from the backend (time, weather, rules, spawn, everyone's saved players)
-    await storage.saveState(cacheId, 'world', {
+    const meta: WorldMeta = { id: sessionId, name: world.name ?? 'Public world', seed: world.seed, created: Date.now(), lastPlayed: Date.now(), gameMode: (world.gameMode ?? 'survival') as any, difficulty: world.difficulty ?? 2, cheats: false, version: this.version };
+    // World-level state and chunks remain in memory; the backend is the only persistent owner.
+    const state = {
       player: world.playerData?.[this.options.playerId] ?? world.playerData?.[this.options.playerName || 'Player'] ?? undefined,
       weather: world.meta?.weather, time: { overworld: { time: world.meta?.time ?? 0, dayTime: world.meta?.dayTime ?? 0 } },
       rules: world.meta?.rules, worldSpawn: world.meta?.worldSpawn, playerData: world.playerData ?? {}, dragonKills: world.meta?.dragonKills ?? 0,
-    }).catch(() => {});
-    await this.loadWorld(meta);
+    };
+    await this.loadWorld(meta, { state, chunks: data });
     const h = await this.openToLan({ name: world.name ?? 'Public world', motd: world.motd ?? '', gameMode: world.gameMode ?? 'survival', cheats: false, maxPlayers: world.maxPlayers ?? 16, relayUrl, official: true });
     this.lastServer = { relayUrl, serverId: 'official', password: '' };
     this.gui.addChat('§eJoined VoxeLand Public Server');

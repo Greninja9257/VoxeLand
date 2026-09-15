@@ -33,7 +33,7 @@ export class ChunkManager {
   remote: { requestChunk(cx: number, cz: number): void; forgetChunk(cx: number, cz: number): void } | null;
   /** Additional positions (other players) whose surroundings stay loaded (host). */
   extraCenters: { x: number; z: number }[] = [];
-  constructor(public world: World, public assets: Assets, public target: SectionMeshTarget, public worldId: string, public biomeColors: Uint8Array, remote: { requestChunk(cx: number, cz: number): void; forgetChunk(cx: number, cz: number): void } | null = null) {
+  constructor(public world: World, public assets: Assets, public target: SectionMeshTarget, public worldId: string, public biomeColors: Uint8Array, remote: { requestChunk(cx: number, cz: number): void; forgetChunk(cx: number, cz: number): void } | null = null, private sessionChunks: Map<string, ChunkData> | null = null) {
     this.remote = remote;
     const hw = Math.max(2, Math.min(8, (navigator.hardwareConcurrency || 4)));
     const genCount = Math.max(1, Math.floor(hw / 2));
@@ -82,7 +82,7 @@ export class ChunkManager {
           this.remote?.forgetChunk(c.cx, c.cz);
           if (c.modified && !this.remote) save.push(c.serialize());
         }
-        if (save.length) storage.saveChunks(this.worldId, world.dimension, save).catch(console.error);
+        if (save.length) this.storeChunks(save);
       }
     }
     // request generation for missing chunks, nearest first
@@ -119,7 +119,9 @@ export class ChunkManager {
     this.pendingGen.add(key);
     try {
       let chunk: Chunk | null = null;
-      const saved = await storage.loadChunk(this.worldId, this.world.dimension, cx, cz).catch(() => undefined);
+      const saved = this.sessionChunks
+        ? this.sessionChunks.get(`${this.world.dimension}:${cx},${cz}`)
+        : await storage.loadChunk(this.worldId, this.world.dimension, cx, cz).catch(() => undefined);
       if (saved) chunk = Chunk.deserialize(saved);
       else {
         const r = await this.genPool.request({ type: 'gen', cx, cz });
@@ -259,7 +261,16 @@ export class ChunkManager {
     if (this.remote) return Promise.resolve();
     const save: ChunkData[] = [];
     for (const c of this.world.chunks.values()) if (c.modified) { save.push(c.serialize()); c.modified = false; }
-    return storage.saveChunks(this.worldId, this.world.dimension, save).catch(console.error) as Promise<void>;
+    return this.storeChunks(save);
+  }
+
+  /** Session worlds (the backend-owned public world) retain chunks only in memory. */
+  private storeChunks(chunks: ChunkData[]): Promise<void> {
+    if (this.sessionChunks) {
+      for (const c of chunks) this.sessionChunks.set(`${this.world.dimension}:${c.cx},${c.cz}`, c);
+      return Promise.resolve();
+    }
+    return storage.saveChunks(this.worldId, this.world.dimension, chunks).catch(console.error) as Promise<void>;
   }
 
   /** Remove everything (dimension change / quit). */
