@@ -39,6 +39,7 @@ export class RemotePlayer extends Player {
   remoteTick(): void { this.tick(); }
   tick(): void {
     this.attackCooldownTicks++;
+    if (this.invulnerableTicks > 0) this.invulnerableTicks--;
     if (this.vehicle?.removed) this.vehicle = null;
     if (this.vehicle) { // the vehicle positions us; only animate
       this.prevYaw = this.yaw; this.prevPitch = this.pitch; this.prevBodyYaw = this.bodyYaw; this.prevHeadYaw = this.headYaw; this.prevSwingProgress = this.swingProgress; this.prevLimbSwingAmount = this.limbSwingAmount;
