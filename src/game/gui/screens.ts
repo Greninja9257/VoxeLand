@@ -147,21 +147,91 @@ export class CreditsScreen extends Screen {
   pausesGame = false; hidesHud = true;
   text: string[] = [];
   scroll = 0;
+  private status = 'Loading credits…';
+  private linkHits: { x: number; y: number; w: number; url: string }[] = [];
   constructor(private parent: Screen) { super(); }
   build(): void {
-    fetch('./assets/CREDITS.txt').then((r) => r.text()).then((t) => { this.text = t.split('\n'); });
-    this.add(new Button(this.width / 2 - 100, this.height - 28, 200, 20, 'Done', () => this.gui.open(this.parent)));
+    fetch('./assets/CREDITS.txt').then((r) => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.text();
+    }).then((t) => { this.text = t.split('\n'); this.status = ''; }).catch(() => { this.status = 'Could not load credits.'; });
+    this.add(new Button(this.width / 2 - 100, this.height - 28, 200, 20, 'Done', () => this.close()));
   }
-  wheel(dy: number): void { this.scroll = Math.max(0, this.scroll + dy * 20); }
+  private close(): void { this.gui.canvas.style.cursor = ''; this.gui.open(this.parent); }
+  private panel(): { x: number; y: number; w: number; h: number } { return { x: 10, y: 28, w: this.width - 20, h: this.height - 66 }; }
+  private rows(): { text: string; kind: 'body' | 'section' | 'label' | 'space'; y: number }[] {
+    const p = this.panel(), rows: { text: string; kind: 'body' | 'section' | 'label' | 'space'; y: number }[] = [];
+    let y = 8;
+    for (let i = 0; i < this.text.length; i++) {
+      const line = this.text[i];
+      if (i < 2 || /^\s*[-=]{3,}\s*$/.test(line)) continue;
+      if (!line.trim()) { rows.push({ text: '', kind: 'space', y }); y += 6; continue; }
+      const kind = /^\d+\.\s/.test(line) ? 'section' : /^\s*(Source|Content|Owner|License|Location)\s*:/.test(line) ? 'label' : 'body';
+      for (const wrapped of this.gui.font.wrap(line.trim(), p.w - 24)) { rows.push({ text: wrapped, kind, y }); y += kind === 'section' ? 13 : 10; }
+      if (kind === 'section') y += 2;
+    }
+    return rows;
+  }
+  private maxScroll(): number {
+    const rows = this.rows(), contentHeight = rows.length ? rows[rows.length - 1].y + 10 : 0;
+    return Math.max(0, contentHeight - (this.panel().h - 16));
+  }
+  wheel(dy: number, x: number, y: number): void {
+    const p = this.panel();
+    if (x >= p.x && x < p.x + p.w && y >= p.y && y < p.y + p.h) this.scroll = Math.max(0, Math.min(this.maxScroll(), this.scroll + dy * 16));
+  }
   render(ctx: CanvasRenderingContext2D, mx: number, my: number, partial: number): void {
-    this.gui.font.drawCentered(ctx, 'Credits', this.width / 2, 12, 0xffffff);
-    ctx.save(); ctx.beginPath(); ctx.rect(0, 28, this.width, this.height - 64); ctx.clip();
-    let y = 32 - this.scroll;
-    for (const l of this.text) { for (const w of this.gui.font.wrap(l, this.width - 40)) { this.gui.font.draw(ctx, w, 20, y, 0xdddddd); y += 10; } }
+    const p = this.panel(), rows = this.rows(), maxScroll = this.maxScroll();
+    this.scroll = Math.min(this.scroll, maxScroll);
+    this.gui.font.drawCentered(ctx, 'Credits & Attribution', this.width / 2, 10, 0xffffff);
+    ctx.fillStyle = 'rgba(0,0,0,0.62)'; ctx.fillRect(p.x, p.y, p.w, p.h);
+    ctx.strokeStyle = '#777'; ctx.strokeRect(p.x + 0.5, p.y + 0.5, p.w - 1, p.h - 1);
+    this.linkHits = [];
+    ctx.save(); ctx.beginPath(); ctx.rect(p.x + 1, p.y + 1, p.w - 8, p.h - 2); ctx.clip();
+    if (this.status) this.gui.font.drawCentered(ctx, this.status, p.x + p.w / 2, p.y + p.h / 2 - 4, this.text.length ? 0xffffff : 0xa0a0a0);
+    for (const row of rows) {
+      if (row.kind === 'space') continue;
+      const x = p.x + 10, y = p.y + row.y - this.scroll;
+      const color = row.kind === 'section' ? 0xffff55 : row.kind === 'label' ? 0xaaaaaa : 0xdddddd;
+      const match = row.text.match(/https?:\/\/\S+/);
+      if (!match || match.index === undefined) { this.gui.font.draw(ctx, row.text, x, y, color); continue; }
+      const before = row.text.slice(0, match.index), url = match[0].replace(/[),.;]+$/, ''), after = row.text.slice(match.index + url.length);
+      const linkX = x + this.gui.font.width(before), linkW = this.gui.font.width(url);
+      const hovered = mx >= linkX && mx < linkX + linkW && my >= y - 1 && my < y + 9 && y >= p.y && y < p.y + p.h;
+      this.gui.font.draw(ctx, before, x, y, color);
+      this.gui.font.draw(ctx, `§n${url}`, linkX, y, hovered ? 0x3366cc : 0x66b3ff);
+      this.gui.font.draw(ctx, after, linkX + linkW, y, color);
+      if (y >= p.y && y < p.y + p.h - 8) this.linkHits.push({ x: linkX, y, w: linkW, url });
+    }
     ctx.restore();
+    if (maxScroll > 0) {
+      const trackY = p.y + 3, trackH = p.h - 6, thumbH = Math.max(12, trackH * (trackH / (trackH + maxScroll)));
+      const thumbY = trackY + this.scroll / maxScroll * (trackH - thumbH);
+      ctx.fillStyle = '#202020'; ctx.fillRect(p.x + p.w - 6, trackY, 3, trackH);
+      ctx.fillStyle = '#a0a0a0'; ctx.fillRect(p.x + p.w - 6, thumbY, 3, thumbH);
+    }
+    const linkHovered = this.linkHits.some((h) => mx >= h.x && mx < h.x + h.w && my >= h.y - 1 && my < h.y + 9);
+    this.gui.canvas.style.cursor = linkHovered ? 'pointer' : '';
     super.render(ctx, mx, my, partial);
   }
-  keyDown(code: string, key: string, mods: any): boolean { if (code === 'Escape') { this.gui.open(this.parent); return true; } return super.keyDown(code, key, mods); }
+  mouseDown(x: number, y: number, button: number): boolean {
+    const link = this.linkHits.find((h) => x >= h.x && x < h.x + h.w && y >= h.y - 1 && y < h.y + 9);
+    if (button === 0 && link) { window.open(link.url, '_blank', 'noopener,noreferrer'); return true; }
+    return super.mouseDown(x, y, button);
+  }
+  keyDown(code: string, key: string, mods: { shift: boolean; ctrl: boolean }): boolean {
+    const page = Math.max(20, this.panel().h - 24), max = this.maxScroll();
+    if (code === 'Escape') { this.close(); return true; }
+    if (code === 'ArrowUp') this.scroll -= 12;
+    else if (code === 'ArrowDown') this.scroll += 12;
+    else if (code === 'PageUp') this.scroll -= page;
+    else if (code === 'PageDown') this.scroll += page;
+    else if (code === 'Home') this.scroll = 0;
+    else if (code === 'End') this.scroll = max;
+    else return super.keyDown(code, key, mods);
+    this.scroll = Math.max(0, Math.min(max, this.scroll));
+    return true;
+  }
 }
 
 export class ControlsScreen extends Screen {
