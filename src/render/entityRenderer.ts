@@ -411,7 +411,10 @@ export class EntityRenderer {
     const off = p.offhandItem();
     if (off) this.drawHandItem(base, pose, off, sky, light, true, slim, hurt);
     // name tag for other players (vanilla hides it while sneaking (isDiscrete) and for dead players)
-    if ((p as any).isRemote && !p.sleeping && !p.isSneaking && p.health > 0 && p.deathTime === 0 && !p.isSpectator) this.game.gui.queueNameTag(p.name, p.x, p.y + p.height + 0.5, p.z);
+    if ((p as any).isRemote && !p.sleeping && !p.isSneaking && p.health > 0 && p.deathTime === 0 && !p.isSpectator) {
+      const cb = this.renderer.camBase;
+      this.game.gui.queueNameTag(p.name, pos[0] + cb[0], pos[1] + cb[1] + p.height + 0.5, pos[2] + cb[2]);
+    }
   }
 
   /** vanilla ItemInHandLayer.renderArmWithItem: hand transform in the (flipped) model space, then the item's

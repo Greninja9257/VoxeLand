@@ -133,7 +133,8 @@ export class Weather {
       const a = Math.round(255 * alpha * Math.max(0, 1 - dist / R));
       const px = x + 0.5 - cb[0], pz = z + 0.5 - cb[2];
       // the atlas cannot repeat, so the column is split wherever the 4-block texture wraps
-      const sf = (scroll % 4) / 4; // texture phase at the top of the column
+      // V increases down the texture, so the top sample must move backwards for streaks to fall in world space.
+      const sf = ((-scroll % 4) + 4) % 4 / 4; // texture phase at the top of the column
       let top = y1, t = sf;
       while (top > y0 && quads < 2000) {
         const segH = Math.min(top - y0, (1 - t) * 4);

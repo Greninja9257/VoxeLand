@@ -9,6 +9,7 @@ export class RemotePlayer extends Player {
   /** latest snapshot target */
   tx = 0; ty = 0; tz = 0; tyaw = 0; tpitch = 0;
   snapshotAge = 0;
+  lerpSteps = 0;
   hurtHandler: ((d: EntityDamage) => void) | null = null;
   /** last full player state reported by the guest (persisted by the host) */
   lastSaved: any = null;
@@ -37,7 +38,8 @@ export class RemotePlayer extends Player {
     if (s.br && Number.isInteger(s.br.x) && Number.isInteger(s.br.y) && Number.isInteger(s.br.z) && Number.isInteger(s.br.stage)) this.breaking = { x: s.br.x, y: s.br.y, z: s.br.z, progress: Math.max(0, Math.min(9, s.br.stage)) / 10, state: s.br.state };
     else if (s.br === null) this.breaking = null;
     this.snapshotAge = 0;
-    if (this.snapshotAge === 0 && Math.abs(this.x - this.tx) + Math.abs(this.z - this.tz) > 16) { this.setPos(this.tx, this.ty, this.tz); this.prevX = this.x; this.prevY = this.y; this.prevZ = this.z; }
+    this.lerpSteps = 3;
+    if (Math.abs(this.x - this.tx) + Math.abs(this.z - this.tz) > 16) { this.setPos(this.tx, this.ty, this.tz); this.prevX = this.x; this.prevY = this.y; this.prevZ = this.z; this.yaw = this.prevYaw = this.tyaw; this.pitch = this.prevPitch = this.tpitch; this.lerpSteps = 0; }
   }
 
   remoteTick(): void { this.tick(); }
@@ -47,7 +49,9 @@ export class RemotePlayer extends Player {
     if (this.vehicle?.removed) this.vehicle = null;
     if (this.vehicle) { // the vehicle positions us; only animate
       this.prevYaw = this.yaw; this.prevPitch = this.pitch; this.prevBodyYaw = this.bodyYaw; this.prevHeadYaw = this.headYaw; this.prevSwingProgress = this.swingProgress; this.prevLimbSwingAmount = this.limbSwingAmount;
-      let dy = this.tyaw - this.yaw; while (dy > 180) dy -= 360; while (dy < -180) dy += 360; this.yaw += dy / 3; this.pitch += (this.tpitch - this.pitch) / 3; this.headYaw = this.yaw;
+      const f = this.lerpSteps > 0 ? 1 / this.lerpSteps : 1;
+      let dy = this.tyaw - this.yaw; while (dy > 180) dy -= 360; while (dy < -180) dy += 360; this.yaw += dy * f; this.pitch += (this.tpitch - this.pitch) * f; this.headYaw = this.yaw;
+      if (this.lerpSteps > 0) this.lerpSteps--;
       this.updateSwingRemote(); if (this.hurtTime > 0) this.hurtTime--; this.age++;
       return;
     }
@@ -55,12 +59,13 @@ export class RemotePlayer extends Player {
     this.prevX = this.x; this.prevY = this.y; this.prevZ = this.z;
     this.prevYaw = this.yaw; this.prevPitch = this.pitch; this.prevBodyYaw = this.bodyYaw; this.prevHeadYaw = this.headYaw;
     this.prevSwingProgress = this.swingProgress; this.prevLimbSwingAmount = this.limbSwingAmount; this.prevCameraEye = this.cameraEye;
-    const f = 1 / 3;
+    const f = this.lerpSteps > 0 ? 1 / this.lerpSteps : 1;
     const nx = this.x + (this.tx - this.x) * f, ny = this.y + (this.ty - this.y) * f, nz = this.z + (this.tz - this.z) * f;
     const dx = nx - this.x, dz = nz - this.z;
     this.setPos(nx, ny, nz);
     let dy = this.tyaw - this.yaw; while (dy > 180) dy -= 360; while (dy < -180) dy += 360;
     this.yaw += dy * f; this.pitch += (this.tpitch - this.pitch) * f;
+    if (this.lerpSteps > 0) this.lerpSteps--;
     this.headYaw = this.yaw;
     // body follows head like vanilla
     let bd = this.yaw - this.bodyYaw; while (bd > 180) bd -= 360; while (bd < -180) bd += 360;
