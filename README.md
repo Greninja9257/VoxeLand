@@ -49,6 +49,21 @@ Server environment variables: `PORT`, `DATA_DIR`, `PUBLIC_SEED`, `PUBLIC_NAME`, 
 
 While the host's tab is in the background a worker timer keeps the world ticking at 20 TPS.
 
+### Minecraft Java servers
+
+Direct Connection can also connect to a real Minecraft Java server through the VoxeLand backend. Select
+**Minecraft Java**, enter `host` or `host:port`, and choose offline/local or Microsoft authentication. The gateway
+currently targets Java **26.1**; the browser never connects to the Minecraft TCP port directly.
+
+The server operator can set `ALLOW_PRIVATE_MINECRAFT=true` to permit loopback/LAN targets. Private-network
+destinations are blocked by default so a public deployment cannot be used as an internal-network proxy.
+`MINECRAFT_ALLOWED_HOSTS` accepts a comma-separated allowlist for specific private hosts. Microsoft token data is
+stored under `DATA_DIR/auth` and must be protected like account credentials.
+
+Java-server support currently covers login, chunks, movement and teleport reconciliation, block changes, digging
+and placement, health, time, experience, held slots, chat, respawn, and disconnects. Custom registries, modded
+servers, plugin-specific screens, and complete entity/inventory translation are not yet supported.
+
 ## Railway deployment
 
 Connect this repository to a Railway service and deploy it. `railway.json` fetches the git-ignored game assets,

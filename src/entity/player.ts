@@ -59,6 +59,10 @@ export class Player extends LivingEntity {
   private lastX = 0; private lastZ = 0;
   walkDist = 0; nextStep = 1; prevWalkDist = 0;
   bob = 0; prevBob = 0;
+  // Visual-only offset used to hide small authoritative server corrections. Physics and outgoing
+  // movement packets always use x/y/z, never these values.
+  serverCorrectionX = 0; serverCorrectionY = 0; serverCorrectionZ = 0;
+  prevServerCorrectionX = 0; prevServerCorrectionY = 0; prevServerCorrectionZ = 0;
   cheats = true;
   ticksSinceLastSleep = 0;
   itemCooldowns = new Map<string, number>();
@@ -74,6 +78,22 @@ export class Player extends LivingEntity {
   get isCreative(): boolean { return this.gameMode === 'creative'; }
   get isSpectator(): boolean { return this.gameMode === 'spectator'; }
   get invulnerableMode(): boolean { return this.isCreative || this.isSpectator; }
+
+  applyServerPosition(x: number, y: number, z: number): void {
+    const dx = this.x - x, dy = this.y - y, dz = this.z - z;
+    // Vanilla teleports and large corrections must be immediately visible. Small reconciliation
+    // remains server-authoritative but preserves the old visual position and fades it out.
+    if (dx * dx + dy * dy + dz * dz <= 16) {
+      this.serverCorrectionX += dx; this.serverCorrectionY += dy; this.serverCorrectionZ += dz;
+      this.prevServerCorrectionX = this.serverCorrectionX;
+      this.prevServerCorrectionY = this.serverCorrectionY;
+      this.prevServerCorrectionZ = this.serverCorrectionZ;
+    } else {
+      this.serverCorrectionX = this.serverCorrectionY = this.serverCorrectionZ = 0;
+      this.prevServerCorrectionX = this.prevServerCorrectionY = this.prevServerCorrectionZ = 0;
+    }
+    this.setPos(x, y, z);
+  }
 
   heldItem(): ItemStack | null { return this.inventory.get(this.selectedSlot); }
   offhandItem(): ItemStack | null { return this.offhand.get(0); }
@@ -188,6 +208,11 @@ export class Player extends LivingEntity {
   // ---------- tick ----------
   tick(): void {
     const g = this.game;
+    this.prevServerCorrectionX = this.serverCorrectionX; this.prevServerCorrectionY = this.serverCorrectionY; this.prevServerCorrectionZ = this.serverCorrectionZ;
+    this.serverCorrectionX *= 0.5; this.serverCorrectionY *= 0.5; this.serverCorrectionZ *= 0.5;
+    if (Math.abs(this.serverCorrectionX) < 0.0001) this.serverCorrectionX = 0;
+    if (Math.abs(this.serverCorrectionY) < 0.0001) this.serverCorrectionY = 0;
+    if (Math.abs(this.serverCorrectionZ) < 0.0001) this.serverCorrectionZ = 0;
     this.prevCameraEye = this.cameraEye;
     if (this.sleeping) { this.sleepTimer++; this.moveForward = this.moveStrafe = 0; this.jumping = false; }
     else this.sleepTimer = 0;
@@ -496,7 +521,7 @@ export class Player extends LivingEntity {
           // multiplayer guest: the host runs the interaction (and opens container GUIs for us); simple toggles are also
           // predicted locally so doors/buttons feel instant
           const n = reg.nameOf(state);
-          g.client.send({ t: 'use', x: hit.x, y: hit.y, z: hit.z, face: hit.face, hit: [hit.hx, hit.hy, hit.hz], held: held?.serialize() ?? null });
+          g.client.send({ t: 'use', x: hit.x, y: hit.y, z: hit.z, face: hit.face, hit: [hit.hx, hit.hy, hit.hz] });
           if (HOST_ONLY_BLOCKS.test(n)) { this.useCooldown = 4; this.swing(); return true; }
         }
         if (useBlock(g, hit.x, hit.y, hit.z, state, hit.face, [hit.hx, hit.hy, hit.hz], this)) { this.useCooldown = 4; this.swing(); return true; }

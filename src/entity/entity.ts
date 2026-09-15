@@ -47,6 +47,11 @@ export abstract class Entity {
   remoteId = 0;
   protected snap: { x: number; y: number; z: number; yaw: number; pitch: number } | null = null;
 
+  /** Latest authoritative network state. Relative packets must build on this, not the displayed lerp position. */
+  networkSnapshot(): { x: number; y: number; z: number; yaw: number; pitch: number } {
+    return this.snap ?? { x: this.x, y: this.y, z: this.z, yaw: this.yaw, pitch: this.pitch };
+  }
+
   /** Store a host snapshot; remoteTick() interpolates towards it. */
   applySnapshot(s: any): void {
     if (!this.snap || Math.abs(s.x - this.x) + Math.abs(s.y - this.y) + Math.abs(s.z - this.z) > 12) { this.setPos(s.x, s.y, s.z); this.yaw = this.prevYaw = s.yaw; this.pitch = this.prevPitch = s.pitch; }
@@ -159,7 +164,10 @@ export abstract class Entity {
     this.verticalCollision = my !== dy;
     this.onGround = this.verticalCollision && dy < 0;
     this.x = (bb.minX + bb.maxX) / 2; this.y = bb.minY; this.z = (bb.minZ + bb.maxZ) / 2;
-    this.updateBB();
+    // `bb` is already the exact result of the collision sweep. Rebuilding it from the derived centre can
+    // move an edge a fraction inside the obstacle (for example -2.3 + 0.3 is -1.9999999999999998).
+    // Once microscopically overlapping, the next one-axis sweep treats the entity as already inside and can
+    // let it pass through. Keep the swept box authoritative, as vanilla does.
     if (mx !== dx) this.vx = 0;
     if (mz !== dz) this.vz = 0;
     if (my !== dy) { this.vy = 0; if (this.onGround) { this.onLand(); } }

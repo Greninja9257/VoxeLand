@@ -16,6 +16,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { WebSocketServer } from 'ws';
+import { createJavaSession, pingJavaServer, JAVA_VERSION } from './java-gateway.mjs';
 
 const PORT = +(process.env.PORT || 8080);
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
@@ -25,6 +26,8 @@ const MAX_PLAYERS_DEFAULT = 8;
 const OFFICIAL_ID = 'official';
 const OFFICIAL_MAX = +(process.env.PUBLIC_MAX_PLAYERS || 16);
 const MAX_STORED_CHUNKS = +(process.env.PUBLIC_MAX_CHUNKS || 2048);
+const MAX_CONTROL_BYTES = 64 * 1024;
+const MAX_GUEST_MESSAGES_PER_SECOND = 80;
 
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.png': 'image/png', '.ogg': 'audio/ogg', '.txt': 'text/plain; charset=utf-8', '.wasm': 'application/wasm', '.ico': 'image/x-icon', '.svg': 'image/svg+xml' };
 
@@ -128,10 +131,17 @@ wss.on('connection', (ws) => {
   let server = null;        // the server record this socket belongs to
   let clientId = 0;
   let playerId = '';
+  let javaSession = null;
+  let rateWindow = Date.now();
+  let rateMessages = 0;
 
   ws.on('message', (data, isBinary) => {
+    const now = Date.now();
+    if (now - rateWindow >= 1000) { rateWindow = now; rateMessages = 0; }
+    if (role !== 'host' && ++rateMessages > MAX_GUEST_MESSAGES_PER_SECOND) { ws.close(1008, 'Too many messages'); return; }
     if (isBinary) {
       const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
+      if (role !== 'host') return; // guests and Java clients never have a valid binary control message
       if (role === 'host' && server) {
         const target = buf.readUInt32LE(0); const payload = buf.subarray(4);
         if (target === 0xffffffff) { // persist a chunk of the public world
@@ -145,14 +155,26 @@ wss.on('connection', (ws) => {
         }
         if (target === 0) { for (const g of server.guests.values()) sendBin(g, payload); }
         else sendBin(server.guests.get(target), payload);
-      } else if (role === 'guest' && server) {
-        const out = Buffer.alloc(4 + buf.length); out.writeUInt32LE(clientId, 0); buf.copy(out, 4);
-        sendBin(server.ws, out);
       }
       return;
     }
+    if (Buffer.byteLength(data) > MAX_CONTROL_BYTES) { ws.close(1009, 'Control message too large'); return; }
     let m; try { m = JSON.parse(data.toString()); } catch { return; }
     switch (m.t) {
+      case 'javaPing': {
+        if (role) return;
+        pingJavaServer(m.address).then((status) => send(ws, { t: 'javaStatus', status })).catch((error) => send(ws, { t: 'error', reason: error?.message ?? String(error) }));
+        break;
+      }
+      case 'javaConnect': {
+        if (role) return;
+        role = 'java';
+        createJavaSession({ address: m.address, username: m.username, auth: m.auth, profilesFolder: path.join(DATA_DIR, 'auth'), send: (message) => send(ws, message), sendBinary: (data) => sendBin(ws, data) })
+          .then((session) => { javaSession = session; })
+          .catch((error) => { send(ws, { t: 'error', reason: error?.message ?? String(error) }); try { ws.close(); } catch { /* */ } });
+        break;
+      }
+      case 'javaIntent': { if (role === 'java' && javaSession) javaSession.intent(m.intent); break; }
       case 'host': {
         if (role) return;
         const wantOfficial = m.official === true;
@@ -233,6 +255,7 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
+    if (role === 'java') { javaSession?.close(); return; }
     if (role === 'host' && server) {
       servers.delete(server.id);
       if (server.official) {
@@ -263,5 +286,5 @@ function readChunkKey(payload) {
 
 loadOfficial();
 http_.listen(PORT, () => {
-  console.log(`VoxeLand server on http://localhost:${PORT}  (relay /ws, public world "${official.name}", serving ${DIST})`);
+  console.log(`VoxeLand server on http://localhost:${PORT}  (relay /ws, Java ${JAVA_VERSION} gateway, public world "${official.name}", serving ${DIST})`);
 });

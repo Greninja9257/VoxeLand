@@ -5,7 +5,24 @@
 //   guest -> relay: [payload]           relay -> host: [u32 fromClientId] [payload]
 // Payload: [u8 kind] [u32 jsonLength] [json utf8] [binary body]
 
-export const PROTOCOL_VERSION = 8;
+export const PROTOCOL_VERSION = 9;
+
+const GUEST_MESSAGE_TYPES = new Set(['ready', 'move', 'inv', 'chunk', 'set', 'break', 'use', 'attack', 'snd', 'interact', 'drop', 'chat', 'death', 'cont', 'close', 'respawn', 'sleep', 'xp', 'spawn', 'boatInput', 'dismount', 'ping']);
+
+/** Cheap boundary validation before an untrusted guest message reaches world logic. */
+export function isGuestMessage(m: unknown): m is Record<string, any> {
+  if (!m || typeof m !== 'object') return false;
+  const v = m as Record<string, any>;
+  if (typeof v.t !== 'string' || !GUEST_MESSAGE_TYPES.has(v.t)) return false;
+  if (v.t === 'chat' && (typeof v.text !== 'string' || v.text.length > 256)) return false;
+  if (v.t === 'chunk' && (!Array.isArray(v.keys) || v.keys.length > 256 || !v.keys.every(Number.isInteger))) return false;
+  if (v.t === 'move' && ![v.x, v.y, v.z, v.yaw, v.pitch].every(Number.isFinite)) return false;
+  if (['set', 'break', 'use'].includes(v.t)) {
+    const xyz = v.t === 'set' ? v.b?.slice?.(0, 3) : [v.x, v.y, v.z];
+    if (!Array.isArray(xyz) || xyz.length !== 3 || !xyz.every(Number.isInteger)) return false;
+  }
+  return true;
+}
 
 /** A server as advertised by a relay. `private` servers need a password; `official` is the backend's own world. */
 export type ServerInfo = { id: string; name: string; host: string; motd: string; players: number; maxPlayers: number; gameMode: string; version: string; private: boolean; official: boolean; online?: boolean };

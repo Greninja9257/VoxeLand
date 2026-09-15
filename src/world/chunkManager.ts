@@ -142,6 +142,14 @@ export class ChunkManager {
     this.addChunk(chunk);
   }
 
+  /** Remove a chunk explicitly unloaded by a remote authoritative server. */
+  removeRemoteChunk(cx: number, cz: number): void {
+    const chunk = this.world.removeChunk(cx, cz);
+    if (!chunk) return;
+    this.target.removeChunkMeshes(cx, cz);
+    this.onChunkUnloaded?.(chunk);
+  }
+
   private addChunk(chunk: Chunk): void {
     const world = this.world;
     world.addChunk(chunk);

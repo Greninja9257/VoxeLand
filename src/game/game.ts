@@ -16,7 +16,7 @@ import { RecipeManager } from '../items/recipes';
 import { LootTables } from '../items/loot';
 import { ItemStack } from '../items/stack';
 import { Entity, LivingEntity, ItemEntity, ExperienceOrb } from '../entity/entity';
-import { Player, type BlockHit } from '../entity/player';
+import { Player, type BlockHit, type GameMode } from '../entity/player';
 import { Mob, MOB_DEFS } from '../entity/mobs';
 import { FallingBlockEntity, PrimedTnt, ArrowEntity, ThrownProjectile } from '../entity/misc';
 import { ItemRenderer } from '../render/itemRenderer';
@@ -32,6 +32,7 @@ import { mergeOptions, type Options } from './options';
 import { Weather } from './weather';
 import { NetHost, type HostOptions } from '../net/host';
 import { NetClient } from '../net/client';
+import { JavaNetClient } from '../net/javaClient';
 import { decodeChunk, unpackFrame, PROTOCOL_VERSION } from '../net/protocol';
 import { RemotePlayer } from '../entity/remotePlayer';
 import { BoatEntity } from '../entity/boat';
@@ -84,7 +85,7 @@ export class Game {
   private otherDims = new Map<Dimension, { entities: any[]; time: number }>();
   /** multiplayer */
   host: NetHost | null = null;
-  client: NetClient | null = null;
+  client: NetClient | JavaNetClient | null = null;
   /** saved state of guests that visited this world (by name) */
   playerData = new Map<string, any>();
   get isRemote(): boolean { return this.client !== null; }
@@ -274,7 +275,7 @@ export class Game {
   quitToTitle(): void {
     this.saveAll();
     if (this.host) { this.host.stop(); this.host = null; }
-    if (this.client) { this.client.send({ t: 'move', x: this.player.x, y: this.player.y, z: this.player.z, yaw: this.player.yaw, pitch: this.player.pitch, saved: this.player.serialize() }); this.client.close(); this.client = null; }
+    if (this.client) { this.client.send({ t: 'move', x: this.player.x, y: this.player.y, z: this.player.z, yaw: this.player.yaw, pitch: this.player.pitch }); this.client.close(); this.client = null; }
     this.chunks.dispose();
     this.renderer.sections.clear();
     this.entities = [];
@@ -414,7 +415,7 @@ export class Game {
   /** Guest-created entities (drops, projectiles, spawn eggs) are created by the host instead. */
   private forwardSpawn(e: Entity): void {
     const c = this.client!;
-    if (e instanceof ItemEntity) c.send({ t: 'drop', stack: e.stack.serialize(), x: e.x, y: e.y, z: e.z, dir: [e.vx, e.vy, e.vz] });
+    if (e instanceof ItemEntity) c.send({ t: 'drop', count: e.stack.count });
     else if (e instanceof BoatEntity) c.send({ t: 'spawn', kind: 'boat', x: e.x, y: e.y, z: e.z, v: [0, 0, 0], yaw: e.yaw, extra: { wood: e.wood, chest: e.chest } });
     else if (e instanceof ArrowEntity || e instanceof ThrownProjectile || e instanceof Mob) c.send({ t: 'spawn', e: e.serialize(), x: e.x, y: e.y, z: e.z, v: [e.vx, e.vy, e.vz], kind: e instanceof ArrowEntity ? 'arrow' : e instanceof ThrownProjectile ? 'thrown' : 'mob', extra: e instanceof ArrowEntity ? { damage: e.damage, akind: e.kind, trident: (e as any).trident?.serialize?.(), effect: (e as any).effect } : e instanceof ThrownProjectile ? { tkind: e.kind, stack: e.stack?.serialize() ?? null } : { type: e.type, baby: (e as Mob).isBaby } });
   }
@@ -992,6 +993,36 @@ export class Game {
     this.lastServer = { relayUrl, serverId, password };
     this.gui.addChat(`§eJoined ${welcome.hostName}'s world`);
   }
+
+  /** Join a real Minecraft Java server through the backend TCP gateway. */
+  async joinJavaServer(relayUrl: string, address: string, auth: 'offline' | 'microsoft' = 'offline'): Promise<void> {
+    const c = new JavaNetClient(this, relayUrl);
+    const loading = new LoadingScreen(auth === 'microsoft' ? 'Waiting for Microsoft sign-in…' : 'Connecting to Minecraft server…');
+    this.gui.open(loading);
+    const welcome = await c.connect(address, this.options.playerName || 'Player', auth, (message) => loading.setMessage(message));
+    this.client = c;
+    this.worldMeta = { id: 'java-remote', name: address, seed: welcome.seed, created: Date.now(), lastPlayed: Date.now(), gameMode: welcome.gameMode as any, difficulty: welcome.difficulty, cheats: false, version: this.version };
+    this.difficulty = welcome.difficulty; this.cheats = false; this.worldSpawn = welcome.spawn;
+    await this.setupDimension(welcome.dimension, welcome.seed, { time: welcome.time, dayTime: welcome.dayTime });
+    this.world.listeners = [c];
+    this.player = new Player(); this.player.world = this.world; this.player.game = this;
+    this.player.name = welcome.name; this.player.cheats = false; this.player.setGameMode(welcome.gameMode as any);
+    this.player.inventory.onChange = () => this.gui.onHeldItemChanged();
+    this.player.setPos(welcome.spawn[0], welcome.spawn[1], welcome.spawn[2]);
+    c.startApplying();
+    this.inWorld = true; this.gui.close(); this.input.lockPointer(); this.gui.onHeldItemChanged();
+    await this.waitForChunks(); this.sounds.stopMusic();
+    this.gui.addChat(`§eJoined Minecraft server ${address}`);
+  }
+  /** Replace the client-side dimension after an authoritative Java respawn packet. */
+  async applyJavaRespawn(dimension: Dimension, seed: number, gameMode: GameMode): Promise<void> {
+    const p = this.player;
+    this.worldMeta = { ...(this.worldMeta ?? { id: 'java-remote', name: 'Minecraft server', created: Date.now(), lastPlayed: Date.now(), difficulty: this.difficulty, cheats: false, version: this.version }), seed, gameMode };
+    await this.setupDimension(dimension, seed, { time: 0, dayTime: 0 });
+    this.world.listeners = this.client ? [this.client as any] : [];
+    p.world = this.world; p.game = this; p.setGameMode(gameMode); p.updateBB();
+    this.entities = [];
+  }
   /** Relay + id + password of the server we are on, so coordinator migration can reconnect us. */
   lastServer: { relayUrl: string; serverId: string; password: string } | null = null;
 
@@ -1104,7 +1135,7 @@ export class Game {
     if (input.wasPressed('use') || (useDown && p.useCooldown === 0 && !p.usingItem && input.pointerLocked)) {
       if (input.pointerLocked) {
         if (this.targetEntity && (this.targetEntity as any).interact && input.wasPressed('use')) {
-          if (this.client) { this.client.send({ t: 'interact', id: this.targetEntity.remoteId, held: p.heldItem()?.serialize() ?? null }); p.swing(); p.useCooldown = 4; }
+          if (this.client) { this.client.send({ t: 'interact', id: this.targetEntity.remoteId }); p.swing(); p.useCooldown = 4; }
           else if ((this.targetEntity as Mob | BoatEntity).interact(p, p.heldItem())) { p.swing(); p.useCooldown = 4; } else p.use(this.targetBlock);
         }
         else p.use(this.targetBlock);
@@ -1155,6 +1186,9 @@ export class Game {
       const byaw = b.prevYaw + ((((b.yaw - b.prevYaw) % 360) + 540) % 360 - 180) * partial;
       [ex, ey, ez] = b.passengerPosition(p, bx, by, bz, byaw);
     }
+    ex += p.prevServerCorrectionX + (p.serverCorrectionX - p.prevServerCorrectionX) * partial;
+    ey += p.prevServerCorrectionY + (p.serverCorrectionY - p.prevServerCorrectionY) * partial;
+    ez += p.prevServerCorrectionZ + (p.serverCorrectionZ - p.prevServerCorrectionZ) * partial;
     ey += p.prevCameraEye + (p.cameraEye - p.prevCameraEye) * partial;
     cam.yaw = p.yaw; cam.pitch = p.pitch;
     // fov: sprint & bow
@@ -1335,6 +1369,7 @@ const ORE_XP: Record<string, [number, number]> = { coal_ore: [0, 2], diamond_ore
 
 class LoadingScreen extends TitleScreen {
   constructor(private msg: string) { super(); }
+  setMessage(message: string): void { this.msg = message; }
   build(): void {}
   render(ctx: CanvasRenderingContext2D): void { this.gui.drawTiled(ctx, 'gui/menu_background', 0, 0, this.width, this.height, 32); this.gui.font.drawCentered(ctx, this.msg, this.width / 2, this.height / 2 - 4, 0xffffff); }
 }

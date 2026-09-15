@@ -16,7 +16,7 @@ export interface ChatLine { text: string; time: number }
 /** java.util.Random-compatible sequence used by vanilla's HUD after setSeed(tick * 312871). */
 function vanillaHudRandom(seed: number): () => number {
   const multiplier = 0x5deece66dn, addend = 0xbn, mask = (1n << 48n) - 1n;
-  let state = (BigInt(Math.trunc(seed)) ^ multiplier) & mask;
+  let state = (BigInt(Math.trunc(Number.isFinite(seed) ? seed : 0)) ^ multiplier) & mask;
   const next = (bits: number) => { state = (state * multiplier + addend) & mask; return Number(state >> BigInt(48 - bits)); };
   return () => {
     let bits: number, value: number;

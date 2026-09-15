@@ -109,23 +109,59 @@ export class DirectConnectScreen extends Screen {
   pausesGame = false; hidesHud = true;
   field!: TextField;
   status = '';
+  private kind: 'java' | 'voxeland' = 'java';
+  private auth: 'offline' | 'microsoft' = 'offline';
+  private authButton!: CycleButton<'offline' | 'microsoft'>;
   constructor(private parent: Screen) { super(); }
   build(): void {
-    const cx = this.width / 2;
-    this.field = this.add(new TextField(cx - 100, this.height / 2 - 20, 200, 20, this.gui.game.options.lastServerAddress || ''));
-    this.field.maxLength = 128; this.field.placeholder = '123.45.67.89:8080';
+    const cx = this.width / 2, top = this.panelTop();
+    this.add(new CycleButton(cx - 130, top + 54, 260, 20, 'Server Type: ', [{ value: 'java' as const, label: 'Minecraft Java' }, { value: 'voxeland' as const, label: 'VoxeLand World' }], this.kind, (value) => {
+      this.kind = value; this.authButton.visible = value === 'java';
+      this.field.text = value === 'java' ? this.gui.game.options.lastJavaServerAddress : this.gui.game.options.lastServerAddress;
+      this.field.cursor = this.field.text.length;
+      this.field.placeholder = value === 'java' ? 'play.example.com:25565' : 'voxeland.example.com#world-id';
+      this.status = '';
+    }));
+    this.authButton = this.add(new CycleButton(cx - 130, top + 78, 260, 20, 'Authentication: ', [{ value: 'offline' as const, label: 'Offline / local' }, { value: 'microsoft' as const, label: 'Microsoft account' }], this.auth, (value) => { this.auth = value; this.status = ''; }));
+    this.field = this.add(new TextField(cx - 130, top + 116, 260, 20, this.gui.game.options.lastJavaServerAddress || ''));
+    this.field.maxLength = 255; this.field.placeholder = 'play.example.com:25565';
     this.field.onEnter = () => this.connect();
     this.focused = this.field;
-    this.add(new Button(cx - 100, this.height / 2 + 12, 200, 20, 'Join Server', () => this.connect()));
-    this.add(new Button(cx - 100, this.height / 2 + 36, 200, 20, 'Cancel', () => this.gui.open(this.parent)));
+    this.add(new Button(cx - 130, top + 146, 127, 20, 'Join Server', () => this.connect()));
+    this.add(new Button(cx + 3, top + 146, 127, 20, 'Cancel', () => this.gui.open(this.parent)));
+  }
+  private panelTop(): number { return Math.max(8, Math.floor((this.height - 210) / 2)); }
+  /** Wrap the panel footer by rendered pixel width, including long unbroken server names/addresses. */
+  private footerLines(text: string, maxWidth: number): string[] {
+    const f = this.gui.font, lines: string[] = [];
+    let line = '';
+    for (const word of text.split(/\s+/)) {
+      const candidate = line ? `${line} ${word}` : word;
+      if (f.width(candidate) <= maxWidth) { line = candidate; continue; }
+      if (line) { lines.push(line); line = ''; }
+      if (f.width(word) <= maxWidth) { line = word; continue; }
+      let part = '';
+      for (const ch of word) {
+        if (part && f.width(part + ch) > maxWidth) { lines.push(part); part = ch; }
+        else part += ch;
+      }
+      line = part;
+    }
+    if (line) lines.push(line);
+    return lines;
   }
   private connect(pw = ''): void {
     const t = this.field.text.trim();
     if (!t) return;
+    const g = this.gui.game;
+    if (this.kind === 'java') {
+      g.options.lastJavaServerAddress = t; g.saveOptions(); this.status = 'Connecting to Minecraft server…';
+      g.joinJavaServer(defaultRelayUrl(), t, this.auth).catch((e) => this.gui.open(new DisconnectedScreen(String(e?.message ?? e))));
+      return;
+    }
     const hash = t.indexOf('#');
     const url = normalizeRelayUrl(hash >= 0 ? t.slice(0, hash) : t);
     const id = hash >= 0 ? t.slice(hash + 1) : '';
-    const g = this.gui.game;
     g.options.lastServerAddress = t;
     if (!(g.options.serverAddresses ?? []).includes(t)) g.options.serverAddresses = [...(g.options.serverAddresses ?? []), t];
     g.saveOptions();
@@ -141,11 +177,20 @@ export class DirectConnectScreen extends Screen {
     }).catch(fail);
   }
   render(ctx: CanvasRenderingContext2D, mx: number, my: number, partial: number): void {
-    const f = this.gui.font;
-    f.drawCentered(ctx, 'Direct Connection', this.width / 2, this.height / 2 - 60, 0xffffff);
-    f.drawCentered(ctx, 'Server Address (IP, host:port or ws:// URL, optionally #serverId)', this.width / 2, this.height / 2 - 34, 0xa0a0a0);
+    const f = this.gui.font, cx = this.width / 2, top = this.panelTop();
+    ctx.fillStyle = 'rgba(0,0,0,0.72)'; ctx.fillRect(cx - 150, top, 300, 194);
+    f.drawCentered(ctx, 'Direct Connection', cx, top + 13, 0xffffff);
+    f.drawCentered(ctx, this.kind === 'java' ? 'Join a Minecraft: Java Edition server' : 'Join a world hosted through a VoxeLand relay', cx, top + 29, 0xa0a0a0);
+    f.draw(ctx, this.kind === 'java' ? 'Server address' : 'Relay address', cx - 130, top + 105, 0xa0a0a0);
     super.render(ctx, mx, my, partial);
-    if (this.status) f.drawCentered(ctx, this.status, this.width / 2, this.height / 2 + 62, 0xa0a0a0);
+    const hint = this.kind === 'java'
+      ? this.auth === 'microsoft' ? 'A Microsoft device-login code will appear after connecting.' : 'Offline mode is for local or authentication-disabled servers.'
+      : 'Use relay.example.com#serverId, or omit the ID to join its first world.';
+    const rawFooter = this.status || hint;
+    const footerColor = rawFooter.startsWith('§c') ? 0xff5555 : this.status ? 0xffffff : 0x808080;
+    const footer = rawFooter.startsWith('§c') ? rawFooter.slice(2) : rawFooter;
+    const lines = this.footerLines(footer, 268).slice(0, 2);
+    lines.forEach((line, i) => f.drawCentered(ctx, line, cx, top + 174 + i * 10, footerColor));
   }
   keyDown(code: string, key: string, mods: any): boolean { if (code === 'Escape') { this.gui.open(this.parent); return true; } return super.keyDown(code, key, mods); }
 }

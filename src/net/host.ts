@@ -1,18 +1,18 @@
 // Host side of multiplayer: the browser running the world registers with the relay and serves guests.
-// The host is authoritative for the world (blocks, mobs, items, time); guests are authoritative for their own
-// player (movement, inventory, health) — the model of a friendly LAN game.
+// The host is authoritative for the world and every guest player. Guests send predicted movement and gameplay
+// intentions; the host validates them and sends corrections/state back. The player who opened the world remains
+// trusted as its owner, matching vanilla's integrated-server model.
 import type { Game } from '../game/game';
 import { RemotePlayer } from '../entity/remotePlayer';
 import { Entity, LivingEntity, ItemEntity, ExperienceOrb } from '../entity/entity';
 import { Mob } from '../entity/mobs';
 import { BoatEntity } from '../entity/boat';
 import { ArrowEntity, FallingBlockEntity, PrimedTnt, ThrownProjectile } from '../entity/misc';
-import { ItemStack, Inventory } from '../items/stack';
+import { Inventory } from '../items/stack';
 import { useBlock } from '../blocks/interaction';
-import { SET_UPDATE_NEIGHBORS, type WorldListener } from '../world/world';
-import { encodeChunk, packFrame, FRAME_CHUNK, PROTOCOL_VERSION, TARGET_SERVER, defaultRelayUrl } from './protocol';
+import type { WorldListener } from '../world/world';
+import { encodeChunk, packFrame, FRAME_CHUNK, PROTOCOL_VERSION, TARGET_SERVER, defaultRelayUrl, isGuestMessage } from './protocol';
 import type { Chunk } from '../world/chunk';
-import { runCommand } from '../game/commands';
 
 interface Guest {
   id: number; playerId: string; name: string; player: RemotePlayer;
@@ -22,6 +22,8 @@ interface Guest {
   container: { x: number; y: number; z: number; inv: Inventory; onClose?: () => void; be?: any } | null;
   ready: boolean;
   ridingSent?: boolean;
+  lastMoveTick: number;
+  movementViolations: number;
 }
 
 export interface HostOptions {
@@ -145,7 +147,7 @@ export class NetHost implements WorldListener {
       this.streamChunks(gu);
       this.pickups(gu);
       if (gu.container && this.ticks % 5 === 0) this.sendContainer(gu, false);
-      if (this.ticks % 20 === 0) this.send(gu.id, { t: 'self', mode: gu.player.gameMode });
+      if (this.ticks % 20 === 0) this.send(gu.id, { t: 'self', mode: gu.player.gameMode, state: this.playerState(gu.player) });
     }
     if (this.ticks % 2 === 0) this.sendEntities();
     if (this.official && this.ticks % 20 === 0 && this.ws?.readyState === 1) {
@@ -162,7 +164,7 @@ export class NetHost implements WorldListener {
         if (m.t === 'bin') continue; // guests send no binary
         if (m.t === 'guestJoined') this.onJoin(m.from, m.playerId, m.name, m.skin);
         else if (m.t === 'guestLeft') this.onLeave(m.from);
-        else if (m.from !== undefined) { const gu = this.guests.get(m.from); if (gu) this.onGuestMessage(gu, m); }
+        else if (m.from !== undefined) { const gu = this.guests.get(m.from); if (gu && isGuestMessage(m)) this.onGuestMessage(gu, m); }
       } catch (e) { console.error('host message error', e); }
     }
   }
@@ -178,10 +180,11 @@ export class NetHost implements WorldListener {
     // The name fallback migrates saves made by older versions.
     const saved = g.playerData.get(playerId) ?? g.playerData.get(name);
     const spawn = g.worldSpawn ?? [Math.floor(g.player.x), Math.floor(g.player.y), Math.floor(g.player.z)];
+    g.addEntity(p);
+    if (saved) { try { p.deserialize(saved); } catch { /* reject incompatible legacy state and use spawn */ } }
     p.setPos(saved?.x ?? spawn[0] + 0.5, saved?.y ?? spawn[1], saved?.z ?? spawn[2] + 0.5); p.tx = p.x; p.ty = p.y; p.tz = p.z;
     p.setGameMode(this.opts.gameMode as any);
-    g.addEntity(p);
-    const gu: Guest = { id, playerId, name, player: p, known: new Set(), chunks: new Set(), wantChunks: new Set(), container: null, ready: false };
+    const gu: Guest = { id, playerId, name, player: p, known: new Set(), chunks: new Set(), wantChunks: new Set(), container: null, ready: false, lastMoveTick: this.ticks, movementViolations: 0 };
     this.guests.set(id, gu);
     this.send(id, { t: 'welcome', name, hostName: this.official ? this.opts.name : this.hostName, dimension: g.world.dimension, seed: g.world.seed, time: g.world.time, dayTime: g.world.dayTime, spawn, saved: saved ?? null, gameMode: this.opts.gameMode, cheats: this.opts.cheats, difficulty: g.difficulty, rules: g.rules, weather: g.weather.serialize(), version: g.version, protocol: PROTOCOL_VERSION, players: this.playerList(), music: g.sounds.currentMusic() });
     g.gui.addChat(`§e${name} joined the game`);
@@ -204,7 +207,7 @@ export class NetHost implements WorldListener {
 
   playerList(): { name: string; id: number }[] { return [{ name: this.hostName, id: -1 }, ...[...this.guests.values()].map((gu) => ({ name: gu.name, id: gu.id }))]; }
 
-  private savePlayer(gu: Guest): void { if (gu.player.lastSaved) this.game.playerData.set(gu.playerId, gu.player.lastSaved); }
+  private savePlayer(gu: Guest): void { this.game.playerData.set(gu.playerId, gu.player.serialize()); }
   saveAllPlayers(): void { for (const gu of this.guests.values()) this.savePlayer(gu); }
 
   kick(id: number, reason = 'Kicked by the host'): void { if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify({ t: 'kick', id, reason })); }
@@ -213,26 +216,46 @@ export class NetHost implements WorldListener {
     const g = this.game, p = gu.player, w = g.world, reg = g.registry;
     switch (m.t) {
       case 'ready': gu.ready = true; break;
-      case 'move': { if (p.vehicle) { p.tyaw = m.yaw; p.tpitch = m.pitch; p.applySnapshot({ ...m, x: p.x, y: p.y, z: p.z }); } else p.applySnapshot(m); if (m.saved) p.lastSaved = m.saved; break; }
-      case 'inv': { // held item / armour mirror
-        const it = m.held ? ItemStack.deserialize(m.held, g.items) : null; p.inventory.slots[p.selectedSlot] = it;
-        if (m.armor) p.armor.deserialize(m.armor, g.items); if (m.off) p.offhand.deserialize(m.off, g.items);
+      case 'move': {
+        const values = [m.x, m.y, m.z, m.yaw, m.pitch];
+        if (!values.every(Number.isFinite)) { gu.movementViolations++; break; }
+        const elapsed = Math.max(1, this.ticks - gu.lastMoveTick);
+        gu.lastMoveTick = this.ticks;
+        const dx = m.x - p.x, dy = m.y - p.y, dz = m.z - p.z;
+        // Vanilla also corrects impossible movement. Keep a generous allowance for latency, knockback and elytra;
+        // repeated outliers are ignored and the authoritative position is returned to the guest.
+        const max = p.isCreative || p.isSpectator ? 2.5 * elapsed : 1.25 * elapsed;
+        if (!p.vehicle && (Math.abs(dy) > max * 2 || dx * dx + dz * dz > max * max)) {
+          gu.movementViolations++;
+          this.send(gu.id, { t: 'correct', x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch });
+          break;
+        }
+        gu.movementViolations = Math.max(0, gu.movementViolations - 1);
+        const slot = Number.isInteger(m.slot) && m.slot >= 0 && m.slot < 9 ? m.slot : p.selectedSlot;
+        const safe = { ...m, slot, br: undefined, health: undefined, mode: undefined, dead: undefined, fly: p.isCreative || p.isSpectator ? !!m.fly : false };
+        if (p.vehicle) { p.tyaw = m.yaw; p.tpitch = m.pitch; p.applySnapshot({ ...safe, x: p.x, y: p.y, z: p.z }); }
+        else p.applySnapshot(safe);
+        // The target is only a hint. The host raycasts and advances vanilla mining progress itself, so a guest
+        // cannot submit stage 9 immediately or mine through walls.
+        const target = m.br && [m.br.x, m.br.y, m.br.z].every(Number.isInteger) ? m.br : null;
+        const hit = target ? p.raycast() : null;
+        p.continueBreaking(hit && hit.x === target.x && hit.y === target.y && hit.z === target.z ? hit : null);
         break;
       }
+      case 'inv': // Inventory/equipment are host-owned; this legacy mirror packet is intentionally ignored.
+        this.send(gu.id, { t: 'self', mode: p.gameMode, state: this.playerState(p) });
+        break;
       case 'chunk': for (const k of m.keys as number[]) gu.wantChunks.add(k); break;
-      case 'set': { // placement (guest predicted it locally)
-        const [x, y, z, s] = m.b;
-        if (Math.abs(x - p.x) > 8 || Math.abs(z - p.z) > 8 || Math.abs(y - p.y) > 8) break;
-        if (!w.isLoaded(x, z)) break;
-        w.setBlock(x, y, z, s, SET_UPDATE_NEIGHBORS);
-        if (s) g.onBlockPlaced(x, y, z, s);
-        if (m.be) g.blockEntities.put(x, y, z, m.be);
+      case 'set': { // Never accept a guest-selected final state or block-entity payload.
+        const b = Array.isArray(m.b) ? m.b : [];
+        const [x, y, z] = b;
+        if ([x, y, z].every(Number.isInteger) && w.isLoaded(x, z)) this.send(gu.id, { t: 'blk', b: [x, y, z, w.getBlock(x, y, z)] });
         break;
       }
       case 'break': {
-        const { x, y, z } = m; const state = w.getBlock(x, y, z);
-        if (state && w.isLoaded(x, z) && Math.abs(x - p.x) < 8 && Math.abs(y - p.y) < 8 && Math.abs(z - p.z) < 8) { g.breakBlock(x, y, z, p, true, false); this.broadcast({ t: 'breakFx', x, y, z, s: state }); }
-        this.send(gu.id, { t: 'blk', b: [x, y, z, w.getBlock(x, y, z)] });
+        const { x, y, z } = m;
+        // Completion is determined by continueBreaking above. This packet merely asks for reconciliation.
+        if ([x, y, z].every(Number.isInteger) && w.isLoaded(x, z)) this.send(gu.id, { t: 'blk', b: [x, y, z, w.getBlock(x, y, z)] });
         break;
       }
       case 'use': this.remoteUse(gu, m); break;
@@ -248,22 +271,43 @@ export class NetHost implements WorldListener {
       case 'interact': {
         const e = g.entities.find((x) => x.id === m.id);
         if (!e || e.removed || e.distSq(p.x, p.y, p.z) > 36) break;
-        const held = m.held ? ItemStack.deserialize(m.held, g.items) : null; p.inventory.slots[p.selectedSlot] = held;
+        const held = p.heldItem();
         if (e instanceof Mob) { if (e.interact(p, held)) this.send(gu.id, { t: 'consumed', held: p.heldItem()?.serialize() ?? null }); }
         else if (e instanceof BoatEntity) { if (e.interact(p, held) && p.vehicle === e) this.send(gu.id, { t: 'ride', id: e.id, seat: e.passengerIndex(p) }); }
         break;
       }
-      case 'drop': { const st = ItemStack.deserialize(m.stack, g.items); if (st) { const dir = m.dir ?? [0, 0, 0]; const e = g.dropItem(m.x, m.y, m.z, st, [dir[0], dir[1], dir[2]]); if (e) { e.pickupDelay = 40; e.thrower = p.uuid; } } break; }
-      case 'chat': this.chat(gu, String(m.text).slice(0, 256)); break;
-      case 'death': {
-        const text = String(m.text ?? `${gu.name} died`).slice(0, 256);
-        g.gui.addChat(text);
-        for (const other of this.guests.values()) if (other !== gu) this.send(other.id, { t: 'chat', text });
+      case 'drop': {
+        const held = p.heldItem();
+        if (!held) break;
+        const requested = Number.isInteger(m.count) ? m.count : Number.isInteger(m.stack?.count) ? m.stack.count : 1;
+        const count = Math.max(1, Math.min(held.count, requested));
+        const st = held.clone(); st.count = count; held.count -= count;
+        if (held.count <= 0) p.inventory.slots[p.selectedSlot] = null;
+        const yaw = p.yaw * Math.PI / 180, pitch = p.pitch * Math.PI / 180;
+        const speed = 0.3, dir: [number, number, number] = [-Math.sin(yaw) * Math.cos(pitch) * speed, -Math.sin(pitch) * speed + 0.1, Math.cos(yaw) * Math.cos(pitch) * speed];
+        const e = g.dropItem(p.x, p.eyeY - 0.3, p.z, st, dir);
+        if (e) { e.pickupDelay = 40; e.thrower = p.uuid; }
+        this.send(gu.id, { t: 'self', mode: p.gameMode, state: this.playerState(p) });
         break;
       }
-      case 'cont': { if (gu.container) { gu.container.inv.deserialize(m.slots, g.items); gu.container.inv.onChange?.(); const c = w.chunkAt(gu.container.x, gu.container.z); if (c) c.modified = true; for (const other of this.guests.values()) if (other !== gu && other.container && other.container.x === gu.container.x && other.container.y === gu.container.y && other.container.z === gu.container.z) this.sendContainer(other, false); } break; }
+      case 'chat': this.chat(gu, String(m.text).slice(0, 256)); break;
+      case 'death': break; // Death text and state are produced by the authoritative player simulation.
+      case 'cont': {
+        if (!gu.container || !Array.isArray(m.slots) || !Array.isArray(m.player)) break;
+        const nextContainer = new Inventory(gu.container.inv.size), nextPlayer = new Inventory(p.inventory.size);
+        nextContainer.deserialize(m.slots, g.items); nextPlayer.deserialize(m.player, g.items);
+        // Transitional transaction validation: moving items is allowed only when the complete multiset across
+        // the open menu and player inventory is unchanged. This closes item creation/deletion while explicit
+        // vanilla click-mode messages are introduced.
+        if (!this.sameItems([gu.container.inv, p.inventory], [nextContainer, nextPlayer])) { this.sendContainer(gu, true); this.send(gu.id, { t: 'self', mode: p.gameMode, state: this.playerState(p) }); break; }
+        gu.container.inv.deserialize(m.slots, g.items); p.inventory.deserialize(m.player, g.items);
+        gu.container.inv.onChange?.(); p.inventory.onChange?.();
+        const c = w.chunkAt(gu.container.x, gu.container.z); if (c) c.modified = true;
+        for (const other of this.guests.values()) if (other !== gu && other.container && other.container.x === gu.container.x && other.container.y === gu.container.y && other.container.z === gu.container.z) this.sendContainer(other, false);
+        break;
+      }
       case 'close': { if (gu.container) { gu.container.onClose?.(); gu.container = null; } break; }
-      case 'respawn': { p.health = 20; p.deathTime = 0; break; }
+      case 'respawn': { if (p.health <= 0 || p.isDead) { p.health = 20; p.isDead = false; p.deathTime = 0; p.setPos(g.worldSpawn[0] + 0.5, g.worldSpawn[1], g.worldSpawn[2] + 0.5); this.send(gu.id, { t: 'correct', x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch }); } break; }
       case 'sleep': { if (m.sleeping) { p.sleeping = true; } else p.sleeping = false; this.checkSleep(); break; }
       case 'xp': { const e = g.entities.find((x) => x.id === m.id); if (e instanceof ExperienceOrb && !e.removed) { this.send(gu.id, { t: 'givexp', v: e.value }); e.remove(); } break; }
       case 'spawn': this.remoteSpawn(gu, m); break;
@@ -276,27 +320,51 @@ export class NetHost implements WorldListener {
   /** Projectiles / spawn-egg mobs created by a guest. */
   private remoteSpawn(gu: Guest, m: any): void {
     const g = this.game, p = gu.player;
-    if (p.distSq(m.x, m.y, m.z) > 64) return;
+    const held = p.heldItem(), heldName = held?.item.name ?? '';
     let e: Entity | null = null;
-    if (m.kind === 'arrow') { const a = new ArrowEntity(p, m.extra?.damage ?? 2, m.extra?.akind ?? 'normal'); if (m.extra?.trident) { (a as any).trident = ItemStack.deserialize(m.extra.trident, g.items); (a as any).type = 'trident'; } if (m.extra?.effect) (a as any).effect = m.extra.effect; e = a; }
-    else if (m.kind === 'thrown') e = new ThrownProjectile(m.extra?.tkind ?? 'snowball', p, m.extra?.stack ? ItemStack.deserialize(m.extra.stack, g.items) : null);
-    else if (m.kind === 'mob') { if (!this.opts.cheats && !p.isCreative) return; const mob = g.spawnMob(m.extra?.type, m.x, m.y, m.z, !!m.extra?.baby); return void mob; }
-    else if (m.kind === 'boat') { const b = new BoatEntity(m.extra?.wood ?? 'oak', !!m.extra?.chest); b.setPos(m.x, m.y, m.z); b.yaw = m.yaw ?? p.yaw; if (g.entities.some((x) => !x.removed && x !== p && x.bb.intersects(b.bb))) return; g.addEntity(b); return; }
+    if (m.kind === 'arrow') {
+      if (!['bow', 'crossbow', 'trident'].includes(heldName)) return;
+      if (heldName !== 'trident' && !p.isCreative) {
+        const arrow = ['arrow', 'spectral_arrow', 'tipped_arrow'].find((name) => p.inventory.count(name) + p.offhand.count(name) > 0);
+        if (!arrow) return;
+        if ((held?.enchantLevel('infinity') ?? 0) === 0) { if (!p.offhand.remove(arrow, 1)) p.inventory.remove(arrow, 1); }
+      }
+      const a = new ArrowEntity(p, 2, 'normal');
+      if (heldName === 'trident' && held) { (a as any).trident = held.clone(); (a as any).trident.count = 1; (a as any).type = 'trident'; if (!p.isCreative) p.inventory.slots[p.selectedSlot] = null; }
+      e = a;
+    }
+    else if (m.kind === 'thrown') {
+      const kind = String(m.extra?.tkind ?? '');
+      const allowed = new Set(['snowball', 'egg', 'ender_pearl', 'experience_bottle', 'splash_potion', 'lingering_potion']);
+      if (!allowed.has(kind) || heldName !== kind || !held) return;
+      const stack = held.clone(); stack.count = 1;
+      e = new ThrownProjectile(kind, p, stack);
+      if (!p.isCreative && --held.count <= 0) p.inventory.slots[p.selectedSlot] = null;
+    }
+    else if (m.kind === 'mob') return; // spawn eggs are handled by authoritative useBlock; never accept a mob description
+    else if (m.kind === 'boat') {
+      if (!held || (!heldName.endsWith('_boat') && !heldName.endsWith('_raft'))) return;
+      const wood = heldName.replace(/_chest_(boat|raft)$/, '').replace(/_(boat|raft)$/, '');
+      const b = new BoatEntity(wood, heldName.includes('_chest_')); b.setPos(p.x, p.y, p.z); b.yaw = p.yaw;
+      if (g.entities.some((x) => !x.removed && x !== p && x.bb.intersects(b.bb))) return;
+      g.addEntity(b); if (!p.isCreative && --held.count <= 0) p.inventory.slots[p.selectedSlot] = null;
+      this.send(gu.id, { t: 'self', mode: p.gameMode, state: this.playerState(p) }); return;
+    }
     if (!e) return;
-    e.setPos(m.x, m.y, m.z); e.vx = m.v?.[0] ?? 0; e.vy = m.v?.[1] ?? 0; e.vz = m.v?.[2] ?? 0; e.yaw = p.yaw; e.pitch = p.pitch;
+    const v = Array.isArray(m.v) && m.v.length === 3 && m.v.every(Number.isFinite) ? m.v : [0, 0, 0];
+    const speed = Math.hypot(v[0], v[1], v[2]), scale = speed > 3.2 ? 3.2 / speed : 1;
+    e.setPos(p.x, p.eyeY - 0.1, p.z); e.vx = v[0] * scale; e.vy = v[1] * scale; e.vz = v[2] * scale; e.yaw = p.yaw; e.pitch = p.pitch;
     g.addEntity(e);
+    this.send(gu.id, { t: 'self', mode: p.gameMode, state: this.playerState(p) });
   }
   allSleeping(): boolean { return [...this.guests.values()].every((gu) => gu.player.sleeping); }
 
   private chat(gu: Guest, text: string): void {
     const g = this.game;
     if (text.startsWith('/')) {
-      if (!this.opts.cheats) { this.send(gu.id, { t: 'chat', text: '§cCheats are not enabled on this server' }); return; }
-      const out: string[] = [];
-      const orig = g.gui.addChat.bind(g.gui);
-      g.gui.addChat = (t: string) => out.push(t);
-      try { runCommand(g, text, gu.player); } finally { g.gui.addChat = orig; }
-      for (const t of out) this.send(gu.id, { t: 'chat', text: t });
+      // Opening a singleplayer world with cheats makes its owner an operator; it does not grant every joining
+      // player operator permissions. A later permission list can opt individual guests in explicitly.
+      this.send(gu.id, { t: 'chat', text: '§cYou do not have permission to use commands on this server' });
       return;
     }
     const line = `<${gu.name}> ${text}`;
@@ -317,7 +385,6 @@ export class NetHost implements WorldListener {
     const { x, y, z, face, hit } = m;
     if (!w.isLoaded(x, z) || p.distSq(x, y, z) > 64) return;
     const state = w.getBlock(x, y, z);
-    if (m.held !== undefined) p.inventory.slots[p.selectedSlot] = m.held ? ItemStack.deserialize(m.held, g.items) : null;
     const realGui = g.gui;
     const self = this;
     const opened: any[] = [];
@@ -348,6 +415,30 @@ export class NetHost implements WorldListener {
     }
   }
   private beState(be: any): any { return { burnTime: be.burnTime ?? 0, burnTotal: be.burnTotal ?? 0, cookTime: be.cookTime ?? 0, cookTotal: be.cookTotal ?? 200, xp: be.xp ?? 0, brewTime: be.brewTime ?? 0, fuel: be.fuel ?? 0 }; }
+  private playerState(p: RemotePlayer): any {
+    return {
+      inventory: p.inventory.serialize(), armor: p.armor.serialize(), offhand: p.offhand.serialize(),
+      selectedSlot: p.selectedSlot, health: p.health, absorption: p.absorption,
+      foodLevel: p.foodLevel, saturation: p.saturation, exhaustion: p.exhaustion,
+      xpLevel: p.xpLevel, xpProgress: p.xpProgress, totalXp: p.totalXp,
+    };
+  }
+  private sameItems(before: Inventory[], after: Inventory[]): boolean {
+    const count = (inventories: Inventory[]): Map<string, number> | null => {
+      const totals = new Map<string, number>();
+      for (const inv of inventories) for (const stack of inv.slots) {
+        if (!stack) continue;
+        if (!Number.isInteger(stack.count) || stack.count <= 0 || stack.count > stack.item.stackSize) return null;
+        const data = stack.serialize(); const amount = data.count; data.count = 1;
+        const key = JSON.stringify(data); totals.set(key, (totals.get(key) ?? 0) + amount);
+      }
+      return totals;
+    };
+    const a = count(before), b = count(after);
+    if (!a || !b || a.size !== b.size) return false;
+    for (const [key, amount] of a) if (b.get(key) !== amount) return false;
+    return true;
+  }
   private sendContainer(gu: Guest, _force: boolean): void {
     const c = gu.container!;
     this.send(gu.id, { t: 'contUpd', x: c.x, y: c.y, z: c.z, slots: c.inv.serialize(), be: c.be ? this.beState(c.be) : undefined });

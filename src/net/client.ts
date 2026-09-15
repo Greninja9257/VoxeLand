@@ -144,14 +144,11 @@ export class NetClient implements WorldListener {
     // our snapshot
     if (this.ticks === 1) this.send({ t: 'ready' });
     const snap: any = { t: 'move', x: r3(p.x), y: r3(p.y), z: r3(p.z), yaw: r1(p.yaw), pitch: r1(p.pitch), sneak: p.isSneaking, sprint: p.isSprinting, swim: p.swimmingPose, sleep: p.sleeping, fly: p.flying, health: p.health, slot: p.selectedSlot, swing: p.swinging && p.swingTime <= 1, use: !!p.usingItem, hurt: p.hurtTime === p.hurtDuration, dead: p.health <= 0, br: p.breaking ? { x: p.breaking.x, y: p.breaking.y, z: p.breaking.z, stage: p.breakStage, state: p.breaking.state } : null };
-    // Keep the backend's per-player record current so an abrupt disconnect cannot hand stale inventory to a
-    // replacement coordinator. A final snapshot is also sent by Game.quitToTitle().
-    if (this.ticks % 20 === 0) snap.saved = p.serialize();
     this.send(snap);
     const held = JSON.stringify(p.heldItem()?.serialize() ?? null), armor = JSON.stringify(p.armor.serialize()) + JSON.stringify(p.offhand.serialize());
     if (held !== this.lastHeld || armor !== this.lastArmor) { this.lastHeld = held; this.lastArmor = armor; this.send({ t: 'inv', held: p.heldItem()?.serialize() ?? null, armor: p.armor.serialize(), off: p.offhand.serialize() }); }
     if (this.ticks % 40 === 0) this.send({ t: 'ping', time: performance.now() });
-    if (this.container && this.ticks % 2 === 0 && this.containerDirty) { this.containerDirty = false; this.send({ t: 'cont', slots: this.container.inv.serialize() }); }
+    if (this.container && this.ticks % 2 === 0 && this.containerDirty) { this.containerDirty = false; this.send({ t: 'cont', slots: this.container.inv.serialize(), player: p.inventory.serialize() }); }
   }
   containerDirty = false;
 
@@ -168,7 +165,33 @@ export class NetClient implements WorldListener {
       case 'chat': g.gui.addChat(m.text); break;
       case 'actionbar': g.gui.showActionBar(m.text); break;
       case 'players': this.players = m.list; break;
-      case 'self': { if (m.mode) p.setGameMode(m.mode); break; }
+      case 'self': {
+        if (m.mode) p.setGameMode(m.mode);
+        const s = m.state;
+        if (s) {
+          if (Array.isArray(s.inventory)) p.inventory.deserialize(s.inventory, g.items);
+          if (Array.isArray(s.armor)) p.armor.deserialize(s.armor, g.items);
+          if (Array.isArray(s.offhand)) p.offhand.deserialize(s.offhand, g.items);
+          if (Number.isInteger(s.selectedSlot) && s.selectedSlot >= 0 && s.selectedSlot < 9) p.selectedSlot = s.selectedSlot;
+          if (Number.isFinite(s.health)) p.health = s.health;
+          if (Number.isFinite(s.absorption)) p.absorption = s.absorption;
+          if (Number.isFinite(s.foodLevel)) p.foodLevel = s.foodLevel;
+          if (Number.isFinite(s.saturation)) p.saturation = s.saturation;
+          if (Number.isFinite(s.exhaustion)) p.exhaustion = s.exhaustion;
+          if (Number.isFinite(s.xpLevel)) p.xpLevel = s.xpLevel;
+          if (Number.isFinite(s.xpProgress)) p.xpProgress = s.xpProgress;
+          if (Number.isFinite(s.totalXp)) p.totalXp = s.totalXp;
+          p.inventory.onChange?.();
+        }
+        break;
+      }
+      case 'correct': {
+        if ([m.x, m.y, m.z, m.yaw, m.pitch].every(Number.isFinite)) {
+          p.setPos(m.x, m.y, m.z); p.yaw = m.yaw; p.pitch = m.pitch;
+          p.vx = 0; p.vy = 0; p.vz = 0;
+        }
+        break;
+      }
       case 'hurt': {
         const hook = g.sounds.onSound, enabled = g.sounds.enabled;
         g.sounds.onSound = null; g.sounds.enabled = false;

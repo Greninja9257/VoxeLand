@@ -35,7 +35,7 @@ export interface Options {
   highContrast: boolean; hideLightningFlashes: boolean; hideSplashTexts: boolean; textBackground: boolean; panoramaSpeed: number; reducedDebugInfo: boolean;
   language: string;
   /** multiplayer identity/display name, saved server addresses and the last one used */
-  playerId: string; playerName: string; relayUrl: string; serverAddresses: string[]; lastServerAddress: string;
+  playerId: string; playerName: string; relayUrl: string; serverAddresses: string[]; lastServerAddress: string; lastJavaServerAddress: string;
   bindings?: Record<string, string>;
 }
 
@@ -51,7 +51,7 @@ export const DEFAULT_OPTIONS: Options = {
   modelParts: { cape: true, jacket: true, left_sleeve: true, right_sleeve: true, left_pants_leg: true, right_pants_leg: true, hat: true }, mainHand: 'right', skin: 'steve',
   highContrast: false, hideLightningFlashes: false, hideSplashTexts: false, textBackground: true, panoramaSpeed: 1, reducedDebugInfo: false,
   language: 'en_us',
-  playerId: '', playerName: 'Player' + Math.floor(Math.random() * 1000), relayUrl: '', serverAddresses: [], lastServerAddress: '',
+  playerId: '', playerName: 'Player' + Math.floor(Math.random() * 1000), relayUrl: '', serverAddresses: [], lastServerAddress: '', lastJavaServerAddress: '',
 };
 
 const onOff = [{ value: true, label: 'ON' }, { value: false, label: 'OFF' }];

@@ -10,6 +10,7 @@ export class RemotePlayer extends Player {
   tx = 0; ty = 0; tz = 0; tyaw = 0; tpitch = 0;
   snapshotAge = 0;
   lerpSteps = 0;
+  private hasSnapshot = false;
   hurtHandler: ((d: EntityDamage) => void) | null = null;
   /** last full player state reported by the guest (persisted by the host) */
   lastSaved: any = null;
@@ -20,6 +21,7 @@ export class RemotePlayer extends Player {
 
   applySnapshot(s: any): void {
     this.tx = s.x; this.ty = s.y; this.tz = s.z; this.tyaw = s.yaw; this.tpitch = s.pitch;
+    this.hasSnapshot = true;
     if (s.sneak !== undefined) this.isSneaking = !!s.sneak;
     if (s.sprint !== undefined) this.isSprinting = !!s.sprint;
     if (s.swim !== undefined) this.swimmingPose = !!s.swim;
@@ -42,6 +44,12 @@ export class RemotePlayer extends Player {
     if (Math.abs(this.x - this.tx) + Math.abs(this.z - this.tz) > 16) { this.setPos(this.tx, this.ty, this.tz); this.prevX = this.x; this.prevY = this.y; this.prevZ = this.z; this.yaw = this.prevYaw = this.tyaw; this.pitch = this.prevPitch = this.tpitch; this.lerpSteps = 0; }
   }
 
+  networkSnapshot(): { x: number; y: number; z: number; yaw: number; pitch: number } {
+    return this.hasSnapshot
+      ? { x: this.tx, y: this.ty, z: this.tz, yaw: this.tyaw, pitch: this.tpitch }
+      : { x: this.x, y: this.y, z: this.z, yaw: this.yaw, pitch: this.pitch };
+  }
+
   remoteTick(): void { this.tick(); }
   tick(): void {
     this.attackCooldownTicks++;
@@ -62,7 +70,9 @@ export class RemotePlayer extends Player {
     const f = this.lerpSteps > 0 ? 1 / this.lerpSteps : 1;
     const nx = this.x + (this.tx - this.x) * f, ny = this.y + (this.ty - this.y) * f, nz = this.z + (this.tz - this.z) * f;
     const dx = nx - this.x, dz = nz - this.z;
-    this.setPos(nx, ny, nz);
+    // Do not use setPos here: it also overwrites prevX/Y/Z, which disables the renderer's
+    // partial-tick interpolation and makes a smoothly lerped entity still look like it moves at 20 Hz.
+    this.x = nx; this.y = ny; this.z = nz; this.updateBB();
     let dy = this.tyaw - this.yaw; while (dy > 180) dy -= 360; while (dy < -180) dy += 360;
     this.yaw += dy * f; this.pitch += (this.tpitch - this.pitch) * f;
     if (this.lerpSteps > 0) this.lerpSteps--;

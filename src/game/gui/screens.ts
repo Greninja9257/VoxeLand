@@ -185,7 +185,6 @@ export class CreditsScreen extends Screen {
     this.scroll = Math.min(this.scroll, maxScroll);
     this.gui.font.drawCentered(ctx, 'Credits & Attribution', this.width / 2, 10, 0xffffff);
     ctx.fillStyle = 'rgba(0,0,0,0.62)'; ctx.fillRect(p.x, p.y, p.w, p.h);
-    ctx.strokeStyle = '#777'; ctx.strokeRect(p.x + 0.5, p.y + 0.5, p.w - 1, p.h - 1);
     this.linkHits = [];
     ctx.save(); ctx.beginPath(); ctx.rect(p.x + 1, p.y + 1, p.w - 8, p.h - 2); ctx.clip();
     if (this.status) this.gui.font.drawCentered(ctx, this.status, p.x + p.w / 2, p.y + p.h / 2 - 4, this.text.length ? 0xffffff : 0xa0a0a0);
