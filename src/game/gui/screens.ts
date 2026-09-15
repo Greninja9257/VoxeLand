@@ -11,6 +11,8 @@ import type { GameMode } from '../../entity/player';
 export class TitleScreen extends Screen {
   pausesGame = false; closeOnEsc = false; hidesHud = true; darkBackground = false;
   splash = '';
+  private static readonly repoUrl = 'https://github.com/Greninja9257/VoxeLand';
+  private static readonly contributeLabel = 'Contribute at ';
   build(): void {
     const g = this.gui.game;
     if (!this.splash) { const s = g.assets.splashes; this.splash = s.length ? s[Math.floor(Math.random() * s.length)] : 'VoxeLand!'; }
@@ -39,8 +41,21 @@ export class TitleScreen extends Screen {
       ctx.restore();
     }
     super.render(ctx, mx, my, partial);
+    const repoX = 2 + this.gui.font.width(TitleScreen.contributeLabel);
+    const contributeHovered = mx >= repoX && mx < repoX + this.gui.font.width(TitleScreen.repoUrl) && my >= this.height - 22 && my < this.height - 12;
+    this.gui.canvas.style.cursor = contributeHovered ? 'pointer' : '';
+    this.gui.font.draw(ctx, TitleScreen.contributeLabel, 2, this.height - 20, 0xffffff);
+    this.gui.font.draw(ctx, TitleScreen.repoUrl, repoX, this.height - 20, contributeHovered ? 0x3366cc : 0x66b3ff);
     this.gui.font.draw(ctx, `VoxeLand ${g.version} — assets: Minecraft ${g.assets.manifest?.mcVersion ?? ''}`, 2, this.height - 10, 0xffffff);
     this.gui.font.drawRight(ctx, 'Not affiliated with Mojang Studios', this.width - 2, this.height - 10, 0xffffff);
+  }
+  mouseDown(x: number, y: number, button: number): boolean {
+    const repoX = 2 + this.gui.font.width(TitleScreen.contributeLabel);
+    if (button === 0 && x >= repoX && x < repoX + this.gui.font.width(TitleScreen.repoUrl) && y >= this.height - 22 && y < this.height - 12) {
+      window.open(TitleScreen.repoUrl, '_blank', 'noopener,noreferrer');
+      return true;
+    }
+    return super.mouseDown(x, y, button);
   }
 }
 
