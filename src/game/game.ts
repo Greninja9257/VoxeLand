@@ -966,6 +966,8 @@ export class Game {
     this.player.inventory.onChange = () => this.gui.onHeldItemChanged();
     if (welcome.saved) { try { this.player.deserialize(welcome.saved); } catch { /* fresh */ } }
     else { this.player.setPos(welcome.spawn[0] + 0.5, welcome.spawn[1], welcome.spawn[2] + 0.5); this.player.setSpawn(welcome.spawn[0], welcome.spawn[1], welcome.spawn[2], false); }
+    // Re-assert the server mode after deserializing saved player data.
+    this.player.setGameMode(welcome.gameMode);
     this.weather.deserialize(welcome.weather);
     this.inWorld = true;
     this.gui.close();
@@ -1075,7 +1077,7 @@ export class Game {
     const attackDown = input.isDown('attack');
     if (attackDown && input.pointerLocked) {
       if (this.targetEntity && input.wasPressed('attack')) {
-        if (this.client) { this.client.send({ t: 'attack', id: this.targetEntity.remoteId }); p.swing(); p.attackCooldownTicks = 0; p.stopBreaking(); }
+        if (this.client) { this.client.send({ t: 'attack', id: this.targetEntity.remoteId, playerId: this.targetEntity instanceof RemotePlayer ? this.targetEntity.clientId : undefined }); p.swing(); p.attackCooldownTicks = 0; p.stopBreaking(); }
         else if (this.targetEntity instanceof BoatEntity) { this.targetEntity.hurt({ amount: p.isCreative ? 100 : Math.max(1, p.heldItem()?.item.attackDamage ?? 1), source: 'attack', attacker: p }); p.swing(); p.attackCooldownTicks = 0; p.stopBreaking(); }
         else { p.attack(this.targetEntity); p.stopBreaking(); }
       }

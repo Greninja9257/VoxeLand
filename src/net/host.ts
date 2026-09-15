@@ -139,6 +139,7 @@ export class NetHost implements WorldListener {
       this.streamChunks(gu);
       this.pickups(gu);
       if (gu.container && this.ticks % 5 === 0) this.sendContainer(gu, false);
+      if (this.ticks % 20 === 0) this.send(gu.id, { t: 'self', mode: gu.player.gameMode });
     }
     if (this.ticks % 2 === 0) this.sendEntities();
     if (this.official && this.ticks % 100 === 0) this.uploadWorld();
@@ -166,7 +167,7 @@ export class NetHost implements WorldListener {
     const saved = g.playerData.get(name);
     const spawn = g.worldSpawn ?? [Math.floor(g.player.x), Math.floor(g.player.y), Math.floor(g.player.z)];
     p.setPos(saved?.x ?? spawn[0] + 0.5, saved?.y ?? spawn[1], saved?.z ?? spawn[2] + 0.5); p.tx = p.x; p.ty = p.y; p.tz = p.z;
-    p.setGameMode((saved?.gameMode as any) ?? (this.opts.gameMode as any));
+    p.setGameMode(this.opts.gameMode as any);
     g.addEntity(p);
     const gu: Guest = { id, name, player: p, known: new Set(), chunks: new Set(), wantChunks: new Set(), container: null, ready: false };
     this.guests.set(id, gu);
@@ -223,7 +224,7 @@ export class NetHost implements WorldListener {
         break;
       }
       case 'use': this.remoteUse(gu, m); break;
-      case 'attack': { const e = m.id === -1 ? g.player : g.entities.find((x) => x.id === m.id); if (e instanceof LivingEntity && e !== p && !e.removed && e.distSq(p.x, p.y, p.z) < 36) p.attack(e); break; }
+      case 'attack': { const e = m.playerId === -1 ? g.player : typeof m.playerId === 'number' ? this.guests.get(m.playerId)?.player : g.entities.find((x) => x.id === m.id); if (e instanceof LivingEntity && e !== p && !e.removed && e.distSq(p.x, p.y, p.z) < 36) p.attack(e); break; }
       case 'snd': {
         const { x, y, z } = m;
         if (typeof m.e !== 'string' || m.e.length > 128 || !g.sounds.events[m.e.replace(/^minecraft:/, '')] || ![x, y, z, m.v, m.p].every(Number.isFinite) || p.distSq(x, y, z) > 1024) break;
@@ -387,7 +388,7 @@ export class NetHost implements WorldListener {
       const R2 = 96 * 96;
       // host player as an entity
       const hp = g.player;
-      const hostSnap: any = { i: -1, t: 'player', x: r3(hp.x), y: r3(hp.y), z: r3(hp.z), yaw: r1(hp.yaw), pitch: r1(hp.pitch), sneak: hp.isSneaking, sprint: hp.isSprinting, swim: hp.swimmingPose, sleep: hp.sleeping, fly: hp.flying, hurt: hp.hurtTime > 0, dead: hp.health <= 0, swing: hp.swinging && hp.swingTime <= 1, use: !!hp.usingItem, mode: hp.gameMode, br: hp.breaking ? { x: hp.breaking.x, y: hp.breaking.y, z: hp.breaking.z, stage: hp.breakStage, state: hp.breaking.state } : null };
+      const hostSnap: any = { i: -1, pid: -1, t: 'player', x: r3(hp.x), y: r3(hp.y), z: r3(hp.z), yaw: r1(hp.yaw), pitch: r1(hp.pitch), sneak: hp.isSneaking, sprint: hp.isSprinting, swim: hp.swimmingPose, sleep: hp.sleeping, fly: hp.flying, hurt: hp.hurtTime > 0, dead: hp.health <= 0, swing: hp.swinging && hp.swingTime <= 1, use: !!hp.usingItem, mode: hp.gameMode, br: hp.breaking ? { x: hp.breaking.x, y: hp.breaking.y, z: hp.breaking.z, stage: hp.breakStage, state: hp.breaking.state } : null };
       if (!gu.known.has(-1)) { hostSnap.full = { name: this.hostName, skin: g.options.skin }; gu.known.add(-1); }
       if (this.ticks % 10 === 0) hostSnap.held = hp.heldItem()?.serialize() ?? null, hostSnap.armor = hp.armor.serialize();
       ents.push(hostSnap); seen.add(-1);
@@ -407,7 +408,7 @@ export class NetHost implements WorldListener {
     const first = !gu.known.has(e.id);
     const s: any = { i: e.id, x: r3(e.x), y: r3(e.y), z: r3(e.z), yaw: r1(e.yaw), pitch: r1(e.pitch) };
     if (e instanceof RemotePlayer) {
-      s.t = 'player'; s.sneak = e.isSneaking; s.sprint = e.isSprinting; s.swim = e.swimmingPose; s.sleep = e.sleeping; s.fly = e.flying; s.hurt = e.hurtTime > 0; s.dead = e.health <= 0; s.swing = e.swinging && e.swingTime <= 1; s.mode = e.gameMode; s.use = !!e.usingItem; s.br = e.breaking ? { x: e.breaking.x, y: e.breaking.y, z: e.breaking.z, stage: e.breakStage, state: e.breaking.state } : null;
+      s.t = 'player'; s.pid = e.clientId; s.sneak = e.isSneaking; s.sprint = e.isSprinting; s.swim = e.swimmingPose; s.sleep = e.sleeping; s.fly = e.flying; s.hurt = e.hurtTime > 0; s.dead = e.health <= 0; s.swing = e.swinging && e.swingTime <= 1; s.mode = e.gameMode; s.use = !!e.usingItem; s.br = e.breaking ? { x: e.breaking.x, y: e.breaking.y, z: e.breaking.z, stage: e.breakStage, state: e.breaking.state } : null;
       if (first) s.full = { name: e.name, skin: e.skin };
       if (this.ticks % 10 === 0 || first) { s.held = e.heldItem()?.serialize() ?? null; s.armor = e.armor.serialize(); }
     } else if (e instanceof Mob) {

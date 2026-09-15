@@ -138,7 +138,7 @@ export class NetClient implements WorldListener {
     for (const m of q) { try { this.handle(m); } catch (e) { console.error('client message error', e); } }
     // our snapshot
     if (this.ticks === 1) this.send({ t: 'ready' });
-    const snap: any = { t: 'move', x: r3(p.x), y: r3(p.y), z: r3(p.z), yaw: r1(p.yaw), pitch: r1(p.pitch), sneak: p.isSneaking, sprint: p.isSprinting, swim: p.swimmingPose, sleep: p.sleeping, fly: p.flying, health: p.health, slot: p.selectedSlot, mode: p.gameMode, swing: p.swinging && p.swingTime <= 1, use: !!p.usingItem, hurt: p.hurtTime === p.hurtDuration, dead: p.health <= 0, br: p.breaking ? { x: p.breaking.x, y: p.breaking.y, z: p.breaking.z, stage: p.breakStage, state: p.breaking.state } : null };
+    const snap: any = { t: 'move', x: r3(p.x), y: r3(p.y), z: r3(p.z), yaw: r1(p.yaw), pitch: r1(p.pitch), sneak: p.isSneaking, sprint: p.isSprinting, swim: p.swimmingPose, sleep: p.sleeping, fly: p.flying, health: p.health, slot: p.selectedSlot, swing: p.swinging && p.swingTime <= 1, use: !!p.usingItem, hurt: p.hurtTime === p.hurtDuration, dead: p.health <= 0, br: p.breaking ? { x: p.breaking.x, y: p.breaking.y, z: p.breaking.z, stage: p.breakStage, state: p.breaking.state } : null };
     if (this.ticks % 100 === 0) snap.saved = p.serialize();
     this.send(snap);
     const held = JSON.stringify(p.heldItem()?.serialize() ?? null), armor = JSON.stringify(p.armor.serialize()) + JSON.stringify(p.offhand.serialize());
@@ -161,6 +161,7 @@ export class NetClient implements WorldListener {
       case 'chat': g.gui.addChat(m.text); break;
       case 'actionbar': g.gui.showActionBar(m.text); break;
       case 'players': this.players = m.list; break;
+      case 'self': { if (m.mode) p.setGameMode(m.mode); break; }
       case 'hurt': {
         const hook = g.sounds.onSound, enabled = g.sounds.enabled;
         g.sounds.onSound = null; g.sounds.enabled = false;
@@ -221,6 +222,7 @@ export class NetClient implements WorldListener {
         g.entities.push(e); e.world = g.world; e.game = g; e.updateBB();
       }
       if (e instanceof RemotePlayer) {
+        if (s.pid !== undefined) e.clientId = s.pid;
         e.applySnapshot(s);
         if (s.held !== undefined) { e.inventory.slots[e.selectedSlot] = s.held ? ItemStack.deserialize(s.held, g.items) : null; }
         if (s.armor) e.armor.deserialize(s.armor, g.items);
