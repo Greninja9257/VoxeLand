@@ -15,7 +15,7 @@ import type { Chunk } from '../world/chunk';
 import { runCommand } from '../game/commands';
 
 interface Guest {
-  id: number; name: string; player: RemotePlayer;
+  id: number; playerId: string; name: string; player: RemotePlayer;
   known: Set<number>;            // entity ids the guest has full info for
   chunks: Set<number>;           // chunk keys sent
   wantChunks: Set<number>;       // requested but not yet loaded
@@ -28,7 +28,7 @@ export interface HostOptions {
   name: string; motd: string; gameMode: string; cheats: boolean; maxPlayers: number; relayUrl?: string;
   /** '' = public (anyone may join), otherwise the password guests must enter */
   password?: string;
-  /** true when hosting the backend's persistent public world (state is uploaded to the server) */
+  /** true when coordinating live simulation for the backend-owned public world */
   official?: boolean;
 }
 
@@ -58,7 +58,7 @@ export class NetHost implements WorldListener {
       try { ws = new WebSocket(url); } catch (e) { reject(e); return; }
       ws.binaryType = 'arraybuffer';
       this.ws = ws;
-      ws.onopen = () => { ws.send(JSON.stringify({ t: 'host', name: this.opts.name, host: this.hostName, motd: this.opts.motd, gameMode: this.opts.gameMode, password: this.opts.password ?? '', official: !!this.opts.official, maxPlayers: this.opts.maxPlayers, version: `${g.version}/${PROTOCOL_VERSION}` })); };
+      ws.onopen = () => { ws.send(JSON.stringify({ t: 'host', name: this.opts.name, host: this.hostName, playerId: g.options.playerId, motd: this.opts.motd, gameMode: this.opts.gameMode, password: this.opts.password ?? '', official: !!this.opts.official, maxPlayers: this.opts.maxPlayers, version: `${g.version}/${PROTOCOL_VERSION}` })); };
       ws.onmessage = (e) => {
         if (typeof e.data !== 'string') { this.queue.push({ t: 'bin', data: new Uint8Array(e.data) }); return; }
         const m = JSON.parse(e.data);
@@ -71,7 +71,13 @@ export class NetHost implements WorldListener {
     });
   }
 
-  stop(): void { this.detach(); try { this.ws?.close(); } catch { /* */ } this.ws = null; }
+  stop(): void {
+    if (this.official && this.ws?.readyState === 1) {
+      this.ws.send(JSON.stringify({ t: 'playerState', playerId: this.game.options.playerId, saved: this.game.player.serialize() }));
+      this.uploadWorld();
+    }
+    this.detach(); try { this.ws?.close(); } catch { /* */ } this.ws = null;
+  }
 
   private attach(): void {
     const g = this.game;
@@ -121,8 +127,8 @@ export class NetHost implements WorldListener {
       if (++sent >= 8) break;   // trickle: at most 8 chunks per upload tick
     }
     const playerData: Record<string, any> = {};
-    for (const gu of this.guests.values()) if (gu.player.lastSaved) playerData[gu.name] = gu.player.lastSaved;
-    playerData[this.hostName] = g.player.serialize();
+    for (const gu of this.guests.values()) if (gu.player.lastSaved) playerData[gu.playerId] = gu.player.lastSaved;
+    playerData[g.options.playerId] = g.player.serialize();
     this.ws.send(JSON.stringify({ t: 'meta', meta: { time: g.world.time, dayTime: g.world.dayTime, weather: g.weather.serialize(), rules: g.rules, worldSpawn: g.worldSpawn, dragonKills: g.dragonKills }, playerData }));
   }
 
@@ -142,6 +148,9 @@ export class NetHost implements WorldListener {
       if (this.ticks % 20 === 0) this.send(gu.id, { t: 'self', mode: gu.player.gameMode });
     }
     if (this.ticks % 2 === 0) this.sendEntities();
+    if (this.official && this.ticks % 20 === 0 && this.ws?.readyState === 1) {
+      this.ws.send(JSON.stringify({ t: 'playerState', playerId: g.options.playerId, saved: g.player.serialize() }));
+    }
     if (this.official && this.ticks % 100 === 0) this.uploadWorld();
     if (this.ticks % 20 === 0) this.broadcast({ t: 'time', time: g.world.time, day: g.world.dayTime, rain: g.weather.rainLevel, thunder: g.weather.thunderLevel, raining: g.weather.raining, thundering: g.weather.thundering, diff: g.difficulty });
   }
@@ -151,27 +160,30 @@ export class NetHost implements WorldListener {
     for (const m of q) {
       try {
         if (m.t === 'bin') continue; // guests send no binary
-        if (m.t === 'guestJoined') this.onJoin(m.from, m.name, m.skin);
+        if (m.t === 'guestJoined') this.onJoin(m.from, m.playerId, m.name, m.skin);
         else if (m.t === 'guestLeft') this.onLeave(m.from);
         else if (m.from !== undefined) { const gu = this.guests.get(m.from); if (gu) this.onGuestMessage(gu, m); }
       } catch (e) { console.error('host message error', e); }
     }
   }
 
-  private onJoin(id: number, name: string, skin?: string): void {
+  private onJoin(id: number, playerId: string, name: string, skin?: string): void {
     const g = this.game;
+    playerId = String(playerId || name).slice(0, 80);
     if ([...this.guests.values()].some((x) => x.name === name) || name === this.hostName) { name = name + '_' + id; }
     const p = new RemotePlayer(name);
     p.clientId = id; p.skin = skin === 'alex' ? 'alex' : 'steve';
     p.hurtHandler = (d) => queueMicrotask(() => this.send(id, { t: 'hurt', damage: d.amount, source: d.source, health: p.health, absorption: p.absorption, vx: p.vx, vy: p.vy, vz: p.vz, fire: p.fireTicks, dead: p.health <= 0 }));
-    const saved = g.playerData.get(name);
+    // Stable ids prevent renamed players (or two players with the same display name) sharing inventories.
+    // The name fallback migrates saves made by older versions.
+    const saved = g.playerData.get(playerId) ?? g.playerData.get(name);
     const spawn = g.worldSpawn ?? [Math.floor(g.player.x), Math.floor(g.player.y), Math.floor(g.player.z)];
     p.setPos(saved?.x ?? spawn[0] + 0.5, saved?.y ?? spawn[1], saved?.z ?? spawn[2] + 0.5); p.tx = p.x; p.ty = p.y; p.tz = p.z;
     p.setGameMode(this.opts.gameMode as any);
     g.addEntity(p);
-    const gu: Guest = { id, name, player: p, known: new Set(), chunks: new Set(), wantChunks: new Set(), container: null, ready: false };
+    const gu: Guest = { id, playerId, name, player: p, known: new Set(), chunks: new Set(), wantChunks: new Set(), container: null, ready: false };
     this.guests.set(id, gu);
-    this.send(id, { t: 'welcome', name, hostName: this.hostName, dimension: g.world.dimension, seed: g.world.seed, time: g.world.time, day: g.world.dayTime, spawn, saved: saved ?? null, gameMode: this.opts.gameMode, cheats: this.opts.cheats, difficulty: g.difficulty, rules: g.rules, weather: g.weather.serialize(), version: g.version, protocol: PROTOCOL_VERSION, players: this.playerList(), music: g.sounds.currentMusic() });
+    this.send(id, { t: 'welcome', name, hostName: this.official ? this.opts.name : this.hostName, dimension: g.world.dimension, seed: g.world.seed, time: g.world.time, dayTime: g.world.dayTime, spawn, saved: saved ?? null, gameMode: this.opts.gameMode, cheats: this.opts.cheats, difficulty: g.difficulty, rules: g.rules, weather: g.weather.serialize(), version: g.version, protocol: PROTOCOL_VERSION, players: this.playerList(), music: g.sounds.currentMusic() });
     g.gui.addChat(`§e${name} joined the game`);
     this.broadcast({ t: 'chat', text: `§e${name} joined the game` });
     this.broadcast({ t: 'players', list: this.playerList() });
@@ -192,7 +204,7 @@ export class NetHost implements WorldListener {
 
   playerList(): { name: string; id: number }[] { return [{ name: this.hostName, id: -1 }, ...[...this.guests.values()].map((gu) => ({ name: gu.name, id: gu.id }))]; }
 
-  private savePlayer(gu: Guest): void { if (gu.player.lastSaved) this.game.playerData.set(gu.name, gu.player.lastSaved); }
+  private savePlayer(gu: Guest): void { if (gu.player.lastSaved) this.game.playerData.set(gu.playerId, gu.player.lastSaved); }
   saveAllPlayers(): void { for (const gu of this.guests.values()) this.savePlayer(gu); }
 
   kick(id: number, reason = 'Kicked by the host'): void { if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify({ t: 'kick', id, reason })); }
@@ -243,6 +255,12 @@ export class NetHost implements WorldListener {
       }
       case 'drop': { const st = ItemStack.deserialize(m.stack, g.items); if (st) { const dir = m.dir ?? [0, 0, 0]; const e = g.dropItem(m.x, m.y, m.z, st, [dir[0], dir[1], dir[2]]); if (e) { e.pickupDelay = 40; e.thrower = p.uuid; } } break; }
       case 'chat': this.chat(gu, String(m.text).slice(0, 256)); break;
+      case 'death': {
+        const text = String(m.text ?? `${gu.name} died`).slice(0, 256);
+        g.gui.addChat(text);
+        for (const other of this.guests.values()) if (other !== gu) this.send(other.id, { t: 'chat', text });
+        break;
+      }
       case 'cont': { if (gu.container) { gu.container.inv.deserialize(m.slots, g.items); gu.container.inv.onChange?.(); const c = w.chunkAt(gu.container.x, gu.container.z); if (c) c.modified = true; for (const other of this.guests.values()) if (other !== gu && other.container && other.container.x === gu.container.x && other.container.y === gu.container.y && other.container.z === gu.container.z) this.sendContainer(other, false); } break; }
       case 'close': { if (gu.container) { gu.container.onClose?.(); gu.container = null; } break; }
       case 'respawn': { p.health = 20; p.deathTime = 0; break; }

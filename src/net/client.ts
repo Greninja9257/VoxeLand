@@ -11,10 +11,10 @@ import { SET_UPDATE_NEIGHBORS, type WorldListener } from '../world/world';
 import { Chunk, chunkKey } from '../world/chunk';
 import { decodeChunk, unpackFrame, FRAME_CHUNK, PROTOCOL_VERSION, defaultRelayUrl, type ServerInfo } from './protocol';
 
-/** Joining either lands us in someone else's world, or makes us the host of the backend's public world. */
+/** Joining either lands us in a running world or assigns us as the public world's simulation coordinator. */
 export type JoinResult =
   | { kind: 'joined'; welcome: any; info: any }
-  | { kind: 'host'; world: any; chunks: Uint8Array[] };
+  | { kind: 'coordinator'; world: any; chunks: Uint8Array[] };
 
 /** Thrown when a private server refused the password we sent (or were missing). */
 export class PasswordRequired extends Error { constructor(msg = 'This server is private.') { super(msg); } }
@@ -55,27 +55,32 @@ export class NetClient implements WorldListener {
 
   constructor(public game: Game, public relayUrl: string) {}
 
-  /** Snapshot of the public world handed to us when we are promoted to host. */
+  /** Snapshot handed to this client when it is assigned live-simulation coordination. */
   private snapshotChunks: Uint8Array[] = [];
   private collectingSnapshot = false;
-  /** Set when the backend asks everyone to reconnect (public world host migration). */
+  /** Set when the backend asks everyone to reconnect after coordinator migration. */
   rehostId: string | null = null;
 
-  connect(serverId: string, name: string, skin: string, password = ''): Promise<JoinResult> {
+  connect(serverId: string, playerId: string, name: string, skin: string, password = ''): Promise<JoinResult> {
     return new Promise((resolve, reject) => {
       let ws: WebSocket;
       try { ws = new WebSocket(this.relayUrl); } catch (e) { reject(e); return; }
       ws.binaryType = 'arraybuffer';
       this.ws = ws;
       const timer = setTimeout(() => { if (this.status === 'connecting') { reject(new Error('Timed out waiting for the host')); ws.close(); } }, 20000);
-      ws.onopen = () => ws.send(JSON.stringify({ t: 'join', id: serverId, name, skin, password }));
+      ws.onopen = () => ws.send(JSON.stringify({ t: 'join', id: serverId, playerId, name, skin, password }));
       ws.onmessage = (e) => {
         if (typeof e.data !== 'string') { (this.collectingSnapshot ? this.snapshotChunks : this.chunkFrames).push(new Uint8Array(e.data)); return; }
         const m = JSON.parse(e.data);
         if (this.status === 'connecting') {
           if (m.t === 'error') { clearTimeout(timer); this.status = 'error'; reject(m.needPassword ? new PasswordRequired(m.reason) : new Error(m.reason)); return; }
-          if (m.t === 'becomeHost') { this.collectingSnapshot = true; this.snapshotChunks = []; (this as any).pendingWorld = m.world; return; }
-          if (m.t === 'worldReady') { clearTimeout(timer); this.status = 'promoted'; resolve({ kind: 'host', world: (this as any).pendingWorld, chunks: this.snapshotChunks }); return; }
+          // Accept the former name during rolling deploys: an old backend may still be serving a newly loaded UI.
+          if (m.t === 'becomeCoordinator' || m.t === 'becomeHost') { this.collectingSnapshot = true; this.snapshotChunks = []; (this as any).pendingWorld = m.world; return; }
+          if (m.t === 'worldReady') {
+            const world = (this as any).pendingWorld;
+            if (!world || !Number.isFinite(world.seed)) { clearTimeout(timer); this.status = 'error'; reject(new Error('The public server did not provide a valid world snapshot. Please retry.')); ws.close(); return; }
+            clearTimeout(timer); this.status = 'coordinator'; resolve({ kind: 'coordinator', world, chunks: this.snapshotChunks }); return;
+          }
           if (m.t === 'joined') { this.clientId = m.clientId; this.info = m.info; return; }
           if (m.t === 'welcome') { clearTimeout(timer); this.welcome = m; this.players = m.players ?? []; this.status = 'joined'; if (m.protocol !== PROTOCOL_VERSION) { this.status = 'error'; reject(new Error(`Incompatible server version (${m.version})`)); ws.close(); return; } resolve({ kind: 'joined', welcome: m, info: this.info }); return; }
           if (m.t === 'kicked' || m.t === 'rehost') { clearTimeout(timer); this.status = 'error'; reject(new Error(m.reason ?? 'Disconnected')); return; }
@@ -139,7 +144,9 @@ export class NetClient implements WorldListener {
     // our snapshot
     if (this.ticks === 1) this.send({ t: 'ready' });
     const snap: any = { t: 'move', x: r3(p.x), y: r3(p.y), z: r3(p.z), yaw: r1(p.yaw), pitch: r1(p.pitch), sneak: p.isSneaking, sprint: p.isSprinting, swim: p.swimmingPose, sleep: p.sleeping, fly: p.flying, health: p.health, slot: p.selectedSlot, swing: p.swinging && p.swingTime <= 1, use: !!p.usingItem, hurt: p.hurtTime === p.hurtDuration, dead: p.health <= 0, br: p.breaking ? { x: p.breaking.x, y: p.breaking.y, z: p.breaking.z, stage: p.breakStage, state: p.breaking.state } : null };
-    if (this.ticks % 100 === 0) snap.saved = p.serialize();
+    // Keep the backend's per-player record current so an abrupt disconnect cannot hand stale inventory to a
+    // replacement coordinator. A final snapshot is also sent by Game.quitToTitle().
+    if (this.ticks % 20 === 0) snap.saved = p.serialize();
     this.send(snap);
     const held = JSON.stringify(p.heldItem()?.serialize() ?? null), armor = JSON.stringify(p.armor.serialize()) + JSON.stringify(p.offhand.serialize());
     if (held !== this.lastHeld || armor !== this.lastArmor) { this.lastHeld = held; this.lastArmor = armor; this.send({ t: 'inv', held: p.heldItem()?.serialize() ?? null, armor: p.armor.serialize(), off: p.offhand.serialize() }); }

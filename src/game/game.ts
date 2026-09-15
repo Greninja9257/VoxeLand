@@ -32,7 +32,7 @@ import { mergeOptions, type Options } from './options';
 import { Weather } from './weather';
 import { NetHost, type HostOptions } from '../net/host';
 import { NetClient } from '../net/client';
-import { decodeChunk, unpackFrame } from '../net/protocol';
+import { decodeChunk, unpackFrame, PROTOCOL_VERSION } from '../net/protocol';
 import { RemotePlayer } from '../entity/remotePlayer';
 import { BoatEntity } from '../entity/boat';
 import { EnderDragonEntity, WitherEntity, EndCrystalEntity, AreaEffectCloud } from '../entity/boss';
@@ -126,6 +126,10 @@ export class Game {
   async start(): Promise<void> {
     const saved = await storage.loadOptions<Options>().catch(() => undefined);
     this.options = mergeOptions(saved);
+    if (!this.options.playerId) {
+      this.options.playerId = globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+      storage.saveOptions(this.options).catch(() => {});
+    }
     if (saved?.bindings) for (const [k, v] of Object.entries(saved.bindings)) this.input.bindings.set(k, v);
     // migrate options saved by an early build whose mouse-button defaults were wrong (use=Mouse1, pick=Mouse2)
     if (this.input.bindings.get('use') === 'Mouse1' && this.input.bindings.get('pickBlock') === 'Mouse2') { this.input.bindings.set('use', 'Mouse2'); this.input.bindings.set('pickBlock', 'Mouse1'); }
@@ -475,7 +479,13 @@ export class Game {
     for (const e of this.entities) { if ((Math.floor(e.x) >> 4) === c.cx && (Math.floor(e.z) >> 4) === c.cz && !(e instanceof Mob && e.persistent)) { if (e instanceof Mob && e.def.category !== 'passive' && !e.tamed) e.remove(); } }
   }
   onItemPickedUp(e: ItemEntity, _n: number): void { void e; }
-  onPlayerDied(): void { this.gui.openDeath(); }
+  onPlayerDied(): void {
+    const text = this.player.deathMessage || `${this.player.name} died`;
+    this.gui.addChat(text);
+    if (this.client) this.client.send({ t: 'death', text });
+    else this.host?.broadcast({ t: 'chat', text });
+    this.gui.openDeath();
+  }
   respawnPlayer(): void {
     const p = this.player;
     this.client?.send({ t: 'respawn' });
@@ -905,7 +915,7 @@ export class Game {
       c.close();
       this.client = null;
       this.leaveRemoteWorld(reason);
-      // public world host migration: reconnect (the first client back becomes the new host)
+      // Backend-owned public world: reconnect while it automatically moves live-simulation coordination.
       if (rehost && last) setTimeout(() => { if (!this.inWorld) this.joinServer(last.relayUrl, rehost, last.password).catch((e) => this.gui.open(new DisconnectedScreen(String(e?.message ?? e)))); }, 1500 + Math.random() * 1500);
       return;
     }
@@ -943,12 +953,12 @@ export class Game {
     return h;
   }
 
-  /** Join a server. Joining the backend's public world with nobody hosting promotes us to host instead. */
+  /** Join a server. The backend may assign this client to coordinate an idle public world's live simulation. */
   async joinServer(relayUrl: string, serverId: string, password = ''): Promise<void> {
     const c = new NetClient(this, relayUrl);
     this.gui.open(new LoadingScreen('Connecting…'));
-    const res = await c.connect(serverId, this.options.playerName || 'Player', this.options.skin, password);
-    if (res.kind === 'host') { c.close(); await this.hostPublicWorld(relayUrl, res.world, res.chunks); return; }
+    const res = await c.connect(serverId, this.options.playerId, this.options.playerName || 'Player', this.options.skin, password);
+    if (res.kind === 'coordinator') { c.close(); await this.coordinatePublicWorld(relayUrl, res.world, res.chunks); return; }
     const welcome = res.welcome;
     this.gui.open(new LoadingScreen('Joining world…'));
     this.client = c;
@@ -978,12 +988,15 @@ export class Game {
     this.lastServer = { relayUrl, serverId, password };
     this.gui.addChat(`§eJoined ${welcome.hostName}'s world`);
   }
-  /** Relay + id + password of the server we are on, so a host migration can reconnect us. */
+  /** Relay + id + password of the server we are on, so coordinator migration can reconnect us. */
   lastServer: { relayUrl: string; serverId: string; password: string } | null = null;
 
-  /** Take over hosting the backend's persistent public world from the snapshot it handed us. */
-  private async hostPublicWorld(relayUrl: string, world: any, chunkFrames: Uint8Array[]): Promise<void> {
+  /** Coordinate live simulation from the authoritative snapshot owned by the backend. */
+  private async coordinatePublicWorld(relayUrl: string, world: any, chunkFrames: Uint8Array[]): Promise<void> {
     this.gui.open(new LoadingScreen('Starting the public world…'));
+    // Never merge an authoritative backend snapshot with an older browser cache. Block state ids and serialized
+    // entities can change with the protocol; isolating the cache prevents stale records resolving to undefined.
+    const cacheId = `public-${world.seed}-v${PROTOCOL_VERSION}`;
     // the backend's stored chunks are the authoritative copy: write them into local storage, then load normally
     const data: any[] = [];
     for (const f of chunkFrames) {
@@ -994,19 +1007,19 @@ export class Game {
         data.push({ ...d, decorated: true });
       } catch (e) { console.error('snapshot chunk', e); }
     }
-    const meta: WorldMeta = { id: 'public', name: world.name ?? 'Public world', seed: world.seed, created: Date.now(), lastPlayed: Date.now(), gameMode: (world.gameMode ?? 'survival') as any, difficulty: world.difficulty ?? 2, cheats: false, version: this.version };
+    const meta: WorldMeta = { id: cacheId, name: world.name ?? 'Public world', seed: world.seed, created: Date.now(), lastPlayed: Date.now(), gameMode: (world.gameMode ?? 'survival') as any, difficulty: world.difficulty ?? 2, cheats: false, version: this.version };
     await storage.saveWorldMeta(meta).catch(() => {});
-    if (data.length) await storage.saveChunks('public', 'overworld', data as any).catch((e) => console.error(e));
+    if (data.length) await storage.saveChunks(cacheId, 'overworld', data as any).catch((e) => console.error(e));
     // world-level state from the backend (time, weather, rules, spawn, everyone's saved players)
-    await storage.saveState('public', 'world', {
-      player: world.playerData?.[this.options.playerName || 'Player'] ?? undefined,
+    await storage.saveState(cacheId, 'world', {
+      player: world.playerData?.[this.options.playerId] ?? world.playerData?.[this.options.playerName || 'Player'] ?? undefined,
       weather: world.meta?.weather, time: { overworld: { time: world.meta?.time ?? 0, dayTime: world.meta?.dayTime ?? 0 } },
       rules: world.meta?.rules, worldSpawn: world.meta?.worldSpawn, playerData: world.playerData ?? {}, dragonKills: world.meta?.dragonKills ?? 0,
     }).catch(() => {});
     await this.loadWorld(meta);
     const h = await this.openToLan({ name: world.name ?? 'Public world', motd: world.motd ?? '', gameMode: world.gameMode ?? 'survival', cheats: false, maxPlayers: world.maxPlayers ?? 16, relayUrl, official: true });
     this.lastServer = { relayUrl, serverId: 'official', password: '' };
-    this.gui.addChat('§eYou are hosting the public world — it is saved on the server and passes on when you leave.');
+    this.gui.addChat('§eJoined VoxeLand Public Server');
     void h;
   }
 

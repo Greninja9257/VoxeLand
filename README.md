@@ -32,17 +32,16 @@ npm run build
 npm run server           # http://localhost:8080  (game + relay on /ws + public world)
 ```
 
-- **VoxeLand Public Server** — always in the Multiplayer list, joinable at any time. Its seed, time, weather,
-  player data and every modified chunk live on the backend; the simulation runs in the browser of whichever player
-  is currently the host. The first player to join an empty public world is promoted to host, uploads world deltas
-  while playing, and when they leave everyone reconnects and the next player takes over — the world carries on.
+- **VoxeLand Public Server** — a backend-owned world that is always in the Multiplayer list. Its seed, time,
+  weather, modified chunks and per-player inventories live on the backend. Player records use a stable local
+  identity instead of the current coordinator or display name, so reconnecting restores the correct inventory.
 - **Share World** (pause menu) publishes your own world through a server as **Public** (anyone may join) or
   **Private** (a password is required; the field only appears when you pick Private).
 - **Direct Connection / Add Server Address** takes an IP, `host:port`, or a `ws(s)://` URL (optionally `#serverId`),
   so you can play on anyone else's VoxeLand backend. Added addresses are queried alongside your own server, so
   their worlds show up in the same list.
-- Guests run their own player physics and inventory; the host runs the world (blocks, mobs, items, time, weather,
-  containers, boats). Guest player data is saved with the world under the guest's name. Dimension travel is
+- Guests run their own player physics and inventory; the host runs player-created worlds (blocks, mobs, items,
+  time, weather, containers, boats). Guest player data is saved with the world under a stable player identity. Dimension travel is
   host-only for now; Tab shows everyone online.
 
 Server environment variables: `PORT`, `DATA_DIR`, `PUBLIC_SEED`, `PUBLIC_NAME`, `PUBLIC_MOTD`, `PUBLIC_GAMEMODE`,

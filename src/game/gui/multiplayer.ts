@@ -56,8 +56,7 @@ export class MultiplayerScreen extends Screen {
     await Promise.all(relays.map(async (r) => { try { const list = await listServers(r); for (const s of list) this.servers.push({ ...s, relay: r }); } catch { errors++; } }));
     this.servers.sort((a, b) => (b.official ? 1 : 0) - (a.official ? 1 : 0) || b.players - a.players);
     if (this.servers.length) this.status = '';
-    else if (errors === relays.length) this.status = 'No server reachable. Run "npm run server", or add a server address below.';
-    else this.status = 'No worlds are open right now.';
+    else this.status = 'No servers found.';
   }
   private join(pw = ''): void {
     const s = this.servers[this.list.selected];

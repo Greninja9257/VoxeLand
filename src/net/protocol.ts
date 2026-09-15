@@ -1,5 +1,5 @@
-// Multiplayer wire protocol. The relay server forwards JSON control messages and binary frames between a host
-// (the browser running the world) and its guests. Binary frames carry chunk payloads:
+// Multiplayer wire protocol. The relay forwards JSON control messages and binary chunk payloads between a
+// player-hosted world (or the public world's temporary simulation coordinator) and connected players:
 //   host -> relay : [u32 targetClientId (0 = all guests)] [payload]
 //   relay -> guest: [payload]
 //   guest -> relay: [payload]           relay -> host: [u32 fromClientId] [payload]
@@ -10,7 +10,7 @@ export const PROTOCOL_VERSION = 7;
 /** A server as advertised by a relay. `private` servers need a password; `official` is the backend's own world. */
 export type ServerInfo = { id: string; name: string; host: string; motd: string; players: number; maxPlayers: number; gameMode: string; version: string; private: boolean; official: boolean; online?: boolean };
 
-/** Binary frame target used by the public world's host to persist a chunk on the backend. */
+/** Binary frame target used to persist a public-world chunk on the backend. */
 export const TARGET_SERVER = 0xffffffff;
 
 /** Chunk section run-length encoding (u16 values -> [count u16, value u16]*). */

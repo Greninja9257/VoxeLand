@@ -8,11 +8,10 @@
 // **private** (a password is required). Every server on a relay is listed to every client of that relay, so a
 // player can also point the game at another VoxeLand backend by IP and see the worlds hosted there.
 //
-// The backend additionally keeps one **persistent public world** (id "official"): its seed, time, weather, player
-// data and modified chunks live on the server, so it is joinable at any time. The simulation itself runs in the
-// browser of whichever player is currently the host — the first player to join an unhosted public world is
-// promoted to host, uploads world deltas while playing, and when they leave the remaining players reconnect and
-// the next one takes over.
+// The backend additionally owns one **persistent public world** (id "official"): its seed, time, weather,
+// per-player data and modified chunks live on the server, so it is always listed and has no player host. An
+// automatically selected client coordinates live simulation while players are connected; that internal role is
+// never exposed as ownership of the server and can move without moving player inventories.
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -101,12 +100,12 @@ const http_ = http.createServer((req, res) => {
 
 const wss = new WebSocketServer({ server: http_, path: '/ws', maxPayload: 64 * 1024 * 1024 });
 
-/** Player-hosted servers, plus the official one when someone is hosting it. */
+/** Player-hosted servers plus the backend-owned official server. */
 const servers = new Map();
 let nextClientId = 1;
 
 function listServers() {
-  const out = [{ id: OFFICIAL_ID, name: official.name, host: servers.get(OFFICIAL_ID)?.info.host ?? '(server)', motd: official.motd, players: servers.get(OFFICIAL_ID) ? servers.get(OFFICIAL_ID).guests.size + 1 : 0, maxPlayers: OFFICIAL_MAX, gameMode: official.gameMode, version: 'public', private: false, official: true, online: true }];
+  const out = [{ id: OFFICIAL_ID, name: official.name, host: '', motd: official.motd, players: servers.get(OFFICIAL_ID) ? servers.get(OFFICIAL_ID).guests.size + 1 : 0, maxPlayers: OFFICIAL_MAX, gameMode: official.gameMode, version: 'public', private: false, official: true, online: true }];
   for (const s of servers.values()) {
     if (s.id === OFFICIAL_ID) continue;
     out.push({ id: s.id, name: s.info.name, host: s.info.host, motd: s.info.motd ?? '', players: s.guests.size + 1, maxPlayers: s.info.maxPlayers ?? MAX_PLAYERS_DEFAULT, gameMode: s.info.gameMode, version: s.info.version, private: !!s.info.password, official: false, online: true });
@@ -117,9 +116,9 @@ function listServers() {
 const send = (ws, obj) => { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); };
 const sendBin = (ws, buf) => { if (ws && ws.readyState === 1) ws.send(buf); };
 
-/** Hand the caller everything needed to host the public world in their browser. */
-function promoteToOfficialHost(ws) {
-  send(ws, { t: 'becomeHost', id: OFFICIAL_ID, world: { seed: official.seed, name: official.name, motd: official.motd, gameMode: official.gameMode, difficulty: official.difficulty, meta: official.meta, playerData: official.playerData, maxPlayers: OFFICIAL_MAX }, chunkCount: official.chunks.size });
+/** Hand an automatically selected client the live-simulation coordinator snapshot. */
+function assignOfficialCoordinator(ws) {
+  send(ws, { t: 'becomeCoordinator', id: OFFICIAL_ID, world: { seed: official.seed, name: official.name, motd: official.motd, gameMode: official.gameMode, difficulty: official.difficulty, meta: official.meta, playerData: official.playerData, maxPlayers: OFFICIAL_MAX }, chunkCount: official.chunks.size });
   for (const buf of official.chunks.values()) sendBin(ws, buf);
   send(ws, { t: 'worldReady' });
 }
@@ -128,6 +127,7 @@ wss.on('connection', (ws) => {
   let role = null;          // 'host' | 'guest'
   let server = null;        // the server record this socket belongs to
   let clientId = 0;
+  let playerId = '';
 
   ws.on('message', (data, isBinary) => {
     if (isBinary) {
@@ -156,7 +156,7 @@ wss.on('connection', (ws) => {
       case 'host': {
         if (role) return;
         const wantOfficial = m.official === true;
-        if (wantOfficial && servers.has(OFFICIAL_ID)) { send(ws, { t: 'error', reason: 'The public world already has a host.' }); return; }
+        if (wantOfficial && servers.has(OFFICIAL_ID)) { send(ws, { t: 'error', reason: 'The public world is already active.' }); return; }
         role = 'host';
         const id = wantOfficial ? OFFICIAL_ID : Math.random().toString(36).slice(2, 10);
         server = {
@@ -189,18 +189,25 @@ wss.on('connection', (ws) => {
         official.dirty = true;
         break;
       }
+      case 'playerState': { // public world: the coordinator's own player, stored separately from world state
+        if (role !== 'host' || !server?.official || !m.saved) return;
+        const key = String(m.playerId ?? '').slice(0, 80);
+        if (key) { official.playerData[key] = m.saved; official.dirty = true; }
+        break;
+      }
       case 'list': send(ws, { t: 'servers', servers: listServers() }); break;
       case 'join': {
         if (role) return;
-        if (m.id === OFFICIAL_ID && !servers.has(OFFICIAL_ID)) { promoteToOfficialHost(ws); return; } // nobody hosting: you are
+        if (m.id === OFFICIAL_ID && !servers.has(OFFICIAL_ID)) { assignOfficialCoordinator(ws); return; }
         const s = servers.get(m.id);
         if (!s) { send(ws, { t: 'error', reason: 'That server is no longer online.' }); return; }
         if (s.guests.size + 1 >= (s.info.maxPlayers ?? MAX_PLAYERS_DEFAULT)) { send(ws, { t: 'error', reason: 'The server is full.' }); return; }
         if (s.info.password && String(m.password ?? '') !== s.info.password) { send(ws, { t: 'error', reason: 'Incorrect password.', needPassword: true }); return; }
         role = 'guest'; server = s; clientId = nextClientId++;
+        playerId = String(m.playerId ?? m.name ?? 'Player').slice(0, 80);
         s.guests.set(clientId, ws);
-        send(ws, { t: 'joined', id: s.id, clientId, info: { name: s.info.name, host: s.info.host, motd: s.info.motd, gameMode: s.info.gameMode, maxPlayers: s.info.maxPlayers, official: s.official } });
-        send(s.ws, { t: 'guestJoined', from: clientId, name: String(m.name ?? 'Player').slice(0, 16), skin: m.skin });
+        send(ws, { t: 'joined', id: s.id, clientId, info: { name: s.info.name, host: s.official ? '' : s.info.host, motd: s.info.motd, gameMode: s.info.gameMode, maxPlayers: s.info.maxPlayers, official: s.official } });
+        send(s.ws, { t: 'guestJoined', from: clientId, playerId, name: String(m.name ?? 'Player').slice(0, 16), skin: m.skin });
         break;
       }
       case 'msg': { // envelope: { t:'msg', to?, d: payload }
@@ -209,7 +216,15 @@ wss.on('connection', (ws) => {
           const to = m.to;
           if (!to) { const text = JSON.stringify(d); for (const g of server.guests.values()) if (g.readyState === 1) g.send(text); }
           else send(server.guests.get(to), d);
-        } else if (role === 'guest' && server) { d.from = clientId; send(server.ws, d); }
+        } else if (role === 'guest' && server) {
+          // The backend owns official-world player records. Saving here means a guest's inventory is never
+          // dependent on the coordinator flushing it, and can never become the coordinator's inventory.
+          if (server.official && d.t === 'move' && d.saved && playerId) {
+            official.playerData[playerId] = d.saved;
+            official.dirty = true;
+          }
+          d.from = clientId; send(server.ws, d);
+        }
         break;
       }
       case 'kick': { if (role === 'host' && server) { const g = server.guests.get(m.id); if (g) { send(g, { t: 'kicked', reason: m.reason ?? 'Kicked by the host' }); g.close(); } } break; }
@@ -222,9 +237,9 @@ wss.on('connection', (ws) => {
       servers.delete(server.id);
       if (server.official) {
         saveOfficial();
-        // the world lives on: everyone reconnects and the first one back becomes the new host
-        for (const g of server.guests.values()) { send(g, { t: 'rehost', id: OFFICIAL_ID, reason: 'The host left — reconnecting to the public world…' }); g.close(); }
-        console.log('[relay] public world host left; world saved');
+        // The backend-owned world lives on and automatically selects another live-simulation coordinator.
+        for (const g of server.guests.values()) { send(g, { t: 'rehost', id: OFFICIAL_ID, reason: 'Reconnecting to the public world…' }); g.close(); }
+        console.log('[relay] public world coordinator changed; world saved');
       } else {
         for (const g of server.guests.values()) { send(g, { t: 'kicked', reason: 'The host closed the world.' }); g.close(); }
         console.log(`[relay] closed ${server.id}`);
