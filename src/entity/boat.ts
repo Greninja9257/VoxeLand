@@ -25,6 +25,7 @@ export class BoatEntity extends Entity {
   paddlePos = [0, 0]; prevPaddlePos = [0, 0];
   bubbleAngle = 0;
   outOfControl = 0;
+  private passengerSeats = new Map<Entity, number>();
 
   constructor(wood = 'oak', chest = false) {
     super();
@@ -129,16 +130,29 @@ export class BoatEntity extends Entity {
   }
 
   // ---- passengers ----
-  addPassenger(e: Entity): boolean {
+  passengerIndex(e: Entity): number { return this.passengerSeats.get(e) ?? this.passengers.indexOf(e); }
+  addPassenger(e: Entity, requestedSeat?: number): boolean {
+    if (e.vehicle === this) return true;
     if (this.passengers.length >= this.maxPassengers || e.vehicle) return false;
-    this.passengers.push(e); e.vehicle = this;
+    const used = new Set(this.passengerSeats.values());
+    const seat = requestedSeat !== undefined && requestedSeat >= 0 && requestedSeat < this.maxPassengers && !used.has(requestedSeat)
+      ? requestedSeat
+      : Array.from({ length: this.maxPassengers }, (_, i) => i).find((i) => !used.has(i));
+    if (seat === undefined) return false;
+    this.passengers.push(e); this.passengerSeats.set(e, seat); e.vehicle = this;
     this.positionPassengers();
     e.prevX = e.x; e.prevY = e.y; e.prevZ = e.z;
     return true;
   }
-  ejectPassenger(e: Entity): void {
+  detachPassenger(e: Entity): boolean {
+    if (!this.passengers.includes(e)) return false;
     this.passengers = this.passengers.filter((p) => p !== e);
-    e.vehicle = null;
+    this.passengerSeats.delete(e);
+    if (e.vehicle === this) e.vehicle = null;
+    return true;
+  }
+  ejectPassenger(e: Entity): void {
+    if (!this.detachPassenger(e)) return;
     // vanilla dismount: put the passenger beside the boat on solid ground if possible
     const yaw = this.yaw * Math.PI / 180;
     const sx = Math.cos(yaw), sz = Math.sin(yaw);
@@ -150,18 +164,21 @@ export class BoatEntity extends Entity {
     e.setPos(this.x, this.y + this.height, this.z); e.vy = 0;
   }
   ejectPassengers(): void { for (const p of [...this.passengers]) this.ejectPassenger(p); }
+  passengerPosition(e: Entity, x = this.x, y = this.y, z = this.z, yawDeg = this.yaw): [number, number, number] {
+    const seat = this.passengerIndex(e);
+    let fwd = this.passengers.length > 1 ? (seat === 0 ? 0.2 : -0.6) : 0;
+    if (this.isRaft) fwd += 0.2;
+    const rideOff = e instanceof Player ? -0.35 : 0;
+    const yaw = yawDeg * Math.PI / 180;
+    return [x + -Math.sin(yaw) * fwd, y + (this.isRaft ? 0.3 : -0.1) + rideOff, z + Math.cos(yaw) * fwd];
+  }
   positionPassengers(): void {
-    const yaw = this.yaw * Math.PI / 180;
-    this.passengers.forEach((e, i) => {
-      // vanilla: front passenger at +0.2 forward (or 0), second at -0.6; y = boat y - 0.1 + rider offset (player -0.35)
-      let fwd = this.passengers.length > 1 ? (i === 0 ? 0.2 : -0.6) : 0;
-      if (this.isRaft) fwd += 0.2;
-      // vanilla: boat.getPassengersRidingOffset (-0.1, raft 0.3) + passenger.getMyRidingOffset (player -0.35)
-      const rideOff = e instanceof Player ? -0.35 : 0;
-      const yOff = (this.isRaft ? 0.3 : -0.1) + rideOff;
-      const x = this.x + -Math.sin(yaw) * fwd, z = this.z + Math.cos(yaw) * fwd;
+    this.passengers.forEach((e) => {
+      // Vanilla attachment point: front passenger at +0.2 (or centred alone), second at -0.6;
+      // boat/raft riding height plus the player's -0.35 vehicle attachment offset.
+      const [x, y, z] = this.passengerPosition(e);
       e.prevX = e.x; e.prevY = e.y; e.prevZ = e.z;
-      e.x = x; e.y = this.y + yOff; e.z = z; e.updateBB();
+      e.x = x; e.y = y; e.z = z; e.updateBB();
       e.vx = 0; e.vy = 0; e.vz = 0;
       e.onGround = true; e.fallDistance = 0;
     });

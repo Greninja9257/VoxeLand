@@ -277,7 +277,7 @@ export class Player extends LivingEntity {
     if (this.vehicle instanceof BoatEntity) {
       const b = this.vehicle;
       this.isSneaking = false; this.isSprinting = false; this.moveForward = this.moveStrafe = 0; this.jumping = false;
-      if (b.passengers[0] === this) { b.inputUp = fwd > 0; b.inputDown = fwd < 0; b.inputLeft = strafe > 0; b.inputRight = strafe < 0; }
+      if (b.passengerIndex(this) === 0) { b.inputUp = fwd > 0; b.inputDown = fwd < 0; b.inputLeft = strafe > 0; b.inputRight = strafe < 0; }
       const c = this.game.client;
       if (c && !(this as any).isRemote) { const key = `${fwd}|${strafe}`; if (key !== this.lastBoatInput) { this.lastBoatInput = key; c.send({ t: 'boatInput', up: fwd > 0, down: fwd < 0, left: strafe > 0, right: strafe < 0 }); } }
       if (sneak) { if (c) c.send({ t: 'dismount' }); else b.ejectPassenger(this); }

@@ -1148,7 +1148,14 @@ export class Game {
     const p = this.player, w = this.world, r = this.renderer;
     const partial = this.partial;
     const cam = r.camera;
-    const ex = p.prevX + (p.x - p.prevX) * partial, ey = p.prevY + (p.y - p.prevY) * partial + (p.prevCameraEye + (p.cameraEye - p.prevCameraEye) * partial), ez = p.prevZ + (p.z - p.prevZ) * partial;
+    let ex = p.prevX + (p.x - p.prevX) * partial, ey = p.prevY + (p.y - p.prevY) * partial, ez = p.prevZ + (p.z - p.prevZ) * partial;
+    if (p.vehicle instanceof BoatEntity) {
+      const b = p.vehicle;
+      const bx = b.prevX + (b.x - b.prevX) * partial, by = b.prevY + (b.y - b.prevY) * partial, bz = b.prevZ + (b.z - b.prevZ) * partial;
+      const byaw = b.prevYaw + ((((b.yaw - b.prevYaw) % 360) + 540) % 360 - 180) * partial;
+      [ex, ey, ez] = b.passengerPosition(p, bx, by, bz, byaw);
+    }
+    ey += p.prevCameraEye + (p.cameraEye - p.prevCameraEye) * partial;
     cam.yaw = p.yaw; cam.pitch = p.pitch;
     // fov: sprint & bow
     // vanilla getFieldOfViewModifier: sprint/fly 1.1, bow draw, speed effects; scaled by the FOV Effects option

@@ -187,7 +187,7 @@ export class NetClient implements WorldListener {
       case 'kicked': { this.disconnectReason = m.reason ?? 'Disconnected'; this.status = 'closed'; break; }
       case 'rehost': { this.disconnectReason = m.reason ?? 'Reconnecting…'; this.rehostId = m.id ?? null; this.status = 'closed'; break; }
       case 'pong': this.ping = Math.round(performance.now() - m.time); break;
-      case 'ride': { const v = m.id !== null ? this.entities.get(m.id) : null; if (v instanceof BoatEntity) { if (p.vehicle !== v) { p.vehicle = v; if (!v.passengers.includes(p)) v.passengers.push(p); v.positionPassengers(); p.prevX = p.x; p.prevY = p.y; p.prevZ = p.z; } } else { const old = p.vehicle; if (old) { old.passengers = old.passengers.filter((x) => x !== p); p.vehicle = null; } if (m.x !== undefined) { p.setPos(m.x, m.y, m.z); p.vy = 0; } } break; }
+      case 'ride': { const v = m.id !== null ? this.entities.get(m.id) : null; if (v instanceof BoatEntity) { if (p.vehicle !== v) { if (p.vehicle instanceof BoatEntity) p.vehicle.detachPassenger(p); v.addPassenger(p, m.seat); } } else { if (p.vehicle instanceof BoatEntity) p.vehicle.detachPassenger(p); if (m.x !== undefined) { p.setPos(m.x, m.y, m.z); p.vy = 0; } } break; }
     }
   }
 
@@ -216,7 +216,7 @@ export class NetClient implements WorldListener {
 
   private applyEntities(list: any[], rm: number[]): void {
     const g = this.game;
-    for (const id of rm) { const e = this.entities.get(id); if (e) { e.remove(); this.entities.delete(id); } }
+    for (const id of rm) { const e = this.entities.get(id); if (e) { if (e.vehicle instanceof BoatEntity) e.vehicle.detachPassenger(e); e.remove(); this.entities.delete(id); } }
     for (const s of list) {
       let e: Entity | undefined = this.entities.get(s.i);
       if (!e) {
@@ -234,6 +234,18 @@ export class NetClient implements WorldListener {
         if (s.held !== undefined) { e.inventory.slots[e.selectedSlot] = s.held ? ItemStack.deserialize(s.held, g.items) : null; }
         if (s.armor) e.armor.deserialize(s.armor, g.items);
       } else e.applySnapshot(s);
+    }
+    this.reconcileRemotePassengers();
+  }
+
+  private reconcileRemotePassengers(): void {
+    for (const e of this.entities.values()) {
+      if (!(e instanceof RemotePlayer)) continue;
+      const wanted = e.remoteVehicleId === null ? null : this.entities.get(e.remoteVehicleId);
+      const boat = wanted instanceof BoatEntity ? wanted : null;
+      const wrongSeat = boat !== null && e.vehicle === boat && boat.passengerIndex(e) !== e.remoteVehicleSeat;
+      if ((e.vehicle !== boat || wrongSeat) && e.vehicle instanceof BoatEntity) e.vehicle.detachPassenger(e);
+      if (boat && e.vehicle !== boat) boat.addPassenger(e, e.remoteVehicleSeat);
     }
   }
 

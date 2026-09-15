@@ -13,6 +13,8 @@ export class RemotePlayer extends Player {
   /** last full player state reported by the guest (persisted by the host) */
   lastSaved: any = null;
   skin: 'steve' | 'alex' = 'steve';
+  remoteVehicleId: number | null = null;
+  remoteVehicleSeat = -1;
   constructor(name: string) { super(); this.name = name; this.cheats = false; }
 
   applySnapshot(s: any): void {
@@ -22,6 +24,8 @@ export class RemotePlayer extends Player {
     if (s.swim !== undefined) this.swimmingPose = !!s.swim;
     if (s.sleep !== undefined) this.sleeping = !!s.sleep;
     if (s.fly !== undefined) this.flying = !!s.fly;
+    if (s.vid !== undefined) this.remoteVehicleId = Number.isInteger(s.vid) ? s.vid : null;
+    if (s.seat !== undefined) this.remoteVehicleSeat = Number.isInteger(s.seat) ? s.seat : -1;
     if (s.health !== undefined) this.health = s.health;
     if (s.slot !== undefined) this.selectedSlot = s.slot;
     if (s.mode) this.gameMode = s.mode;

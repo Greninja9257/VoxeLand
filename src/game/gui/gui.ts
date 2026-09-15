@@ -13,6 +13,18 @@ import { lookDir } from '../../math';
 
 export interface ChatLine { text: string; time: number }
 
+/** java.util.Random-compatible sequence used by vanilla's HUD after setSeed(tick * 312871). */
+function vanillaHudRandom(seed: number): () => number {
+  const multiplier = 0x5deece66dn, addend = 0xbn, mask = (1n << 48n) - 1n;
+  let state = (BigInt(Math.trunc(seed)) ^ multiplier) & mask;
+  const next = (bits: number) => { state = (state * multiplier + addend) & mask; return Number(state >> BigInt(48 - bits)); };
+  return () => {
+    let bits: number, value: number;
+    do { bits = next(31); value = bits % 3; } while (bits - value + 2 >= 0x80000000);
+    return value;
+  };
+}
+
 export class Gui {
   ctx: CanvasRenderingContext2D;
   font = new MinecraftFont();
@@ -373,7 +385,9 @@ export class Gui {
         if (armor > 0) for (let i = 0; i < 10; i++) { const x = left + i * 8, y = top - rows * rowH + (rows > 1 ? 0 : 0) - (rows === 1 ? 10 : 10 - (rows - 1) * (10 - rowH)); this.drawSprite(ctx, `gui/sprites/hud/armor_${armor > i * 2 + 1 ? 'full' : armor === i * 2 + 1 ? 'half' : 'empty'}`, x, y, 9, 9); }
         // food
         const hunger = p.hasEffect('hunger') ? '_hunger' : '';
-        for (let i = 0; i < 10; i++) { const x = cx + 91 - 9 - i * 8, y = top + (p.saturation <= 0 && g.world.time % 10 < 3 ? Math.floor(Math.random() * 3) - 1 : 0); this.drawSprite(ctx, `gui/sprites/hud/food_empty${hunger}`, x, y, 9, 9); if (p.foodLevel > i * 2 + 1) this.drawSprite(ctx, `gui/sprites/hud/food_full${hunger}`, x, y, 9, 9); else if (p.foodLevel === i * 2 + 1) this.drawSprite(ctx, `gui/sprites/hud/food_half${hunger}`, x, y, 9, 9); }
+        const shakeFood = p.saturation <= 0 && g.world.time % (p.foodLevel * 3 + 1) === 0;
+        const foodRandom = vanillaHudRandom(g.world.time * 312871);
+        for (let i = 0; i < 10; i++) { const x = cx + 91 - 9 - i * 8, y = top + (shakeFood ? foodRandom() - 1 : 0); this.drawSprite(ctx, `gui/sprites/hud/food_empty${hunger}`, x, y, 9, 9); if (p.foodLevel > i * 2 + 1) this.drawSprite(ctx, `gui/sprites/hud/food_full${hunger}`, x, y, 9, 9); else if (p.foodLevel === i * 2 + 1) this.drawSprite(ctx, `gui/sprites/hud/food_half${hunger}`, x, y, 9, 9); }
         // air
         if (p.eyeInWater || p.air < p.maxAir) { const bubbles = Math.ceil((p.air - 2) * 10 / p.maxAir); const popping = Math.ceil(p.air * 10 / p.maxAir) - bubbles; for (let i = 0; i < bubbles + popping; i++) { const x = cx + 91 - 9 - i * 8, y = top - 10; this.drawSprite(ctx, i < bubbles ? 'gui/sprites/hud/air' : 'gui/sprites/hud/air_bursting', x, y, 9, 9); } }
         // xp bar

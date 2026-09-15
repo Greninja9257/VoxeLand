@@ -250,7 +250,7 @@ export class NetHost implements WorldListener {
         if (!e || e.removed || e.distSq(p.x, p.y, p.z) > 36) break;
         const held = m.held ? ItemStack.deserialize(m.held, g.items) : null; p.inventory.slots[p.selectedSlot] = held;
         if (e instanceof Mob) { if (e.interact(p, held)) this.send(gu.id, { t: 'consumed', held: p.heldItem()?.serialize() ?? null }); }
-        else if (e instanceof BoatEntity) { if (e.interact(p, held) && p.vehicle === e) this.send(gu.id, { t: 'ride', id: e.id }); }
+        else if (e instanceof BoatEntity) { if (e.interact(p, held) && p.vehicle === e) this.send(gu.id, { t: 'ride', id: e.id, seat: e.passengerIndex(p) }); }
         break;
       }
       case 'drop': { const st = ItemStack.deserialize(m.stack, g.items); if (st) { const dir = m.dir ?? [0, 0, 0]; const e = g.dropItem(m.x, m.y, m.z, st, [dir[0], dir[1], dir[2]]); if (e) { e.pickupDelay = 40; e.thrower = p.uuid; } } break; }
@@ -267,7 +267,7 @@ export class NetHost implements WorldListener {
       case 'sleep': { if (m.sleeping) { p.sleeping = true; } else p.sleeping = false; this.checkSleep(); break; }
       case 'xp': { const e = g.entities.find((x) => x.id === m.id); if (e instanceof ExperienceOrb && !e.removed) { this.send(gu.id, { t: 'givexp', v: e.value }); e.remove(); } break; }
       case 'spawn': this.remoteSpawn(gu, m); break;
-      case 'boatInput': { const b = p.vehicle; if (b instanceof BoatEntity && b.passengers[0] === p) { b.inputUp = !!m.up; b.inputDown = !!m.down; b.inputLeft = !!m.left; b.inputRight = !!m.right; } break; }
+      case 'boatInput': { const b = p.vehicle; if (b instanceof BoatEntity && b.passengerIndex(p) === 0) { b.inputUp = !!m.up; b.inputDown = !!m.down; b.inputLeft = !!m.left; b.inputRight = !!m.right; } break; }
       case 'dismount': { const b = p.vehicle; if (b instanceof BoatEntity) { b.ejectPassenger(p); this.send(gu.id, { t: 'ride', id: null, x: p.x, y: p.y, z: p.z }); } break; }
       case 'ping': this.send(gu.id, { t: 'pong', time: m.time }); break;
     }
@@ -406,7 +406,8 @@ export class NetHost implements WorldListener {
       const R2 = 96 * 96;
       // host player as an entity
       const hp = g.player;
-      const hostSnap: any = { i: -1, pid: -1, t: 'player', x: r3(hp.x), y: r3(hp.y), z: r3(hp.z), yaw: r1(hp.yaw), pitch: r1(hp.pitch), sneak: hp.isSneaking, sprint: hp.isSprinting, swim: hp.swimmingPose, sleep: hp.sleeping, fly: hp.flying, hurt: hp.hurtTime > 0, dead: hp.health <= 0, swing: hp.swinging && hp.swingTime <= 1, use: !!hp.usingItem, mode: hp.gameMode, br: hp.breaking ? { x: hp.breaking.x, y: hp.breaking.y, z: hp.breaking.z, stage: hp.breakStage, state: hp.breaking.state } : null };
+      const hostBoat = hp.vehicle instanceof BoatEntity ? hp.vehicle : null;
+      const hostSnap: any = { i: -1, pid: -1, t: 'player', x: r3(hp.x), y: r3(hp.y), z: r3(hp.z), yaw: r1(hp.yaw), pitch: r1(hp.pitch), sneak: hp.isSneaking, sprint: hp.isSprinting, swim: hp.swimmingPose, sleep: hp.sleeping, fly: hp.flying, hurt: hp.hurtTime > 0, dead: hp.health <= 0, swing: hp.swinging && hp.swingTime <= 1, use: !!hp.usingItem, mode: hp.gameMode, vid: hostBoat?.id ?? null, seat: hostBoat?.passengerIndex(hp) ?? -1, br: hp.breaking ? { x: hp.breaking.x, y: hp.breaking.y, z: hp.breaking.z, stage: hp.breakStage, state: hp.breaking.state } : null };
       if (!gu.known.has(-1)) { hostSnap.full = { name: this.hostName, skin: g.options.skin }; gu.known.add(-1); }
       if (this.ticks % 10 === 0) hostSnap.held = hp.heldItem()?.serialize() ?? null, hostSnap.armor = hp.armor.serialize();
       ents.push(hostSnap); seen.add(-1);
@@ -426,7 +427,8 @@ export class NetHost implements WorldListener {
     const first = !gu.known.has(e.id);
     const s: any = { i: e.id, x: r3(e.x), y: r3(e.y), z: r3(e.z), yaw: r1(e.yaw), pitch: r1(e.pitch) };
     if (e instanceof RemotePlayer) {
-      s.t = 'player'; s.pid = e.clientId; s.sneak = e.isSneaking; s.sprint = e.isSprinting; s.swim = e.swimmingPose; s.sleep = e.sleeping; s.fly = e.flying; s.hurt = e.hurtTime > 0; s.dead = e.health <= 0; s.swing = e.swinging && e.swingTime <= 1; s.mode = e.gameMode; s.use = !!e.usingItem; s.br = e.breaking ? { x: e.breaking.x, y: e.breaking.y, z: e.breaking.z, stage: e.breakStage, state: e.breaking.state } : null;
+      const boat = e.vehicle instanceof BoatEntity ? e.vehicle : null;
+      s.t = 'player'; s.pid = e.clientId; s.sneak = e.isSneaking; s.sprint = e.isSprinting; s.swim = e.swimmingPose; s.sleep = e.sleeping; s.fly = e.flying; s.hurt = e.hurtTime > 0; s.dead = e.health <= 0; s.swing = e.swinging && e.swingTime <= 1; s.mode = e.gameMode; s.use = !!e.usingItem; s.vid = boat?.id ?? null; s.seat = boat?.passengerIndex(e) ?? -1; s.br = e.breaking ? { x: e.breaking.x, y: e.breaking.y, z: e.breaking.z, stage: e.breakStage, state: e.breaking.state } : null;
       if (first) s.full = { name: e.name, skin: e.skin };
       if (this.ticks % 10 === 0 || first) { s.held = e.heldItem()?.serialize() ?? null; s.armor = e.armor.serialize(); }
     } else if (e instanceof Mob) {
