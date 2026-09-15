@@ -43,7 +43,7 @@ void main() {
   if (tex.a < uAlphaCut) discard;
   vec2 lc = vLight;
   if (uLightOverride >= 0.0) { lc = vec2(mod(uLightOverride, 16.0), floor(uLightOverride / 16.0)); }
-  vec3 light = texture(uLightmap, (floor(lc) + 0.5) / 16.0).rgb;
+  vec3 light = texture(uLightmap, (lc + 0.5) / 16.0).rgb;
   vec3 col = tex.rgb * vColor * light * uColorMul.rgb;
   float fog = clamp((vDist - uFogRange.x) / (uFogRange.y - uFogRange.x), 0.0, 1.0);
   fragColor = vec4(mix(col, uFogColor.rgb, fog * uFogColor.a), tex.a * uColorMul.a);
