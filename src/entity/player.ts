@@ -521,7 +521,7 @@ export class Player extends LivingEntity {
           // multiplayer guest: the host runs the interaction (and opens container GUIs for us); simple toggles are also
           // predicted locally so doors/buttons feel instant
           const n = reg.nameOf(state);
-          g.client.send({ t: 'use', x: hit.x, y: hit.y, z: hit.z, face: hit.face, hit: [hit.hx, hit.hy, hit.hz] });
+          g.client.send({ t: 'use', x: hit.x, y: hit.y, z: hit.z, face: hit.face, hit: [hit.hx, hit.hy, hit.hz], held: held?.serialize() ?? null });
           if (HOST_ONLY_BLOCKS.test(n)) { this.useCooldown = 4; this.swing(); return true; }
         }
         if (useBlock(g, hit.x, hit.y, hit.z, state, hit.face, [hit.hx, hit.hy, hit.hz], this)) { this.useCooldown = 4; this.swing(); return true; }

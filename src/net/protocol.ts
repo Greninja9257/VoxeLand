@@ -5,7 +5,7 @@
 //   guest -> relay: [payload]           relay -> host: [u32 fromClientId] [payload]
 // Payload: [u8 kind] [u32 jsonLength] [json utf8] [binary body]
 
-export const PROTOCOL_VERSION = 9;
+export const PROTOCOL_VERSION = 10;
 
 const GUEST_MESSAGE_TYPES = new Set(['ready', 'move', 'inv', 'chunk', 'set', 'break', 'use', 'attack', 'snd', 'interact', 'drop', 'chat', 'death', 'cont', 'close', 'respawn', 'sleep', 'xp', 'spawn', 'boatInput', 'dismount', 'ping']);
 

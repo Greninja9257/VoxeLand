@@ -8,8 +8,7 @@ import { Entity, LivingEntity, ItemEntity, ExperienceOrb } from '../entity/entit
 import { Mob } from '../entity/mobs';
 import { BoatEntity } from '../entity/boat';
 import { ArrowEntity, FallingBlockEntity, PrimedTnt, ThrownProjectile } from '../entity/misc';
-import { Inventory } from '../items/stack';
-import { useBlock } from '../blocks/interaction';
+import { Inventory, ItemStack } from '../items/stack';
 import type { WorldListener } from '../world/world';
 import { encodeChunk, packFrame, FRAME_CHUNK, PROTOCOL_VERSION, TARGET_SERVER, defaultRelayUrl, isGuestMessage } from './protocol';
 import type { Chunk } from '../world/chunk';
@@ -242,7 +241,11 @@ export class NetHost implements WorldListener {
         p.continueBreaking(hit && hit.x === target.x && hit.y === target.y && hit.z === target.z ? hit : null);
         break;
       }
-      case 'inv': // Inventory/equipment are host-owned; this legacy mirror packet is intentionally ignored.
+      case 'inv': // Creative players may choose any item; survival inventory stays host-authoritative.
+        if (p.isCreative) {
+          const held = m.held ? ItemStack.deserialize(m.held, g.items) : null;
+          if (!held || held.count > 0) p.inventory.slots[p.selectedSlot] = held;
+        }
         this.send(gu.id, { t: 'self', mode: p.gameMode, state: this.playerState(p) });
         break;
       case 'chunk': for (const k of m.keys as number[]) gu.wantChunks.add(k); break;
@@ -254,8 +257,16 @@ export class NetHost implements WorldListener {
       }
       case 'break': {
         const { x, y, z } = m;
-        // Completion is determined by continueBreaking above. This packet merely asks for reconciliation.
-        if ([x, y, z].every(Number.isInteger) && w.isLoaded(x, z)) this.send(gu.id, { t: 'blk', b: [x, y, z, w.getBlock(x, y, z)] });
+        if (![x, y, z].every(Number.isInteger) || !w.isLoaded(x, z)) break;
+        if (p.distSq(x + 0.5, y + 0.5, z + 0.5) <= 64) {
+          const state = w.getBlock(x, y, z);
+          const breaking = p.breaking;
+          if (state && (p.isCreative || (!!breaking && breaking.x === x && breaking.y === y && breaking.z === z))) {
+            g.breakBlock(x, y, z, p, !p.isCreative, false); p.breaking = null; p.breakCooldown = 5;
+            this.broadcast({ t: 'breakFx', x, y, z, s: state });
+          }
+        }
+        this.send(gu.id, { t: 'blk', b: [x, y, z, w.getBlock(x, y, z)] });
         break;
       }
       case 'use': this.remoteUse(gu, m); break;
@@ -309,7 +320,7 @@ export class NetHost implements WorldListener {
       case 'close': { if (gu.container) { gu.container.onClose?.(); gu.container = null; } break; }
       case 'respawn': { if (p.health <= 0 || p.isDead) { p.health = 20; p.isDead = false; p.deathTime = 0; p.setPos(g.worldSpawn[0] + 0.5, g.worldSpawn[1], g.worldSpawn[2] + 0.5); this.send(gu.id, { t: 'correct', x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch }); } break; }
       case 'sleep': { if (m.sleeping) { p.sleeping = true; } else p.sleeping = false; this.checkSleep(); break; }
-      case 'xp': { const e = g.entities.find((x) => x.id === m.id); if (e instanceof ExperienceOrb && !e.removed) { this.send(gu.id, { t: 'givexp', v: e.value }); e.remove(); } break; }
+      case 'xp': { const e = g.entities.find((x) => x.id === m.id); if (e instanceof ExperienceOrb && !e.removed && e.distSq(p.x, p.y + 0.9, p.z) <= 2.25) { p.addXp(e.value); this.send(gu.id, { t: 'givexp', v: e.value }); e.remove(); } break; }
       case 'spawn': this.remoteSpawn(gu, m); break;
       case 'boatInput': { const b = p.vehicle; if (b instanceof BoatEntity && b.passengerIndex(p) === 0) { b.inputUp = !!m.up; b.inputDown = !!m.down; b.inputLeft = !!m.left; b.inputRight = !!m.right; } break; }
       case 'dismount': { const b = p.vehicle; if (b instanceof BoatEntity) { b.ejectPassenger(p); this.send(gu.id, { t: 'ride', id: null, x: p.x, y: p.y, z: p.z }); } break; }
@@ -383,8 +394,14 @@ export class NetHost implements WorldListener {
   private remoteUse(gu: Guest, m: any): void {
     const g = this.game, p = gu.player, w = g.world;
     const { x, y, z, face, hit } = m;
-    if (!w.isLoaded(x, z) || p.distSq(x, y, z) > 64) return;
+    if (!w.isLoaded(x, z) || p.distSq(x, y, z) > 64 || !Number.isInteger(face) || !Array.isArray(hit) || hit.length !== 3 || !hit.every(Number.isFinite)) return;
     const state = w.getBlock(x, y, z);
+    // A creative inventory is intentionally unbounded, so the selected stack must accompany the action.
+    // Survival/adventure stacks remain authoritative on the host.
+    if (p.isCreative) {
+      const held = m.held ? ItemStack.deserialize(m.held, g.items) : null;
+      if (!held || held.count > 0) p.inventory.slots[p.selectedSlot] = held;
+    }
     const realGui = g.gui;
     const self = this;
     const opened: any[] = [];
@@ -406,7 +423,7 @@ export class NetHost implements WorldListener {
       },
     });
     (g as any).gui = proxy;
-    try { useBlock(g, x, y, z, state, face, hit, p); }
+    try { p.use({ x, y, z, face, hx: hit[0], hy: hit[1], hz: hit[2], t: Math.sqrt(p.distSq(x + hit[0], y + hit[1], z + hit[2])), state }); }
     finally { (g as any).gui = realGui; }
     for (const o of opened) {
       if (o.kind === 'container') { if (gu.container) gu.container.onClose?.(); gu.container = { x, y, z, inv: o.inv, onClose: o.onClose }; this.send(gu.id, { t: 'open', kind: 'container', x, y, z, title: o.titleKey, rows: o.rows, cols: o.cols, slots: o.inv.serialize() }); }
@@ -475,11 +492,17 @@ export class NetHost implements WorldListener {
       if (e instanceof ItemEntity) {
         if (e.pickupDelay > 0 || e.age < 10) continue;
         if (e.distSq(p.x, p.y + 0.9, p.z) > 1.8) continue;
-        this.send(gu.id, { t: 'give', stack: e.stack.serialize(), x: e.x, y: e.y, z: e.z });
-        e.remove();
+        const offered = e.stack.count;
+        const incoming = e.stack.clone();
+        const left = p.inventory.add(incoming);
+        const accepted = offered - left;
+        if (accepted <= 0) continue;
+        const picked = e.stack.clone(); picked.count = accepted;
+        this.send(gu.id, { t: 'give', stack: picked.serialize(), x: e.x, y: e.y, z: e.z });
+        if (left > 0) e.stack.count = left; else e.remove();
       } else if (e instanceof ExperienceOrb) {
         if (e.distSq(p.x, p.y + 0.9, p.z) > 1.5) continue;
-        this.send(gu.id, { t: 'givexp', v: e.value }); e.remove();
+        p.addXp(e.value); this.send(gu.id, { t: 'givexp', v: e.value }); e.remove();
       }
     }
   }
