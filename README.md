@@ -1,8 +1,6 @@
 <h1 align="center">VoxeLand<br>
 <sub><sup><font color="gray">/ˈvɒk.si.lænd/</font></sup></sub>
 </h1>
-
-<br>
 <div align="center">
 
 ### Minecraft-inspired survival, rebuilt for the browser
