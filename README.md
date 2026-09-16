@@ -3,7 +3,6 @@
 </h1>
 
 <br>
-
 <div align="center">
 
 ### Minecraft-inspired survival, rebuilt for the browser
