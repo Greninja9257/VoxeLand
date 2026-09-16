@@ -5,9 +5,23 @@
 //   guest -> relay: [payload]           relay -> host: [u32 fromClientId] [payload]
 // Payload: [u8 kind] [u32 jsonLength] [json utf8] [binary body]
 
-export const PROTOCOL_VERSION = 10;
+export const PROTOCOL_VERSION = 16;
 
-const GUEST_MESSAGE_TYPES = new Set(['ready', 'move', 'inv', 'chunk', 'set', 'break', 'use', 'attack', 'snd', 'interact', 'drop', 'chat', 'death', 'cont', 'close', 'respawn', 'sleep', 'xp', 'spawn', 'boatInput', 'dismount', 'ping']);
+/** A successful acknowledgement older than locally submitted clicks must not roll them back. */
+export function shouldApplyInventoryState(currentRevision: number, incomingRevision: number, accepted: boolean): boolean {
+  return !accepted || incomingRevision >= currentRevision;
+}
+
+/** Separate a wire stack's quantity from its identity for transaction conservation checks. */
+export function serializedStackIdentity(stack: Record<string, any>): { key: string; count: number } | null {
+  const count = stack.c;
+  if (!Number.isInteger(count) || count <= 0) return null;
+  const identity = { ...stack };
+  delete identity.c;
+  return { key: JSON.stringify(identity), count };
+}
+
+const GUEST_MESSAGE_TYPES = new Set(['ready', 'move', 'inv', 'invTxn', 'contTxn', 'chunk', 'set', 'break', 'use', 'attack', 'snd', 'interact', 'drop', 'chat', 'death', 'cont', 'craft', 'close', 'respawn', 'sleep', 'xp', 'spawn', 'boatInput', 'dismount', 'ping']);
 
 /** Cheap boundary validation before an untrusted guest message reaches world logic. */
 export function isGuestMessage(m: unknown): m is Record<string, any> {
@@ -17,6 +31,9 @@ export function isGuestMessage(m: unknown): m is Record<string, any> {
   if (v.t === 'chat' && (typeof v.text !== 'string' || v.text.length > 256)) return false;
   if (v.t === 'chunk' && (!Array.isArray(v.keys) || v.keys.length > 256 || !v.keys.every(Number.isInteger))) return false;
   if (v.t === 'move' && ![v.x, v.y, v.z, v.yaw, v.pitch].every(Number.isFinite)) return false;
+  if (v.t === 'craft' && (typeof v.id !== 'string' || v.id.length > 256 || typeof v.all !== 'boolean')) return false;
+  if (v.t === 'invTxn' && (!Number.isInteger(v.rev) || !Array.isArray(v.inventory) || !Array.isArray(v.armor) || !Array.isArray(v.offhand) || !Array.isArray(v.grid))) return false;
+  if (v.t === 'contTxn' && (!Number.isInteger(v.rev) || !Array.isArray(v.inventory) || !Array.isArray(v.armor) || !Array.isArray(v.offhand) || !Array.isArray(v.slots))) return false;
   if (['set', 'break', 'use'].includes(v.t)) {
     const xyz = v.t === 'set' ? v.b?.slice?.(0, 3) : [v.x, v.y, v.z];
     if (!Array.isArray(xyz) || xyz.length !== 3 || !xyz.every(Number.isInteger)) return false;

@@ -10,7 +10,7 @@ import { BoatEntity } from '../entity/boat';
 import { ArrowEntity, FallingBlockEntity, PrimedTnt, ThrownProjectile } from '../entity/misc';
 import { Inventory, ItemStack } from '../items/stack';
 import type { WorldListener } from '../world/world';
-import { encodeChunk, packFrame, FRAME_CHUNK, PROTOCOL_VERSION, TARGET_SERVER, defaultRelayUrl, isGuestMessage } from './protocol';
+import { encodeChunk, packFrame, FRAME_CHUNK, PROTOCOL_VERSION, TARGET_SERVER, defaultRelayUrl, isGuestMessage, serializedStackIdentity } from './protocol';
 import type { Chunk } from '../world/chunk';
 
 interface Guest {
@@ -23,6 +23,10 @@ interface Guest {
   ridingSent?: boolean;
   lastMoveTick: number;
   movementViolations: number;
+  craftingSize: 2 | 3;
+  inventoryRevision: number;
+  crafting: Inventory;
+  cursor: Inventory;
 }
 
 export interface HostOptions {
@@ -112,7 +116,7 @@ export class NetHost implements WorldListener {
   }
 
   /** Public world: push changed chunks and world meta to the backend so it survives us leaving. */
-  private uploadWorld(): void {
+  private uploadWorld(maxChunks = 8, includeMeta = true): void {
     const g = this.game;
     if (!this.ws || this.ws.readyState !== 1) return;
     let sent = 0;
@@ -125,8 +129,9 @@ export class NetHost implements WorldListener {
       const out = new Uint8Array(4 + payload.length);
       new DataView(out.buffer).setUint32(0, TARGET_SERVER, true); out.set(payload, 4);
       this.ws.send(out);
-      if (++sent >= 8) break;   // trickle: at most 8 chunks per upload tick
+      if (++sent >= maxChunks) break;
     }
+    if (!includeMeta) return;
     const playerData: Record<string, any> = {};
     for (const gu of this.guests.values()) if (gu.player.lastSaved) playerData[gu.playerId] = gu.player.lastSaved;
     playerData[g.options.playerId] = g.player.serialize();
@@ -148,11 +153,12 @@ export class NetHost implements WorldListener {
       if (gu.container && this.ticks % 5 === 0) this.sendContainer(gu, false);
       if (this.ticks % 20 === 0) this.send(gu.id, { t: 'self', mode: gu.player.gameMode, state: this.playerState(gu.player) });
     }
-    if (this.ticks % 2 === 0) this.sendEntities();
+    if (this.ticks % 2 === 0) this.sendEntities(this.ticks % 4 === 0);
     if (this.official && this.ticks % 20 === 0 && this.ws?.readyState === 1) {
       this.ws.send(JSON.stringify({ t: 'playerState', playerId: g.options.playerId, saved: g.player.serialize() }));
     }
-    if (this.official && this.ticks % 100 === 0) this.uploadWorld();
+    // Smooth persistence work across ticks: encoding several full chunks in one frame caused a visible hitch.
+    if (this.official && this.ticks % 20 === 0) this.uploadWorld(1, this.ticks % 100 === 0);
     if (this.ticks % 20 === 0) this.broadcast({ t: 'time', time: g.world.time, day: g.world.dayTime, rain: g.weather.rainLevel, thunder: g.weather.thunderLevel, raining: g.weather.raining, thundering: g.weather.thundering, diff: g.difficulty });
   }
 
@@ -183,7 +189,7 @@ export class NetHost implements WorldListener {
     if (saved) { try { p.deserialize(saved); } catch { /* reject incompatible legacy state and use spawn */ } }
     p.setPos(saved?.x ?? spawn[0] + 0.5, saved?.y ?? spawn[1], saved?.z ?? spawn[2] + 0.5); p.tx = p.x; p.ty = p.y; p.tz = p.z;
     p.setGameMode(this.opts.gameMode as any);
-    const gu: Guest = { id, playerId, name, player: p, known: new Set(), chunks: new Set(), wantChunks: new Set(), container: null, ready: false, lastMoveTick: this.ticks, movementViolations: 0 };
+    const gu: Guest = { id, playerId, name, player: p, known: new Set(), chunks: new Set(), wantChunks: new Set(), container: null, ready: false, lastMoveTick: this.ticks, movementViolations: 0, craftingSize: 2, inventoryRevision: 0, crafting: new Inventory(4), cursor: new Inventory(1) };
     this.guests.set(id, gu);
     this.send(id, { t: 'welcome', name, hostName: this.official ? this.opts.name : this.hostName, dimension: g.world.dimension, seed: g.world.seed, time: g.world.time, dayTime: g.world.dayTime, spawn, saved: saved ?? null, gameMode: this.opts.gameMode, cheats: this.opts.cheats, difficulty: g.difficulty, rules: g.rules, weather: g.weather.serialize(), version: g.version, protocol: PROTOCOL_VERSION, players: this.playerList(), music: g.sounds.currentMusic() });
     g.gui.addChat(`§e${name} joined the game`);
@@ -234,11 +240,19 @@ export class NetHost implements WorldListener {
         const safe = { ...m, slot, br: undefined, health: undefined, mode: undefined, dead: undefined, fly: p.isCreative || p.isSpectator ? !!m.fly : false };
         if (p.vehicle) { p.tyaw = m.yaw; p.tpitch = m.pitch; p.applySnapshot({ ...safe, x: p.x, y: p.y, z: p.z }); }
         else p.applySnapshot(safe);
-        // The target is only a hint. The host raycasts and advances vanilla mining progress itself, so a guest
-        // cannot submit stage 9 immediately or mine through walls.
+        // Like vanilla's player-action packet, the target is an intent. Validate reach and advance mining using
+        // host-owned block/tool state; never trust the stage or state submitted by the guest.
         const target = m.br && [m.br.x, m.br.y, m.br.z].every(Number.isInteger) ? m.br : null;
-        const hit = target ? p.raycast() : null;
-        p.continueBreaking(hit && hit.x === target.x && hit.y === target.y && hit.z === target.z ? hit : null);
+        let hit: any = null;
+        if (target && w.isLoaded(target.x, target.z)) {
+          const state = w.getBlock(target.x, target.y, target.z);
+          const reach = p.isCreative ? 5 : p.reachDistance;
+          const ddx = target.x + 0.5 - m.x, ddy = target.y + 0.5 - (m.y + p.eyeHeight), ddz = target.z + 0.5 - m.z;
+          if (state && ddx * ddx + ddy * ddy + ddz * ddz <= (reach + 0.75) * (reach + 0.75)) {
+            hit = { x: target.x, y: target.y, z: target.z, face: Number.isInteger(target.face) ? target.face : 1, hx: 0.5, hy: 0.5, hz: 0.5, t: Math.sqrt(ddx * ddx + ddy * ddy + ddz * ddz), state };
+          }
+        }
+        p.continueBreaking(hit);
         break;
       }
       case 'inv': // Creative players may choose any item; survival inventory stays host-authoritative.
@@ -248,6 +262,8 @@ export class NetHost implements WorldListener {
         }
         this.send(gu.id, { t: 'self', mode: p.gameMode, state: this.playerState(p) });
         break;
+      case 'invTxn': this.inventoryTransaction(gu, m); break;
+      case 'contTxn': this.containerTransaction(gu, m); break;
       case 'chunk': for (const k of m.keys as number[]) gu.wantChunks.add(k); break;
       case 'set': { // Never accept a guest-selected final state or block-entity payload.
         const b = Array.isArray(m.b) ? m.b : [];
@@ -317,8 +333,29 @@ export class NetHost implements WorldListener {
         for (const other of this.guests.values()) if (other !== gu && other.container && other.container.x === gu.container.x && other.container.y === gu.container.y && other.container.z === gu.container.z) this.sendContainer(other, false);
         break;
       }
-      case 'close': { if (gu.container) { gu.container.onClose?.(); gu.container = null; } break; }
-      case 'respawn': { if (p.health <= 0 || p.isDead) { p.health = 20; p.isDead = false; p.deathTime = 0; p.setPos(g.worldSpawn[0] + 0.5, g.worldSpawn[1], g.worldSpawn[2] + 0.5); this.send(gu.id, { t: 'correct', x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch }); } break; }
+      case 'craft': this.remoteCraft(gu, m.id, m.all); break;
+      case 'close': {
+        if (gu.container) { gu.container.onClose?.(); gu.container = null; }
+        for (const stack of [...gu.crafting.slots, ...gu.cursor.slots]) if (stack) { const copy = stack.clone(); if (p.inventory.add(copy) > 0) g.dropItem(p.x, p.y + 0.5, p.z, copy); }
+        gu.craftingSize = 2; gu.crafting = new Inventory(4); gu.cursor = new Inventory(1); gu.inventoryRevision++;
+        break;
+      }
+      case 'respawn': {
+        if (p.health <= 0 || p.isDead) {
+          let spawn = p.spawnPos;
+          if (spawn && !p.spawnForced) {
+            const state = w.getBlock(spawn[0], spawn[1], spawn[2]);
+            if (!state || !reg.nameOf(state).endsWith('_bed')) spawn = null;
+          }
+          const target = spawn ?? g.worldSpawn;
+          p.health = p.maxHealth; p.isDead = false; p.removed = false; p.deathTime = 0;
+          p.foodLevel = 20; p.saturation = 5; p.exhaustion = 0; p.fireTicks = 0; p.effects = []; p.absorption = 0; p.air = 300; p.fallDistance = 0; p.vx = p.vy = p.vz = 0;
+          p.setPos(target[0] + 0.5, target[1], target[2] + 0.5);
+          p.tx = p.x; p.ty = p.y; p.tz = p.z; p.lerpSteps = 0;
+          this.send(gu.id, { t: 'correct', x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch });
+        }
+        break;
+      }
       case 'sleep': { if (m.sleeping) { p.sleeping = true; } else p.sleeping = false; this.checkSleep(); break; }
       case 'xp': { const e = g.entities.find((x) => x.id === m.id); if (e instanceof ExperienceOrb && !e.removed && e.distSq(p.x, p.y + 0.9, p.z) <= 2.25) { p.addXp(e.value); this.send(gu.id, { t: 'givexp', v: e.value }); e.remove(); } break; }
       case 'spawn': this.remoteSpawn(gu, m); break;
@@ -428,7 +465,7 @@ export class NetHost implements WorldListener {
     for (const o of opened) {
       if (o.kind === 'container') { if (gu.container) gu.container.onClose?.(); gu.container = { x, y, z, inv: o.inv, onClose: o.onClose }; this.send(gu.id, { t: 'open', kind: 'container', x, y, z, title: o.titleKey, rows: o.rows, cols: o.cols, slots: o.inv.serialize() }); }
       else if (o.kind === 'furnace' || o.kind === 'brewing') { if (gu.container) gu.container.onClose?.(); gu.container = { x, y, z, inv: o.be.inventory, be: o.be }; this.send(gu.id, { t: 'open', kind: o.kind, fkind: o.fkind, x, y, z, slots: o.be.inventory.serialize(), be: this.beState(o.be) }); }
-      else this.send(gu.id, { t: 'open', kind: o.kind, x, y, z });
+      else { if (o.kind === 'crafting') { gu.craftingSize = 3; gu.crafting = new Inventory(9); gu.cursor = new Inventory(1); } this.send(gu.id, { t: 'open', kind: o.kind, x, y, z }); }
     }
   }
   private beState(be: any): any { return { burnTime: be.burnTime ?? 0, burnTotal: be.burnTotal ?? 0, cookTime: be.cookTime ?? 0, cookTotal: be.cookTotal ?? 200, xp: be.xp ?? 0, brewTime: be.brewTime ?? 0, fuel: be.fuel ?? 0 }; }
@@ -446,8 +483,9 @@ export class NetHost implements WorldListener {
       for (const inv of inventories) for (const stack of inv.slots) {
         if (!stack) continue;
         if (!Number.isInteger(stack.count) || stack.count <= 0 || stack.count > stack.item.stackSize) return null;
-        const data = stack.serialize(); const amount = data.count; data.count = 1;
-        const key = JSON.stringify(data); totals.set(key, (totals.get(key) ?? 0) + amount);
+        const identity = serializedStackIdentity(stack.serialize());
+        if (!identity) return null;
+        totals.set(identity.key, (totals.get(identity.key) ?? 0) + identity.count);
       }
       return totals;
     };
@@ -455,6 +493,65 @@ export class NetHost implements WorldListener {
     if (!a || !b || a.size !== b.size) return false;
     for (const [key, amount] of a) if (b.get(key) !== amount) return false;
     return true;
+  }
+  private inventoryTransaction(gu: Guest, m: any): void {
+    const g = this.game, p = gu.player;
+    if (m.rev !== gu.inventoryRevision || m.gridSize !== gu.crafting.size) { this.sendInventoryState(gu); return; }
+    const inventory = new Inventory(p.inventory.size), armor = new Inventory(p.armor.size), offhand = new Inventory(p.offhand.size);
+    const grid = new Inventory(gu.crafting.size), cursor = new Inventory(1);
+    inventory.deserialize(m.inventory, g.items); armor.deserialize(m.armor, g.items); offhand.deserialize(m.offhand, g.items);
+    grid.deserialize(m.grid, g.items); cursor.deserialize([m.cursor], g.items);
+    if (!this.sameItems([p.inventory, p.armor, p.offhand, gu.crafting, gu.cursor], [inventory, armor, offhand, grid, cursor])) { this.sendInventoryState(gu); return; }
+    p.inventory.deserialize(m.inventory, g.items); p.armor.deserialize(m.armor, g.items); p.offhand.deserialize(m.offhand, g.items);
+    gu.crafting.deserialize(m.grid, g.items); gu.cursor.deserialize([m.cursor], g.items);
+    gu.inventoryRevision++;
+    this.sendInventoryState(gu, true);
+  }
+  private sendInventoryState(gu: Guest, accepted = false): void {
+    const p = gu.player;
+    this.send(gu.id, { t: 'invState', rev: gu.inventoryRevision, accepted, inventory: p.inventory.serialize(), armor: p.armor.serialize(), offhand: p.offhand.serialize(), grid: gu.crafting.serialize(), cursor: gu.cursor.get(0)?.serialize() ?? null });
+  }
+  private containerTransaction(gu: Guest, m: any): void {
+    const g = this.game, p = gu.player, open = gu.container;
+    if (!open || m.rev !== gu.inventoryRevision) { this.sendContainerState(gu); return; }
+    const container = new Inventory(open.inv.size), inventory = new Inventory(p.inventory.size), armor = new Inventory(p.armor.size), offhand = new Inventory(p.offhand.size), cursor = new Inventory(1);
+    container.deserialize(m.slots, g.items); inventory.deserialize(m.inventory, g.items); armor.deserialize(m.armor, g.items); offhand.deserialize(m.offhand, g.items); cursor.deserialize([m.cursor], g.items);
+    if (!this.sameItems([open.inv, p.inventory, p.armor, p.offhand, gu.cursor], [container, inventory, armor, offhand, cursor])) { this.sendContainerState(gu); return; }
+    open.inv.deserialize(m.slots, g.items); p.inventory.deserialize(m.inventory, g.items); p.armor.deserialize(m.armor, g.items); p.offhand.deserialize(m.offhand, g.items); gu.cursor.deserialize([m.cursor], g.items);
+    open.inv.onChange?.(); gu.inventoryRevision++;
+    this.sendContainerState(gu, true);
+  }
+  private sendContainerState(gu: Guest, accepted = false): void {
+    const p = gu.player, open = gu.container;
+    if (!open) { this.sendInventoryState(gu); return; }
+    this.send(gu.id, { t: 'windowState', rev: gu.inventoryRevision, accepted, slots: open.inv.serialize(), inventory: p.inventory.serialize(), armor: p.armor.serialize(), offhand: p.offhand.serialize(), cursor: gu.cursor.get(0)?.serialize() ?? null });
+  }
+  /** Craft from the authoritative window grid; output is placed on the cursor or shift-moved to inventory. */
+  private remoteCraft(gu: Guest, id: string, all: boolean): void {
+    const g = this.game, p = gu.player;
+    const limit = all ? 64 : 1;
+    let made = 0;
+    for (let crafted = 0; crafted < limit; crafted++) {
+      const recipe = g.recipes.match(gu.crafting.slots, gu.craftingSize, gu.craftingSize);
+      if (!recipe || recipe.id !== id) break;
+      const out = g.recipes.craftResult(recipe, gu.crafting.slots);
+      if (!all) {
+        const cursor = gu.cursor.get(0);
+        if (cursor && (!cursor.canStackWith(out) || cursor.count + out.count > cursor.maxStack)) break;
+      }
+      for (let i = 0; i < gu.crafting.size; i++) {
+        const stack = gu.crafting.slots[i];
+        if (!stack) continue;
+        const remainder = g.recipes.remainder(stack);
+        if (--stack.count <= 0) gu.crafting.slots[i] = remainder;
+        else if (remainder && p.inventory.add(remainder) > 0) g.dropItem(p.x, p.y + 0.5, p.z, remainder);
+      }
+      if (all) { if (p.inventory.add(out) > 0) { g.dropItem(p.x, p.y + 0.5, p.z, out); made++; break; } }
+      else { const cursor = gu.cursor.get(0); if (cursor) cursor.count += out.count; else gu.cursor.set(0, out); }
+      made++;
+    }
+    if (made) gu.inventoryRevision++;
+    this.sendInventoryState(gu);
   }
   private sendContainer(gu: Guest, _force: boolean): void {
     const c = gu.container!;
@@ -508,7 +605,7 @@ export class NetHost implements WorldListener {
   }
 
   // ---- entity snapshots ----
-  private sendEntities(): void {
+  private sendEntities(includeWorld: boolean): void {
     const g = this.game;
     const list: Entity[] = [];
     for (const e of g.entities) if (!e.removed) list.push(e);
@@ -527,13 +624,16 @@ export class NetHost implements WorldListener {
       ents.push(hostSnap); seen.add(-1);
       for (const e of list) {
         if (e === p) continue;
+        if (!includeWorld && !(e instanceof RemotePlayer)) continue;
         if (e.distSq(p.x, p.y, p.z) > R2) continue;
         const s = this.snapshot(e, gu);
         if (!s) continue;
         ents.push(s); seen.add(e.id);
       }
-      for (const k of gu.known) if (!seen.has(k) && k !== -1) rm.push(k);
-      for (const k of rm) gu.known.delete(k);
+      if (includeWorld) {
+        for (const k of gu.known) if (!seen.has(k) && k !== -1) rm.push(k);
+        for (const k of rm) gu.known.delete(k);
+      }
       if (ents.length || rm.length) this.send(gu.id, { t: 'ent', e: ents, rm });
     }
   }

@@ -89,7 +89,10 @@ export abstract class ContainerScreenBase extends Screen {
 
   typed(ch: string): void { if (this.book?.typed(ch)) return; super.typed(ch); }
   wheel(dy: number, x: number, y: number): void { this.book?.wheel(dy, x, y); }
-  onSlotsChanged(): void { if (this.book?.visible) this.book.refresh(); }
+  onSlotsChanged(): void {
+    if (this.book?.visible) this.book.refresh();
+    (this.gui.game.client as any)?.syncInventoryScreen?.(this);
+  }
 
   private dragAmount(): number { if (!this.carried) return 0; if (this.dragButton === 1) return 1; return Math.floor(this.carried.count / Math.max(1, this.dragSlots.length)); }
 
@@ -219,6 +222,7 @@ export abstract class ContainerScreenBase extends Screen {
   }
   onClose(): void {
     if (this.carried) { this.player.inventory.add(this.carried); if (this.carried.count > 0) this.player.throwItem(this.carried); this.carried = null; }
+    this.onSlotsChanged();
     this.onCloseCb?.();
   }
 }
@@ -234,6 +238,14 @@ class CraftingMixin {
     screen.slots.push({ inv: result, index: 0, x: rx, y: ry, output: true, craftAll: true, onTake: (_s, all) => {
       const recipe = (screen as any).currentRecipe as CraftingRecipe | null;
       if (!recipe) return;
+      if (g.client) {
+        g.client.send({ t: 'craft', id: recipe.id, all });
+        screen.carried = null;
+        for (let i = 0; i < w * h; i++) grid.slots[i] = null;
+        result.slots[0] = null;
+        grid.onChange?.();
+        return;
+      }
       const consume = () => { for (let i = 0; i < w * h; i++) { const st = grid.slots[i]; if (!st) continue; const rem = g.recipes.remainder(st); st.count--; if (st.count <= 0) grid.slots[i] = rem; else if (rem) { if (g.player.inventory.add(rem) > 0) g.player.throwItem(rem); } } };
       if (all) {
         // craft as many as possible into the player inventory
@@ -276,6 +288,7 @@ export class InventoryScreen extends ContainerScreenBase {
   onClose(): void {
     super.onClose();
     for (let i = 0; i < 4; i++) { const s = this.grid.slots[i]; if (s) { if (this.player.inventory.add(s) > 0) this.player.throwItem(s); this.grid.slots[i] = null; } }
+    this.onSlotsChanged();
   }
 }
 
@@ -289,7 +302,7 @@ export class CraftingScreen extends ContainerScreenBase {
     if (!this.book) this.book = new RecipeBookPanel(this, this.grid, 3, 3);
     this.bookButton = [5, 34]; this.gridOrigin = [30, 17]; // vanilla: (leftPos + 5, height / 2 - 49)
   }
-  onClose(): void { super.onClose(); for (let i = 0; i < 9; i++) { const s = this.grid.slots[i]; if (s) { if (this.player.inventory.add(s) > 0) this.player.throwItem(s); this.grid.slots[i] = null; } } }
+  onClose(): void { super.onClose(); for (let i = 0; i < 9; i++) { const s = this.grid.slots[i]; if (s) { if (this.player.inventory.add(s) > 0) this.player.throwItem(s); this.grid.slots[i] = null; } } this.onSlotsChanged(); }
 }
 
 export class ContainerScreen extends ContainerScreenBase {

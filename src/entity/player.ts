@@ -24,7 +24,7 @@ export class Player extends LivingEntity {
   armor = new Inventory(4);        // 0 head,1 chest,2 legs,3 feet
   offhand = new Inventory(1);
   enderChest = new Inventory(27);
-  craftingGrid = new Inventory(9);
+  craftingGrid = new Inventory(4);      // 2x2 player inventory; crafting tables own a separate 3x3 grid
   selectedSlot = 0;
   gameMode: GameMode = 'survival';
   // hunger

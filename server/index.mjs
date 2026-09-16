@@ -18,6 +18,8 @@ import path from 'node:path';
 import { WebSocketServer } from 'ws';
 import { createJavaSession, pingJavaServer, JAVA_VERSION } from './java-gateway.mjs';
 
+const VOXELAND_PROTOCOL = 16;
+
 const PORT = +(process.env.PORT || 8080);
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const DIST = process.env.DIST || path.join(ROOT, 'dist');
@@ -177,6 +179,7 @@ wss.on('connection', (ws) => {
       case 'javaIntent': { if (role === 'java' && javaSession) javaSession.intent(m.intent); break; }
       case 'host': {
         if (role) return;
+        if (!String(m.version ?? '').endsWith(`/${VOXELAND_PROTOCOL}`)) { send(ws, { t: 'error', reason: 'This page is out of date. Reload before hosting a world.' }); return; }
         const wantOfficial = m.official === true;
         if (wantOfficial && servers.has(OFFICIAL_ID)) { send(ws, { t: 'error', reason: 'The public world is already active.' }); return; }
         role = 'host';
@@ -220,9 +223,11 @@ wss.on('connection', (ws) => {
       case 'list': send(ws, { t: 'servers', servers: listServers() }); break;
       case 'join': {
         if (role) return;
+        if (!String(m.version ?? '').endsWith(`/${VOXELAND_PROTOCOL}`)) { send(ws, { t: 'error', reason: 'This page is out of date. Reload before joining multiplayer.' }); return; }
         if (m.id === OFFICIAL_ID && !servers.has(OFFICIAL_ID)) { assignOfficialCoordinator(ws); return; }
         const s = servers.get(m.id);
         if (!s) { send(ws, { t: 'error', reason: 'That server is no longer online.' }); return; }
+        if (String(m.version ?? '') !== String(s.info.version ?? '')) { send(ws, { t: 'error', reason: 'Multiplayer version mismatch. Reload the page and try again.' }); return; }
         if (s.guests.size + 1 >= (s.info.maxPlayers ?? MAX_PLAYERS_DEFAULT)) { send(ws, { t: 'error', reason: 'The server is full.' }); return; }
         if (s.info.password && String(m.password ?? '') !== s.info.password) { send(ws, { t: 'error', reason: 'Incorrect password.', needPassword: true }); return; }
         role = 'guest'; server = s; clientId = nextClientId++;

@@ -9,7 +9,7 @@ import { ArrowEntity, FallingBlockEntity, PrimedTnt, ThrownProjectile } from '..
 import { ItemStack, Inventory } from '../items/stack';
 import { SET_UPDATE_NEIGHBORS, type WorldListener } from '../world/world';
 import { Chunk, chunkKey } from '../world/chunk';
-import { decodeChunk, unpackFrame, FRAME_CHUNK, PROTOCOL_VERSION, defaultRelayUrl, type ServerInfo } from './protocol';
+import { decodeChunk, unpackFrame, FRAME_CHUNK, PROTOCOL_VERSION, defaultRelayUrl, shouldApplyInventoryState, type ServerInfo } from './protocol';
 
 /** Joining either lands us in a running world or assigns us as the public world's simulation coordinator. */
 export type JoinResult =
@@ -68,7 +68,7 @@ export class NetClient implements WorldListener {
       ws.binaryType = 'arraybuffer';
       this.ws = ws;
       const timer = setTimeout(() => { if (this.status === 'connecting') { reject(new Error('Timed out waiting for the host')); ws.close(); } }, 20000);
-      ws.onopen = () => ws.send(JSON.stringify({ t: 'join', id: serverId, playerId, name, skin, password }));
+      ws.onopen = () => ws.send(JSON.stringify({ t: 'join', id: serverId, playerId, name, skin, password, version: `${this.game.version}/${PROTOCOL_VERSION}` }));
       ws.onmessage = (e) => {
         if (typeof e.data !== 'string') { (this.collectingSnapshot ? this.snapshotChunks : this.chunkFrames).push(new Uint8Array(e.data)); return; }
         const m = JSON.parse(e.data);
@@ -143,14 +143,31 @@ export class NetClient implements WorldListener {
     for (const m of q) { try { this.handle(m); } catch (e) { console.error('client message error', e); } }
     // our snapshot
     if (this.ticks === 1) this.send({ t: 'ready' });
-    const snap: any = { t: 'move', x: r3(p.x), y: r3(p.y), z: r3(p.z), yaw: r1(p.yaw), pitch: r1(p.pitch), sneak: p.isSneaking, sprint: p.isSprinting, swim: p.swimmingPose, sleep: p.sleeping, fly: p.flying, health: p.health, slot: p.selectedSlot, swing: p.swinging && p.swingTime <= 1, use: !!p.usingItem, hurt: p.hurtTime === p.hurtDuration, dead: p.health <= 0, br: p.breaking ? { x: p.breaking.x, y: p.breaking.y, z: p.breaking.z, stage: p.breakStage, state: p.breaking.state } : null };
+    const face = p.breaking && g.targetBlock && p.breaking.x === g.targetBlock.x && p.breaking.y === g.targetBlock.y && p.breaking.z === g.targetBlock.z ? g.targetBlock.face : 1;
+    const snap: any = { t: 'move', x: r3(p.x), y: r3(p.y), z: r3(p.z), yaw: r1(p.yaw), pitch: r1(p.pitch), sneak: p.isSneaking, sprint: p.isSprinting, swim: p.swimmingPose, sleep: p.sleeping, fly: p.flying, health: p.health, slot: p.selectedSlot, swing: p.swinging && p.swingTime <= 1, use: !!p.usingItem, hurt: p.hurtTime === p.hurtDuration, dead: p.health <= 0, br: p.breaking ? { x: p.breaking.x, y: p.breaking.y, z: p.breaking.z, face, stage: p.breakStage, state: p.breaking.state } : null };
     this.send(snap);
     const held = JSON.stringify(p.heldItem()?.serialize() ?? null), armor = JSON.stringify(p.armor.serialize()) + JSON.stringify(p.offhand.serialize());
     if (held !== this.lastHeld || armor !== this.lastArmor) { this.lastHeld = held; this.lastArmor = armor; this.send({ t: 'inv', held: p.heldItem()?.serialize() ?? null, armor: p.armor.serialize(), off: p.offhand.serialize() }); }
     if (this.ticks % 40 === 0) this.send({ t: 'ping', time: performance.now() });
-    if (this.container && this.ticks % 2 === 0 && this.containerDirty) { this.containerDirty = false; this.send({ t: 'cont', slots: this.container.inv.serialize(), player: p.inventory.serialize() }); }
   }
   containerDirty = false;
+  private inventoryRevision = 0;
+
+  /** Vanilla-style optimistic window transaction; the host acks or replaces the complete window state. */
+  syncInventoryScreen(screen: any): void {
+    const p = this.game.player;
+    const grid = screen?.grid instanceof Inventory ? screen.grid : null;
+    if (!grid || (grid.size !== 4 && grid.size !== 9)) {
+      if (this.container) this.send({ t: 'contTxn', rev: this.inventoryRevision++, slots: this.container.inv.serialize(), inventory: p.inventory.serialize(), armor: p.armor.serialize(), offhand: p.offhand.serialize(), cursor: screen?.carried?.serialize?.() ?? null });
+      return;
+    }
+    this.send({
+      t: 'invTxn', rev: this.inventoryRevision++,
+      inventory: p.inventory.serialize(), armor: p.armor.serialize(), offhand: p.offhand.serialize(),
+      grid: grid.serialize(), gridSize: grid.size,
+      cursor: screen?.carried?.serialize?.() ?? null,
+    });
+  }
 
   private handle(m: any): void {
     const g = this.game, p = g.player, w = g.world;
@@ -183,6 +200,32 @@ export class NetClient implements WorldListener {
           if (Number.isFinite(s.totalXp)) p.totalXp = s.totalXp;
           p.inventory.onChange?.();
         }
+        break;
+      }
+      case 'invState': {
+        if (!shouldApplyInventoryState(this.inventoryRevision, m.rev, m.accepted === true)) break;
+        this.inventoryRevision = m.rev;
+        if (Array.isArray(m.inventory)) p.inventory.deserialize(m.inventory, g.items);
+        if (Array.isArray(m.armor)) p.armor.deserialize(m.armor, g.items);
+        if (Array.isArray(m.offhand)) p.offhand.deserialize(m.offhand, g.items);
+        const screen = g.gui.screen as any;
+        if (screen?.grid instanceof Inventory && Array.isArray(m.grid) && screen.grid.size === m.grid.length) {
+          screen.grid.deserialize(m.grid, g.items); screen.grid.onChange?.();
+        }
+        if (screen && 'carried' in screen) screen.carried = m.cursor ? ItemStack.deserialize(m.cursor, g.items) : null;
+        p.inventory.onChange?.();
+        break;
+      }
+      case 'windowState': {
+        if (!shouldApplyInventoryState(this.inventoryRevision, m.rev, m.accepted === true)) break;
+        this.inventoryRevision = m.rev; this.containerDirty = false;
+        if (Array.isArray(m.inventory)) p.inventory.deserialize(m.inventory, g.items);
+        if (Array.isArray(m.armor)) p.armor.deserialize(m.armor, g.items);
+        if (Array.isArray(m.offhand)) p.offhand.deserialize(m.offhand, g.items);
+        if (this.container && Array.isArray(m.slots)) this.container.inv.deserialize(m.slots, g.items);
+        const screen = g.gui.screen as any;
+        if (screen && 'carried' in screen) screen.carried = m.cursor ? ItemStack.deserialize(m.cursor, g.items) : null;
+        p.inventory.onChange?.();
         break;
       }
       case 'correct': {
@@ -229,7 +272,10 @@ export class NetClient implements WorldListener {
       be.inventory.onChange = () => { this.containerDirty = true; };
       if (m.kind === 'furnace') g.gui.openFurnace(be, m.fkind); else g.gui.openBrewing(be);
       const s = g.gui.screen!; const orig = s.onClose.bind(s); s.onClose = () => { orig(); closeMsg(); };
-    } else if (m.kind === 'crafting') g.gui.openCrafting();
+    } else if (m.kind === 'crafting') {
+      g.gui.openCrafting();
+      const s = g.gui.screen!; const orig = s.onClose.bind(s); s.onClose = () => { orig(); closeMsg(); };
+    }
     else if (m.kind === 'stonecutter') g.gui.openStonecutter();
     else if (m.kind === 'anvil') g.gui.openAnvil();
     else if (m.kind === 'smithing') g.gui.openSmithing();
