@@ -26,10 +26,14 @@ export class Renderer implements SectionMeshTarget {
   private skyVao: WebGLVertexArrayObject;
   private lineVao: WebGLVertexArrayObject; private lineVbo: WebGLBuffer;
   private quadVao: WebGLVertexArrayObject; private quadVbo: WebGLBuffer;
+  private celestialVao: WebGLVertexArrayObject; private celestialVbo: WebGLBuffer;
   private cloudVao: WebGLVertexArrayObject | null = null; private cloudVbo: WebGLBuffer | null = null; private cloudQuads = 0; private cloudTex: WebGLTexture | null = null;
   private celestial: Record<string, WebGLTexture> = {};
   // matrices
   proj = new Float32Array(16); view = new Float32Array(16); vp = new Float32Array(16); invVp = new Float32Array(16);
+  /** rotation-only view-projection for the sky dome, sun, moon and stars (vanilla renders the sky before the
+   *  camera translation is applied, so it never parallaxes or jumps with the player's position) */
+  skyVp = new Float32Array(16); invSkyVp = new Float32Array(16);
   frustum = new Frustum();
   camera: Camera = { x: 0, y: 80, z: 0, yaw: 0, pitch: 0, fov: 70 };
   // animation
@@ -68,7 +72,7 @@ export class Renderer implements SectionMeshTarget {
     gl.frontFace(gl.CCW);
     this.chunkProg = new Program(gl, CHUNK_VS, CHUNK_FS, ['uVP', 'uModel', 'uOffset', 'uCamPos', 'uAtlas', 'uLightmap', 'uFogColor', 'uFogRange', 'uAlphaCut', 'uColorMul', 'uLightOverride'], 'chunk');
     this.entityProg = new Program(gl, ENTITY_VS, ENTITY_FS, ['uVP', 'uModel', 'uCamPos', 'uTex', 'uLightmap', 'uLight', 'uColor', 'uFogColor', 'uFogRange', 'uAlphaCut'], 'entity');
-    this.skyProg = new Program(gl, SKY_VS, SKY_FS, ['uInvVP', 'uSkyColor', 'uFogColor', 'uVoidColor', 'uSunDir', 'uSunset', 'uStarBrightness', 'uTime', 'uDimension'], 'sky');
+    this.skyProg = new Program(gl, SKY_VS, SKY_FS, ['uInvVP', 'uSkyColor', 'uFogColor', 'uVoidColor', 'uSunDir', 'uSunset', 'uStarBrightness', 'uSunAngle', 'uTime', 'uDimension'], 'sky');
     this.lineProg = new Program(gl, LINE_VS, LINE_FS, ['uVP', 'uColor', 'uViewport', 'uWidth'], 'line');
     this.quadProg = new Program(gl, QUAD_VS, QUAD_FS, ['uVP', 'uModel', 'uTex', 'uColor'], 'quad');
     this.cloudProg = new Program(gl, CLOUD_VS, CLOUD_FS, ['uVP', 'uOffset', 'uCamPos', 'uTex', 'uColor', 'uFogRange', 'uFogColor'], 'cloud');
@@ -114,7 +118,13 @@ export class Renderer implements SectionMeshTarget {
     gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 28, 0);
     gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 28, 12);
     gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 1, gl.FLOAT, false, 28, 24);
-    // textured quad (sun/moon)
+    // celestial quads (sun/moon), vertices uploaded per frame like vanilla's BufferBuilder
+    this.celestialVao = gl.createVertexArray()!; this.celestialVbo = gl.createBuffer()!;
+    gl.bindVertexArray(this.celestialVao); gl.bindBuffer(gl.ARRAY_BUFFER, this.celestialVbo);
+    gl.bufferData(gl.ARRAY_BUFFER, 4 * 5 * 4, gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 20, 0);
+    gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 20, 12);
+    // textured quad (shadows)
     this.quadVao = gl.createVertexArray()!; this.quadVbo = gl.createBuffer()!;
     gl.bindVertexArray(this.quadVao); gl.bindBuffer(gl.ARRAY_BUFFER, this.quadVbo);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 0, 0, 1, 1, -1, 0, 1, 1, 1, 1, 0, 1, 0, -1, 1, 0, 0, 0]), gl.STATIC_DRAW);
@@ -136,9 +146,8 @@ export class Renderer implements SectionMeshTarget {
     };
     await Promise.all([
       load('sun', 'environment/celestial/sun.png'), load('sun_old', 'environment/sun.png'),
-      ...['new_moon', 'waxing_crescent', 'first_quarter', 'waxing_gibbous', 'full_moon', 'waning_gibbous', 'last_quarter', 'waning_crescent'].map((m) => load('moon_' + m, `environment/celestial/moon/${m}.png`)),
-      load('moon_phases', 'environment/moon_phases.png'),
-      load('clouds', 'environment/clouds.png'),
+      ...['new_moon', 'waxing_crescent', 'first_quarter', 'waxing_gibbous', 'full_moon', 'waning_gibbous', 'third_quarter', 'waning_crescent'].map((m) => load('moon_' + m, `environment/celestial/moon/${m}.png`)),
+            load('clouds', 'environment/clouds.png'),
       load('shadow', 'misc/shadow.png'),
     ]);
     if (this.celestial.clouds) this.cloudTex = this.celestial.clouds;
@@ -232,6 +241,8 @@ export class Renderer implements SectionMeshTarget {
     }
     mat4RotateX(this.view, this.view, c.pitch * DEG);
     mat4RotateY(this.view, this.view, (c.yaw + 180) * DEG);
+    mat4Mul(this.skyVp, this.proj, this.view);
+    mat4Invert(this.invSkyVp, this.skyVp);
     this.camBase = [Math.floor(c.x), Math.floor(c.y), Math.floor(c.z)];
     mat4Translate(this.view, this.view, -(c.x - this.camBase[0]), -(c.y - this.camBase[1]), -(c.z - this.camBase[2]));
     mat4Mul(this.vp, this.proj, this.view);
@@ -288,14 +299,15 @@ export class Renderer implements SectionMeshTarget {
     gl.depthMask(false);
     gl.disable(gl.CULL_FACE);
     this.skyProg.use();
-    gl.uniformMatrix4fv(this.skyProg.u('uInvVP'), false, this.invVp);
+    gl.uniformMatrix4fv(this.skyProg.u('uInvVP'), false, this.invSkyVp);
     gl.uniform3fv(this.skyProg.u('uSkyColor'), sky.skyColor);
     gl.uniform3fv(this.skyProg.u('uFogColor'), sky.fogColor);
     gl.uniform4f(this.skyProg.u('uVoidColor'), sky.voidColor[0], sky.voidColor[1], sky.voidColor[2], sky.voidStrength);
     const sd = this.sunDir(sky.sunAngle);
     gl.uniform3fv(this.skyProg.u('uSunDir'), sd);
     gl.uniform4fv(this.skyProg.u('uSunset'), sky.sunset);
-    gl.uniform1f(this.skyProg.u('uStarBrightness'), sky.starBrightness);
+    gl.uniform1f(this.skyProg.u('uStarBrightness'), sky.starBrightness * (1 - sky.rainLevel));
+    gl.uniform1f(this.skyProg.u('uSunAngle'), sky.sunAngle);
     gl.uniform1f(this.skyProg.u('uTime'), timeSec);
     gl.uniform1i(this.skyProg.u('uDimension'), dimension === 'overworld' ? 0 : dimension === 'the_nether' ? 1 : 2);
     gl.bindVertexArray(this.skyVao);
@@ -338,42 +350,43 @@ export class Renderer implements SectionMeshTarget {
     gl.disable(gl.BLEND);
   }
 
+  /** vanilla LevelRenderer.renderSky: the sun (60 wide at y=100) and moon (40 wide at y=-100, phase from the
+   *  atlas order full → waning → new → waxing) sit on a sphere rotated by rotY(-90°)·rotX(timeOfDay·360°), drawn
+   *  additively and faded out by rain. */
   private drawSunMoon(sky: SkyState): void {
     const gl = this.gl;
     const sun = this.celestial.sun ?? this.celestial.sun_old;
     if (!sun) return;
     gl.enable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+    gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE, gl.ONE, gl.ZERO);
     this.quadProg.use();
-    gl.uniformMatrix4fv(this.quadProg.u('uVP'), false, this.vp);
+    gl.uniformMatrix4fv(this.quadProg.u('uVP'), false, this.skyVp);
     gl.activeTexture(gl.TEXTURE0);
     gl.uniform1i(this.quadProg.u('uTex'), 0);
-    gl.bindVertexArray(this.quadVao);
     const m = new Float32Array(16);
-    const place = (angle: number, size: number, dist: number) => {
-      mat4Identity(m);
-      // rotate around the x axis? Sun path: east -> up -> west. Use rotation about Z axis with x = east.
-      mat4RotateZ(m, angle);
-      mat4Translate(m, m, 0, dist, 0);
-      mat4Scale(m, m, size, size, size);
-      mat4RotateX(m, m, -Math.PI / 2);
-    };
-    // sun
-    place(sky.sunAngle, 30, 100);
+    mat4Identity(m);
+    mat4RotateY(m, m, -Math.PI / 2);
+    mat4RotateX(m, m, sky.sunAngle);
     gl.uniformMatrix4fv(this.quadProg.u('uModel'), false, m);
-    gl.uniform4f(this.quadProg.u('uColor'), 1, 1, 1, 1 - (sky.dayFactor < 0.25 ? 0.5 : 0));
+    const alpha = 1 - sky.rainLevel;
+    gl.uniform4f(this.quadProg.u('uColor'), 1, 1, 1, alpha);
+    gl.bindVertexArray(this.celestialVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.celestialVbo);
+    // sun
+    const s = 30;
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, new Float32Array([-s, 100, -s, 0, 0, s, 100, -s, 1, 0, s, 100, s, 1, 1, -s, 100, s, 0, 1]));
     gl.bindTexture(gl.TEXTURE_2D, sun);
     gl.drawArrays(gl.TRIANGLE_FAN, 0, 4);
-    // moon
-    const phases = ['new_moon', 'waxing_crescent', 'first_quarter', 'waxing_gibbous', 'full_moon', 'waning_gibbous', 'last_quarter', 'waning_crescent'];
-    const moon = this.celestial['moon_' + phases[sky.moonPhase]] ?? this.celestial.moon_phases;
+    // moon (its texture is mirrored horizontally, exactly as vanilla maps the atlas cell)
+    const phases = ['full_moon', 'waning_gibbous', 'third_quarter', 'waning_crescent', 'new_moon', 'waxing_crescent', 'first_quarter', 'waxing_gibbous'];
+    const moon = this.celestial['moon_' + phases[sky.moonPhase]];
     if (moon) {
-      place(sky.sunAngle + Math.PI, 20, 100);
-      gl.uniformMatrix4fv(this.quadProg.u('uModel'), false, m);
-      gl.uniform4f(this.quadProg.u('uColor'), 1, 1, 1, 1);
+      const q = 20;
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, new Float32Array([-q, -100, q, 1, 1, q, -100, q, 0, 1, q, -100, -q, 0, 0, -q, -100, -q, 1, 0]));
       gl.bindTexture(gl.TEXTURE_2D, moon);
       gl.drawArrays(gl.TRIANGLE_FAN, 0, 4);
     }
+    gl.bindVertexArray(null);
     gl.disable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
   }

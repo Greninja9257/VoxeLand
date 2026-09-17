@@ -118,6 +118,7 @@ uniform vec4 uVoidColor; // rgb + strength
 uniform vec3 uSunDir;
 uniform vec4 uSunset; // rgb, strength
 uniform float uStarBrightness;
+uniform float uSunAngle;
 uniform float uTime;
 uniform int uDimension; // 0 overworld, 1 nether, 2 end
 out vec4 fragColor;
@@ -141,13 +142,17 @@ void main() {
     float band = exp(-abs(d.y) * 6.0) * pow(az, 3.0);
     col = mix(col, uSunset.rgb, band * uSunset.a);
   }
-  // stars
+  // stars: a fixed star field on the celestial sphere, which turns with the sun (vanilla draws the star buffer
+  // under the same rotY(-90)·rotX(timeOfDay) pose); sample it in sphere space = inverse rotation of the view ray
   if (uStarBrightness > 0.0 && d.y > -0.1) {
-    vec3 cell = floor(d * 90.0);
+    vec3 r = vec3(d.z, d.y, -d.x);
+    float ca = cos(uSunAngle), sa = sin(uSunAngle);
+    vec3 ds = vec3(r.x, r.y * ca + r.z * sa, -r.y * sa + r.z * ca);
+    vec3 cell = floor(ds * 90.0);
     float h = hash(cell);
     if (h > 0.985) {
       vec3 cc = (cell + 0.5 + vec3(hash(cell + 1.0), hash(cell + 2.0), hash(cell + 3.0)) - 0.5) / 90.0;
-      float dist = length(normalize(cc) - d) * 90.0;
+      float dist = length(normalize(cc) - ds) * 90.0;
       float s = smoothstep(0.35, 0.0, dist) * uStarBrightness * (0.6 + 0.4 * hash(cell + 5.0));
       col += vec3(s);
     }

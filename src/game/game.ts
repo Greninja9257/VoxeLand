@@ -925,6 +925,9 @@ export class Game {
       if (rehost && last) setTimeout(() => { if (!this.inWorld) this.joinServer(last.relayUrl, rehost, last.password).catch((e) => this.gui.open(new DisconnectedScreen(String(e?.message ?? e)))); }, 1500 + Math.random() * 1500);
       return;
     }
+    // vanilla ClientLevel.tickTime: the client keeps counting between the server's time packets
+    w.time++;
+    if (this.rules.doDaylightCycle !== false) w.dayTime++;
     this.updatePlayerInput();
     this.chunks.update(p.x, p.z, 0.05);
     for (const e of this.entities) { if (e.removed) continue; if (e.remote) e.remoteTick(); }
@@ -945,7 +948,6 @@ export class Game {
     this.equipProgress = Math.max(0, this.equipProgress - 0.25);
     if (p.eyeInWater && Math.random() < 0.2) this.particles.spawnBubble(p.x + (Math.random() - 0.5), p.eyeY, p.z + (Math.random() - 0.5));
     if (p.flying) p.fallDistance = 0;
-    void w;
   }
 
   /** Publish the current singleplayer world through a relay so others can join. */

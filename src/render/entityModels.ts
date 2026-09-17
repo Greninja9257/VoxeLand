@@ -6,8 +6,10 @@ export interface ModelDef { texW: number; texH: number; parts: PartDef[]; scale?
 const box = (x: number, y: number, z: number, w: number, h: number, d: number, u: number, v: number, o: Partial<BoxDef> = {}): BoxDef => ({ x, y, z, w, h, d, u, v, ...o });
 const part = (name: string, pivot: [number, number, number], boxes: BoxDef[], o: Partial<PartDef> = {}): PartDef => ({ name, pivot, boxes, ...o });
 
-function humanoid(texW: number, texH: number, slim = false, zombieArms = false): ModelDef {
-  const legacy = texH === 32;
+/** vanilla HumanoidModel.createMesh: the left arm/leg reuse the right-side UVs mirrored. Only PlayerModel (and the
+ *  piglins, which extend it) draw them from the bottom half of a 64x64 texture. */
+function humanoid(texW: number, texH: number, slim = false, playerLayout = texH === 64): ModelDef {
+  const legacy = !playerLayout;
   const aw = slim ? 3 : 4;
   return {
     texW, texH,
@@ -110,8 +112,9 @@ const MODELS: Record<string, ModelDef> = {
   player_slim: humanoid(64, 64, true),
   armor: humanoidArmor(1.0),
   armor_inner: humanoidArmor(0.5),
-  zombie: humanoid(64, 64, false, true),
-  villager_biped: humanoid(64, 64),
+  zombie: humanoid(64, 64, false, false),
+  piglin: humanoid(64, 64, false, true),
+  villager_biped: humanoid(64, 64, false, false),
   skeleton: skeleton(),
   creeper: creeper(),
   spider: spider(),

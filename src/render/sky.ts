@@ -12,6 +12,7 @@ export interface SkyState {
   sunset: [number, number, number, number]; // rgb + strength
   starBrightness: number;
   moonPhase: number;
+  rainLevel: number;
   fogStart: number; fogEnd: number;
   voidStrength: number;
 }
@@ -61,8 +62,9 @@ export function computeSky(dayTime: number, dimension: Dimension, biomeSky: numb
   if (camY < -60 && dimension === 'overworld') { const t = clamp((-60 - camY) / 20, 0, 1); fog = fog.map((v) => v * (1 - t)) as any; sky = sky.map((v) => v * (1 - t)) as any; }
   const voidColor: [number, number, number] = [sky[0] * 0.2, sky[1] * 0.2, sky[2] * 0.2];
   const voidStrength = dimension === 'overworld' ? clamp((-40 - camY) / 24, 0, 1) : 0;
+  // vanilla Level.getMoonPhase: phase 0 (the first night) is the full moon
   const moonPhase = Math.floor(dayTime / 24000) % 8;
-  return { timeOfDay: tod, sunAngle: angle, dayFactor, skyColor: sky, fogColor: fog, voidColor, sunset, starBrightness, moonPhase, fogStart, fogEnd, voidStrength };
+  return { timeOfDay: tod, sunAngle: angle, dayFactor, skyColor: sky, fogColor: fog, voidColor, sunset, starBrightness, moonPhase, rainLevel: rain, fogStart, fogEnd, voidStrength };
 }
 
 /** Vanilla light brightness curve. */

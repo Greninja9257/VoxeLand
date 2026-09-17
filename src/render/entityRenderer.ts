@@ -287,9 +287,9 @@ export class EntityRenderer {
     const t = this.time;
     const attack = (e as any).attackAnim ? ((e as any).attackAnim / 10) : 0;
     switch (model) {
-      case 'player': case 'player_slim': case 'zombie': case 'skeleton': case 'enderman': case 'villager_biped': case 'vex': case 'breeze': case 'creaking': case 'warden': {
+      case 'player': case 'player_slim': case 'zombie': case 'piglin': case 'skeleton': case 'enderman': case 'villager_biped': case 'vex': case 'breeze': case 'creaking': case 'warden': {
         pose.head = { ry: hy, rx: hp };
-        const zombieArms = model === 'zombie' && e instanceof Mob && (e.type === 'zombie' || e.type === 'husk' || e.type === 'drowned' || e.type === 'zombie_villager' || e.type === 'zombified_piglin');
+        const zombieArms = (model === 'zombie' || model === 'piglin') && e instanceof Mob && (e.type === 'zombie' || e.type === 'husk' || e.type === 'drowned' || e.type === 'zombie_villager' || e.type === 'zombified_piglin');
         const aim = e instanceof Mob && e.def.ai.ranged === 'arrow' && e.target;
         if (zombieArms) { const s = Math.sin(t * 3) * 0.05; pose.rightArm = { rx: -Math.PI / 2 + s, ry: -0.1 + Math.sin(limb * 0.6662) * amt * 0.2 }; pose.leftArm = { rx: -Math.PI / 2 - s, ry: 0.1 - Math.sin(limb * 0.6662) * amt * 0.2 }; }
         else if (aim) { pose.rightArm = { rx: -Math.PI / 2 + hp, ry: -0.1 + hy }; pose.leftArm = { rx: -Math.PI / 2 + hp + 0.3, ry: 0.4 + hy }; }
