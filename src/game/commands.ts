@@ -165,7 +165,7 @@ function parseRange(s: string): [number, number] {
 
 /** Execute a command as the given player (host player by default). Feedback goes to the executor: the host's
  *  chat, or `feedback` for a guest running it through the host. Announcements (/say, /me) reach everyone. */
-export function runCommand(g: Game, text: string, executor?: Player, feedback?: (text: string) => void, operator = g.cheats): void {
+export function runCommand(g: Game, text: string, executor?: Player, feedback?: (text: string) => void, operator = g.cheats && !g.host?.official): void {
   const say = feedback ?? ((t: string) => g.gui.addChat(t));
   const err = (t: string) => say('§c' + t);
   const announce = (t: string) => { g.gui.addChat(t); g.host?.broadcast({ t: 'chat', text: t }); };

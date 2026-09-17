@@ -1053,6 +1053,8 @@ export class Game {
     };
     await this.loadWorld(meta, { state, chunks: data });
     const h = await this.openToLan({ name: world.name ?? 'Public world', motd: world.motd ?? '', gameMode: world.gameMode ?? 'survival', cheats: false, maxPlayers: world.maxPlayers ?? 16, relayUrl, official: true });
+    // the coordinator is just another player of the backend's world: never an operator
+    this.cheats = false; this.player.cheats = false;
     this.lastServer = { relayUrl, serverId: 'official', password: '' };
     this.gui.addChat('§eJoined VoxeLand Public Server');
     void h;

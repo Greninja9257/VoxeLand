@@ -115,10 +115,6 @@ export class OptionsScreen extends Screen {
     sub(L, y, 'Telemetry Data...', () => new TelemetryScreen(this));
     sub(R, y, 'Credits & Attribution...', () => new CreditsScreen(this));
     y += 24;
-    if (g.inWorld && g.worldMeta) {
-      this.add(new Button(L, y, 150, 20, `Allow Cheats: ${g.cheats ? 'ON' : 'OFF'}`, (b) => { g.cheats = !g.cheats; g.worldMeta!.cheats = g.cheats; b.label = `Allow Cheats: ${g.cheats ? 'ON' : 'OFF'}`; }));
-      y += 24;
-    }
     this.add(new Button(cx - 100, this.height - 27, 200, 20, 'Done', () => this.done()));
   }
   private done(): void { this.gui.game.saveOptions(); if (this.parent) this.gui.open(this.parent); else this.gui.close(); }
