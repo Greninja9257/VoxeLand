@@ -15,8 +15,8 @@ export class Spawner {
   tick(): void {
     const g = this.game;
     if (g.world.time % 1 !== 0) return;
-    const p = g.player;
-    if (!p || p.removed) return;
+    const players = g.allPlayers().filter((pl) => !pl.removed && !pl.isSpectator);
+    if (!players.length) return;
     const chunks = g.world.chunks.size;
     const scale = Math.max(1, chunks) / 289;
     const counts = { hostile: 0, passive: 0, water: 0, ambient: 0 };
@@ -26,8 +26,9 @@ export class Spawner {
     if (g.world.time % 400 === 0 && counts.passive < CAPS.passive * scale) this.trySpawn('passive');
     if (g.world.time % 40 === 0 && counts.water < CAPS.water * scale) this.trySpawn('water');
     if (g.world.time % 200 === 0 && counts.ambient < CAPS.ambient * scale) this.trySpawn('ambient');
-    // phantoms
-    if (!peaceful && g.world.dimension === 'overworld' && p.ticksSinceLastSleep > 72000 && g.world.time % 1200 === 0 && !g.isDay() && Math.random() < 0.3) {
+    // phantoms (vanilla PhantomSpawner: per player, based on how long each has been awake)
+    if (!peaceful && g.world.dimension === 'overworld' && g.world.time % 1200 === 0 && !g.isDay()) for (const p of players) {
+      if (p.ticksSinceLastSleep <= 72000 || Math.random() >= 0.3) continue;
       const sky = g.world.getSky(Math.floor(p.x), Math.floor(p.eyeY), Math.floor(p.z));
       if (sky >= 15 && p.y >= SEA_LEVEL) { const n = 1 + Math.floor(Math.random() * 3); for (let i = 0; i < n; i++) g.spawnMob('phantom', p.x + (Math.random() - 0.5) * 20, p.y + 20 + Math.random() * 10, p.z + (Math.random() - 0.5) * 20); }
     }
@@ -35,7 +36,10 @@ export class Spawner {
 
   private trySpawn(kind: 'hostile' | 'passive' | 'water' | 'ambient'): void {
     const g = this.game, world = g.world, reg = g.registry;
-    const p = g.player;
+    // spawning happens around every player (vanilla NaturalSpawner iterates the players' chunks): pick one
+    const players = g.allPlayers().filter((pl) => !pl.removed && !pl.isSpectator);
+    const p = players[Math.floor(Math.random() * players.length)];
+    if (!p) return;
     // pick a random loaded chunk near the player
     const r = Math.min(8, g.chunks.viewDistance);
     const cx = (Math.floor(p.x) >> 4) + Math.floor(Math.random() * (r * 2 + 1)) - r, cz = (Math.floor(p.z) >> 4) + Math.floor(Math.random() * (r * 2 + 1)) - r;
@@ -45,6 +49,7 @@ export class Spawner {
     const x = cx * 16 + lx, z = cz * 16 + lz;
     const h = c.getHeight(lx, lz);
     if (h <= -64) return;
+    const dsq = (ex: number, ey: number, ez: number) => p.distSq(ex, ey, ez);
     let y: number;
     if (kind === 'water') y = SEA_LEVEL - 1 - Math.floor(Math.random() * 20);
     else if (kind === 'ambient') y = -60 + Math.floor(Math.random() * (Math.min(h, 63) + 60));
@@ -56,8 +61,8 @@ export class Spawner {
     const name = list[Math.floor(Math.random() * list.length)];
     const def = MOB_DEFS[name];
     if (!def) return;
-    const dsq = p.distSq(x + 0.5, y, z + 0.5);
-    if (dsq < 24 * 24 || dsq > 128 * 128) return;
+    // never right next to anyone, and within simulation range of the chosen player
+    if (dsq(x + 0.5, y, z + 0.5) > 128 * 128 || players.some((pl) => pl.distSq(x + 0.5, y, z + 0.5) < 24 * 24)) return;
     const packSize = kind === 'hostile' ? 1 + Math.floor(Math.random() * 4) : kind === 'passive' ? 2 + Math.floor(Math.random() * 3) : kind === 'water' ? 2 + Math.floor(Math.random() * 3) : 1;
     let spawned = 0;
     for (let i = 0; i < packSize * 3 && spawned < packSize; i++) {

@@ -163,10 +163,13 @@ function parseRange(s: string): [number, number] {
   return [+s, +s];
 }
 
-/** Execute a command as the given player (host player by default). Feedback goes through g.gui.addChat. */
-export function runCommand(g: Game, text: string, executor?: Player): void {
-  const say = (t: string) => g.gui.addChat(t);
-  const err = (t: string) => g.gui.addChat('§c' + t);
+/** Execute a command as the given player (host player by default). Feedback goes to the executor: the host's
+ *  chat, or `feedback` for a guest running it through the host. Announcements (/say, /me) reach everyone. */
+export function runCommand(g: Game, text: string, executor?: Player, feedback?: (text: string) => void, operator = g.cheats): void {
+  const say = feedback ?? ((t: string) => g.gui.addChat(t));
+  const err = (t: string) => say('§c' + t);
+  const announce = (t: string) => { g.gui.addChat(t); g.host?.broadcast({ t: 'chat', text: t }); };
+  const syncRemote = (pl: Player) => { if (pl !== g.player) g.host?.syncInventory(pl); };
   const raw = text.startsWith('/') ? text.slice(1) : text;
   const parts = raw.trim().split(/\s+/);
   const cmd = parts[0].toLowerCase();
@@ -175,7 +178,7 @@ export function runCommand(g: Game, text: string, executor?: Player): void {
   if (!cmd) return;
   const usage = (name: string) => { throw new CommandError(`Unknown or incomplete command, see below for error\n§7${COMMAND_USAGE[name] ?? ''}`); };
   if (!(cmd in COMMAND_USAGE)) { err(`Unknown or incomplete command, see below for error\n§7${raw}§r§c<--[HERE]`); return; }
-  if (!g.cheats && !['help', 'seed', 'say', 'me', 'tell', 'msg', 'w', 'teammsg', 'list', 'trigger'].includes(cmd)) { err('You do not have permission to use this command'); return; }
+  if (!operator && !['help', 'seed', 'say', 'me', 'tell', 'msg', 'w', 'teammsg', 'list', 'trigger'].includes(cmd)) { err(`Unknown or incomplete command, see below for error\n§7${raw}§r§c<--[HERE]`); return; }
   const rel = (s: string | undefined, base: number, name = 'coordinate'): number => {
     if (s === undefined) throw new CommandError(`Expected ${name}`);
     if (s.startsWith('~')) return base + (s.length > 1 ? parseFloat(s.slice(1)) : 0);
@@ -197,7 +200,7 @@ export function runCommand(g: Game, text: string, executor?: Player): void {
       case 'gamemode': case 'defaultgamemode': {
         const m = GAMEMODES[parts[1] ?? '']; if (!m) usage(cmd);
         if (cmd === 'defaultgamemode') { if (g.worldMeta) g.worldMeta.gameMode = m; say(`The default game mode is now ${g.assets.lang['gameMode.' + m] ?? m}`); break; }
-        for (const e of targets(parts[2], [self], true)) { const pl = e as Player; pl.setGameMode(m); say(pl === g.player ? `Set own game mode to ${g.assets.lang['gameMode.' + m] ?? m}` : `Set ${pl.name}'s game mode to ${g.assets.lang['gameMode.' + m] ?? m}`); }
+        for (const e of targets(parts[2], [self], true)) { const pl = e as Player; pl.setGameMode(m); say(pl === self ? `Set own game mode to ${g.assets.lang['gameMode.' + m] ?? m}` : `Set ${pl.name}'s game mode to ${g.assets.lang['gameMode.' + m] ?? m}`); }
         break;
       }
       case 'time': {
@@ -225,7 +228,8 @@ export function runCommand(g: Game, text: string, executor?: Player): void {
         if (!it) throw new CommandError(`Unknown item '${parts[2]}'`);
         for (const e of targets(parts[1], [self], true)) {
           const pl = e as Player; let left = count;
-          while (left > 0) { const s = new ItemStack(it, Math.min(left, it.stackSize)); left -= s.count; if (pl === g.player) g.givePlayer(s); else { const rem = pl.inventory.add(s); if (rem > 0) g.dropItem(pl.x, pl.y + 1, pl.z, s); g.host?.send((pl as any).clientId, { t: 'give', stack: new ItemStack(it, Math.min(count, it.stackSize)).serialize(), x: pl.x, y: pl.y, z: pl.z }); } }
+          while (left > 0) { const s = new ItemStack(it, Math.min(left, it.stackSize)); left -= s.count; pl.give(s); }
+          syncRemote(pl);
           say(`Gave ${count} [${g.items.displayName(it.name)}] to ${pl.name}`);
         }
         break;
@@ -236,7 +240,7 @@ export function runCommand(g: Game, text: string, executor?: Player): void {
           const pl = e as Player; let n = 0;
           const invs = [pl.inventory, pl.armor, pl.offhand];
           for (const inv of invs) for (let i = 0; i < inv.size; i++) { const s = inv.get(i); if (!s || (item && s.item.name !== item)) continue; const take = max < 0 ? s.count : Math.min(s.count, max - n); if (take <= 0) continue; s.count -= take; n += take; if (s.count <= 0) inv.set(i, null); }
-          pl.inventory.onChange?.();
+          pl.inventory.onChange?.(); syncRemote(pl);
           if (max === 0) say(`${pl.name} has ${n} matching items`); else say(n ? `Removed ${n} item(s) from player ${pl.name}` : `No items were found on player ${pl.name}`);
         }
         break;
@@ -345,9 +349,9 @@ export function runCommand(g: Game, text: string, executor?: Player): void {
         break;
       }
       case 'setworldspawn': { const x = parts[1] ? blockCoord(parts[1], p.x) : Math.floor(p.x), y = parts[2] ? blockCoord(parts[2], p.y) : Math.floor(p.y), z = parts[3] ? blockCoord(parts[3], p.z) : Math.floor(p.z); g.worldSpawn = [x, y, z]; say(`Set the world spawn point to ${x}, ${y}, ${z} [0.0]`); break; }
-      case 'say': { const line = `[${p.name}] ${parts.slice(1).join(' ')}`; say(line); g.host?.broadcast({ t: 'chat', text: line }); break; }
-      case 'me': { const line = `* ${p.name} ${parts.slice(1).join(' ')}`; say(line); g.host?.broadcast({ t: 'chat', text: line }); break; }
-      case 'teammsg': { const line = `[Team] <${p.name}> ${parts.slice(1).join(' ')}`; say(line); g.host?.broadcast({ t: 'chat', text: line }); break; }
+      case 'say': announce(`[${p.name}] ${parts.slice(1).join(' ')}`); break;
+      case 'me': announce(`* ${p.name} ${parts.slice(1).join(' ')}`); break;
+      case 'teammsg': announce(`[Team] <${p.name}> ${parts.slice(1).join(' ')}`); break;
       case 'tell': case 'msg': case 'w': {
         if (parts.length < 3) usage(cmd);
         const msg = parts.slice(2).join(' ');
@@ -378,13 +382,13 @@ export function runCommand(g: Game, text: string, executor?: Player): void {
       case 'enchant': {
         if (parts.length < 3) usage(cmd);
         const id = parts[2].replace('minecraft:', ''); const lvl = parseInt(parts[3] ?? '1') || 1;
-        for (const e of targets(parts[1], [self], true)) { const pl = e as Player; const held = pl.heldItem(); if (!held) throw new CommandError(`${pl.name} is not holding any item`); const ex = held.enchantments.find((x) => x.id === id); if (ex) ex.level = lvl; else held.enchantments.push({ id, level: lvl }); pl.inventory.onChange?.(); say(`Applied enchantment ${g.assets.lang['enchantment.minecraft.' + id] ?? id} to ${pl.name}'s item`); }
+        for (const e of targets(parts[1], [self], true)) { const pl = e as Player; const held = pl.heldItem(); if (!held) throw new CommandError(`${pl.name} is not holding any item`); const ex = held.enchantments.find((x) => x.id === id); if (ex) ex.level = lvl; else held.enchantments.push({ id, level: lvl }); pl.inventory.onChange?.(); syncRemote(pl); say(`Applied enchantment ${g.assets.lang['enchantment.minecraft.' + id] ?? id} to ${pl.name}'s item`); }
         break;
       }
       case 'playsound': { if (!parts[1]) usage(cmd); const snd = parts[1].replace('minecraft:', ''); const x = parts[4] ? rel(parts[4], p.x) : p.x, y = parts[5] ? rel(parts[5], p.y) : p.y, z = parts[6] ? rel(parts[6], p.z) : p.z; g.sounds.playAt(snd, x, y, z, parseFloat(parts[7] ?? '1') || 1, parseFloat(parts[8] ?? '1') || 1); say(`Played sound ${snd} to ${parts[3] ?? p.name}`); break; }
       case 'particle': { if (!parts[1]) usage(cmd); const name = parts[1].replace('minecraft:', ''); const x = parts[2] ? rel(parts[2], p.x) : p.x, y = parts[3] ? rel(parts[3], p.y) : p.y, z = parts[4] ? rel(parts[4], p.z) : p.z; const count = parseInt(parts[8] ?? parts[5] ?? '1') || 1; const pa: any = g.particles; const fn = { flame: 'spawnFlame', smoke: 'spawnSmoke', heart: 'spawnHeart', happy_villager: 'spawnHappyVillager', portal: 'spawnPortal', explosion: 'spawnExplosion', splash: 'spawnSplash', bubble: 'spawnBubble', enchant: 'spawnEnchant', totem_of_undying: 'spawnTotem' }[name]; if (!fn || !pa[fn]) throw new CommandError(`Unknown particle '${name}'`); for (let i = 0; i < count; i++) pa[fn](x, y, z, name === 'splash' ? 0x3f76e4 : count); say(`Displaying particle minecraft:${name}`); break; }
       case 'list': { const names = g.allPlayers().map((x) => x.name); say(`There are ${names.length} of a max of ${g.host ? g.host.opts.maxPlayers : 1} players online: ${names.join(', ')}`); break; }
-      case 'kick': { if (!g.host) throw new CommandError('Only the host of a LAN world can kick players'); const name = parts[1]; const gu = [...g.host.guests.values()].find((x) => x.name.toLowerCase() === (name ?? '').toLowerCase()); if (!gu) throw new CommandError('No player was found'); g.host.kick(gu.id, parts.slice(2).join(' ') || 'Kicked by an operator'); say(`Kicked ${gu.name}: ${parts.slice(2).join(' ') || 'Kicked by an operator'}`); break; }
+      case 'kick': { if (!g.host) throw new CommandError('No player was found'); const name = parts[1]; const gu = [...g.host.guests.values()].find((x) => x.name.toLowerCase() === (name ?? '').toLowerCase()); if (!gu) throw new CommandError('No player was found'); g.host.kick(gu.id, parts.slice(2).join(' ') || 'Kicked by an operator'); say(`Kicked ${gu.name}: ${parts.slice(2).join(' ') || 'Kicked by an operator'}`); break; }
       case 'save-all': g.saveAll(); say('Saved the game'); break;
       case 'daylock': g.rules.doDaylightCycle = parts[1] === 'false'; say(`Daylight cycle ${g.rules.doDaylightCycle ? 'enabled' : 'locked'}`); break;
       case 'spectate': { if (!p.isSpectator) throw new CommandError('Spectator mode is required'); if (!parts[1]) { say('Stopped spectating'); break; } const t = targets(parts[1])[0]; p.setPos(t.x, t.y, t.z); say(`Now spectating ${nameOf(t)}`); break; }
@@ -405,7 +409,7 @@ export function runCommand(g: Game, text: string, executor?: Player): void {
           else usage(cmd);
         }
         if (parts[i] !== 'run') usage(cmd);
-        runCommand(g, '/' + parts.slice(i + 1).join(' '), who); break;
+        runCommand(g, '/' + parts.slice(i + 1).join(' '), who, feedback, operator); break;
       }
       default: err(`Unknown or incomplete command, see below for error\n§7${raw}§r§c<--[HERE]`);
     }

@@ -235,7 +235,8 @@ export class RelayAddressScreen extends Screen {
   keyDown(code: string, key: string, mods: any): boolean { if (code === 'Escape') { this.gui.game.saveOptions(); this.parent.refresh(); this.gui.open(this.parent); return true; } return super.keyDown(code, key, mods); }
 }
 
-/** Pause-menu "Share World": publish this world through a server as public or private (password). */
+/** Pause-menu "Open to LAN" (vanilla ShareToLanScreen): publish this world through a relay server, public or
+ *  private (password). */
 export class ShareWorldScreen extends Screen {
   hidesHud = true;
   gameMode = 'survival'; cheats = false; isPublic = true;
@@ -247,15 +248,15 @@ export class ShareWorldScreen extends Screen {
     const g = this.gui.game;
     const cx = this.width / 2;
     this.gameMode = g.worldMeta?.gameMode ?? 'survival'; this.cheats = g.cheats;
-    this.add(new CycleButton(cx - 155, 90, 150, 20, 'Game Mode: ', [{ value: 'survival', label: 'Survival' }, { value: 'creative', label: 'Creative' }, { value: 'adventure', label: 'Adventure' }, { value: 'spectator', label: 'Spectator' }], this.gameMode, (v) => { this.gameMode = v; }));
-    this.add(new CycleButton(cx + 5, 90, 150, 20, 'Allow Cheats: ', [{ value: false, label: 'OFF' }, { value: true, label: 'ON' }], this.cheats, (v) => { this.cheats = v; }));
+    this.add(new CycleButton(cx - 155, 90, 150, 20, (g.assets.lang['selectWorld.gameMode'] ?? 'Game Mode') + ': ', [{ value: 'survival', label: 'Survival' }, { value: 'creative', label: 'Creative' }, { value: 'adventure', label: 'Adventure' }, { value: 'spectator', label: 'Spectator' }], this.gameMode, (v) => { this.gameMode = v; }));
+    this.add(new CycleButton(cx + 5, 90, 150, 20, (g.assets.lang['selectWorld.allowCommands'] ?? 'Allow Cheats') + ': ', [{ value: false, label: 'OFF' }, { value: true, label: 'ON' }], this.cheats, (v) => { this.cheats = v; }));
     this.add(new CycleButton(cx - 155, 114, 150, 20, 'Visibility: ', [{ value: true, label: 'Public' }, { value: false, label: 'Private' }], this.isPublic, (v) => { this.isPublic = v; this.password.visible = !v; if (v) this.focused = null; }));
     this.password = this.add(new TextField(cx + 5, 114, 150, 20, ''));
     this.password.maxLength = 64; this.password.placeholder = 'Password'; this.password.password = true;
     this.password.visible = !this.isPublic;   // only private worlds take a password
     this.address = this.add(new TextField(cx - 155, 150, 310, 20, g.options.lastServerAddress || defaultRelayUrl()));
     this.address.maxLength = 128; this.address.placeholder = 'server address';
-    this.add(new Button(cx - 155, this.height - 28, 150, 20, 'Start Multiplayer', async () => {
+    this.add(new Button(cx - 155, this.height - 28, 150, 20, g.assets.lang['lanServer.start'] ?? 'Start LAN World', async () => {
       if (!this.isPublic && !this.password.text.trim()) { this.status = '§cSet a password, or switch to Public.'; return; }
       this.status = 'Connecting to the server…';
       try {
@@ -263,8 +264,8 @@ export class ShareWorldScreen extends Screen {
         g.options.lastServerAddress = this.address.text.trim(); g.saveOptions();
         const h = await g.openToLan({ name: g.worldMeta?.name ?? 'VoxeLand world', motd: '', gameMode: this.gameMode, cheats: this.cheats, maxPlayers: 8, relayUrl: url, password: this.isPublic ? '' : this.password.text.trim() });
         const addr = url.replace(/^wss?:\/\//, '').replace(/\/ws$/, '');
-        g.gui.addChat(`§eWorld shared as ${h.isPublic ? 'public' : 'private'} — others join from Multiplayer on ${addr}`);
-        if (!h.isPublic) g.gui.addChat(`§7Password: ${this.password.text.trim()}`);
+        g.gui.addChat((g.assets.lang['commands.publish.started'] ?? 'Local game hosted on port %s').replace('%s', addr));
+        if (!h.isPublic) g.gui.addChat(`§7Private world — password: ${this.password.text.trim()}`);
         this.gui.close();
       } catch (e: any) { this.status = '§c' + (e?.message ?? String(e)); }
     }));
@@ -272,8 +273,9 @@ export class ShareWorldScreen extends Screen {
   }
   render(ctx: CanvasRenderingContext2D, mx: number, my: number, partial: number): void {
     const f = this.gui.font;
-    f.drawCentered(ctx, 'Share World', this.width / 2, 40, 0xffffff);
-    f.drawCentered(ctx, 'Settings for other players', this.width / 2, 72, 0xa0a0a0);
+    const lang = this.gui.game.assets.lang;
+    f.drawCentered(ctx, lang['lanServer.title'] ?? 'LAN World', this.width / 2, 40, 0xffffff);
+    f.drawCentered(ctx, lang['lanServer.otherPlayers'] ?? 'Settings for Other Players', this.width / 2, 72, 0xa0a0a0);
     f.draw(ctx, 'Server address (leave as-is to use this game\'s server):', this.width / 2 - 155, 140, 0x808080);
     f.drawCentered(ctx, this.isPublic ? 'Public: listed for everyone using that server.' : 'Private: listed, but only players with the password can join.', this.width / 2, 180, 0x808080);
     if (this.status) f.drawCentered(ctx, this.status, this.width / 2, 196, 0xffffff);
@@ -287,7 +289,7 @@ export class DisconnectedScreen extends Screen {
   constructor(public reason: string) { super(); }
   build(): void { this.add(new Button(this.width / 2 - 100, this.height / 2 + 20, 200, 20, 'Back to Server List', () => this.gui.open(new MultiplayerScreen(new TitleScreen())))); }
   render(ctx: CanvasRenderingContext2D, mx: number, my: number, partial: number): void {
-    this.gui.font.drawCentered(ctx, 'Connection Lost', this.width / 2, this.height / 2 - 40, 0xffffff);
+    this.gui.font.drawCentered(ctx, this.gui.game.assets.lang['disconnect.lost'] ?? 'Connection Lost', this.width / 2, this.height / 2 - 40, 0xffffff);
     this.gui.font.drawCentered(ctx, this.reason, this.width / 2, this.height / 2 - 20, 0xa0a0a0);
     super.render(ctx, mx, my, partial);
   }

@@ -5,7 +5,7 @@
 //   guest -> relay: [payload]           relay -> host: [u32 fromClientId] [payload]
 // Payload: [u8 kind] [u32 jsonLength] [json utf8] [binary body]
 
-export const PROTOCOL_VERSION = 16;
+export const PROTOCOL_VERSION = 17;
 
 /** A successful acknowledgement older than locally submitted clicks must not roll them back. */
 export function shouldApplyInventoryState(currentRevision: number, incomingRevision: number, accepted: boolean): boolean {
@@ -21,7 +21,7 @@ export function serializedStackIdentity(stack: Record<string, any>): { key: stri
   return { key: JSON.stringify(identity), count };
 }
 
-const GUEST_MESSAGE_TYPES = new Set(['ready', 'move', 'inv', 'invTxn', 'contTxn', 'chunk', 'set', 'break', 'use', 'attack', 'snd', 'interact', 'drop', 'chat', 'death', 'cont', 'craft', 'close', 'respawn', 'sleep', 'xp', 'spawn', 'boatInput', 'dismount', 'ping']);
+const GUEST_MESSAGE_TYPES = new Set(['ready', 'move', 'inv', 'invTxn', 'contTxn', 'chunk', 'set', 'break', 'use', 'attack', 'snd', 'interact', 'throw', 'release', 'chat', 'cont', 'craft', 'close', 'respawn', 'sleep', 'xp', 'spawn', 'boatInput', 'dismount', 'ping']);
 
 /** Cheap boundary validation before an untrusted guest message reaches world logic. */
 export function isGuestMessage(m: unknown): m is Record<string, any> {
@@ -40,6 +40,9 @@ export function isGuestMessage(m: unknown): m is Record<string, any> {
   }
   return true;
 }
+
+/** One row of the Tab player list (vanilla PlayerInfo: name, latency, skin and game mode). */
+export interface PlayerListEntry { name: string; id: number; ping: number; skin: string; mode: string }
 
 /** A server as advertised by a relay. `private` servers need a password; `official` is the backend's own world. */
 export type ServerInfo = { id: string; name: string; host: string; motd: string; players: number; maxPlayers: number; gameMode: string; version: string; private: boolean; official: boolean; online?: boolean };

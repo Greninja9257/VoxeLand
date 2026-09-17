@@ -56,7 +56,7 @@ export class Player extends LivingEntity {
   crawling = false;
   reachDistance = 4.5;
   name = 'Player';
-  private lastX = 0; private lastZ = 0;
+  protected lastX = 0; protected lastZ = 0;
   walkDist = 0; nextStep = 1; prevWalkDist = 0;
   bob = 0; prevBob = 0;
   // Visual-only offset used to hide small authoritative server corrections. Physics and outgoing
@@ -75,6 +75,9 @@ export class Player extends LivingEntity {
     this.speed = 0.1;
   }
 
+  /** True for the local player on a multiplayer guest: like vanilla's LocalPlayer it predicts movement and
+   *  interaction, while health, hunger, effects and inventory are owned by the host (ServerPlayer). */
+  get clientSide(): boolean { return !!this.game?.client && !(this as any).isRemote; }
   get isCreative(): boolean { return this.gameMode === 'creative'; }
   get isSpectator(): boolean { return this.gameMode === 'spectator'; }
   get invulnerableMode(): boolean { return this.isCreative || this.isSpectator; }
@@ -96,6 +99,8 @@ export class Player extends LivingEntity {
   }
 
   heldItem(): ItemStack | null { return this.inventory.get(this.selectedSlot); }
+  /** Put a stack in this player's inventory, dropping what does not fit (vanilla Inventory.placeItemBackInInventory). */
+  give(stack: ItemStack): void { const left = this.inventory.add(stack); if (left > 0 && !this.clientSide) this.throwItem(stack); this.inventory.onChange?.(); }
   offhandItem(): ItemStack | null { return this.offhand.get(0); }
   replaceHeld(s: ItemStack | null): void { if (this.isCreative && s?.item.name === 'bucket') return; this.inventory.set(this.selectedSlot, s); }
   horizontalFacing(): string { return horizontalFacing(this.yaw); }
@@ -129,6 +134,7 @@ export class Player extends LivingEntity {
   }
 
   hurt(d: EntityDamage): boolean {
+    if (this.clientSide) return false; // the host decides and reports damage (applyServerHurt)
     if (this.invulnerableMode && d.source !== 'void') return false;
     if (this.game.difficulty === 0 && (d.source === 'starve')) return false;
     if (this.sleeping) this.wakeUp();
@@ -146,19 +152,38 @@ export class Player extends LivingEntity {
     return r;
   }
 
+  /** Authoritative damage result from the host: health, knockback and the hurt animation/sound cues. */
+  applyServerHurt(m: { health: number; damage?: number; absorption?: number; vx?: number; vy?: number; vz?: number; fire?: number; attacker?: { x: number; z: number } | null; dead?: boolean; deathMessage?: string }): void {
+    const prev = this.health;
+    if (this.sleeping) this.wakeUp();
+    this.health = m.health;
+    if (m.absorption !== undefined) this.absorption = m.absorption;
+    if (m.vx !== undefined && m.vy !== undefined && m.vz !== undefined) { this.vx = m.vx; this.vy = m.vy; this.vz = m.vz; }
+    if (m.fire !== undefined) this.fireTicks = m.fire;
+    if (this.health < prev || (m.damage ?? 0) > 0) {
+      this.hurtTime = this.hurtDuration; this.invulnerableTicks = 20;
+      if (m.attacker) { const dx = m.attacker.x - this.x, dz = m.attacker.z - this.z; this.hurtDir = Math.atan2(dz, dx) * 180 / Math.PI - this.yaw; } else this.hurtDir = 0;
+      this.game.gui.onPlayerHurt();
+    }
+    if (m.deathMessage) this.deathMessage = m.deathMessage;
+    if (m.dead && !this.isDead) { this.health = 0; this.isDead = true; this.game.onPlayerDied(this); }
+  }
+
+  heal(n: number): void { if (!this.clientSide) super.heal(n); }
+
   die(d: EntityDamage): void {
     super.die(d);
     this.deathMessage = this.deathText(d);
-    if (!this.isCreative && this.game.rules.keepInventory !== true) {
+    if (!this.isCreative && this.game.rules.keepInventory !== true && !this.clientSide) {
       for (const inv of [this.inventory, this.armor, this.offhand, this.craftingGrid]) for (let i = 0; i < inv.size; i++) { const s = inv.get(i); if (s) { this.game.dropItem(this.x, this.y + 1, this.z, s, [(Math.random() - 0.5) * 0.3, 0.2, (Math.random() - 0.5) * 0.3]); inv.slots[i] = null; } }
       const xp = Math.min(100, this.xpLevel * 7);
       if (xp > 0) this.game.spawnXp(this.x, this.y, this.z, xp);
       this.xpLevel = 0; this.xpProgress = 0; this.totalXp = 0;
     }
-    this.game.onPlayerDied();
+    this.game.onPlayerDied(this);
   }
 
-  private deathText(d: EntityDamage): string {
+  deathText(d: EntityDamage): string {
     const l = this.game.assets.lang;
     const key = { fall: 'death.fell.accident.generic', drown: 'death.attack.drown', lava: 'death.attack.lava', fire: 'death.attack.inFire', onFire: 'death.attack.onFire', cactus: 'death.attack.cactus', starve: 'death.attack.starve', void: 'death.attack.outOfWorld', explosion: 'death.attack.explosion', arrow: 'death.attack.arrow', magma: 'death.attack.hotFloor', attack: 'death.attack.mob', sweetBerryBush: 'death.attack.sweetBerryBush', lightning: 'death.attack.lightningBolt', freeze: 'death.attack.freeze', wither: 'death.attack.wither', outOfWorld: 'death.attack.outOfWorld', stalagmite: 'death.attack.stalagmite', flyIntoWall: 'death.attack.flyIntoWall', generic: 'death.attack.generic', thorns: 'death.attack.thorns', dragonBreath: 'death.attack.dragonBreath', witherRose: 'death.attack.witherRose', cramming: 'death.attack.cramming' }[d.source] ?? 'death.attack.generic';
     let t = l[key] ?? '%1$s died';
@@ -173,8 +198,8 @@ export class Player extends LivingEntity {
     this.foodLevel = Math.min(20, this.foodLevel + points);
     this.saturation = Math.min(this.foodLevel, this.saturation + points * saturation * 2);
   }
-  private tickHunger(): void {
-    if (this.invulnerableMode) return;
+  protected tickHunger(): void {
+    if (this.invulnerableMode || this.clientSide) return;
     const diff = this.game.difficulty;
     if (this.exhaustion > 4) {
       this.exhaustion -= 4;
@@ -214,14 +239,7 @@ export class Player extends LivingEntity {
     if (Math.abs(this.serverCorrectionY) < 0.0001) this.serverCorrectionY = 0;
     if (Math.abs(this.serverCorrectionZ) < 0.0001) this.serverCorrectionZ = 0;
     this.prevCameraEye = this.cameraEye;
-    if (this.sleeping) { this.sleepTimer++; this.moveForward = this.moveStrafe = 0; this.jumping = false; }
-    else this.sleepTimer = 0;
-    this.ticksSinceLastSleep++;
-    for (const [k, v] of this.itemCooldowns) { if (v <= 1) this.itemCooldowns.delete(k); else this.itemCooldowns.set(k, v - 1); }
-    if (this.breakCooldown > 0) this.breakCooldown--;
-    if (this.useCooldown > 0) this.useCooldown--;
-    this.attackCooldownTicks++;
-    if (this.flyToggleTimer > 0) this.flyToggleTimer--;
+    this.tickCooldowns();
     if (this.health <= 0) { super.tick(); return; }
     this.tickHunger();
     // eye height
@@ -232,19 +250,8 @@ export class Player extends LivingEntity {
     // pose size
     const wantHeight = this.sleeping ? 0.2 : this.swimmingPose || this.crawling ? 0.6 : this.isSneaking ? 1.5 : 1.8;
     if (wantHeight !== this.height) { this.height = wantHeight; this.updateBB(); }
-    // item use progress
-    if (this.usingItem) {
-      this.itemUseTicks++;
-      const it = this.usingItem.item;
-      if (it.food) {
-        if (this.itemUseTicks % 4 === 0 && this.itemUseTicks > 4) { g.sounds.playAt('entity.generic.eat', this.x, this.y, this.z, 0.5 + 0.5 * Math.random(), 0.9 + Math.random() * 0.2); g.particles.spawnItemCrumbs(this, this.usingItem, 5); }
-        if (this.itemUseTicks >= this.useDuration) this.finishUsing();
-      }
-    }
-    // exhaustion from movement
-    const dx = this.x - this.lastX, dz = this.z - this.lastZ; const dist = Math.hypot(dx, dz);
-    if (this.inWater && !this.flying) this.addExhaustion(0.01 * dist); else if (this.isSprinting && this.onGround) this.addExhaustion(0.1 * dist);
-    this.lastX = this.x; this.lastZ = this.z;
+    this.tickItemUse();
+    this.tickMovementExhaustion();
     super.tick();
     // vanilla Player.tick: bob amplitude follows the (post-friction) horizontal velocity while on the ground
     this.prevBob = this.bob;
@@ -272,11 +279,54 @@ export class Player extends LivingEntity {
     // step on pressure plates / tripwires
     g.redstone.entityStepped(Math.floor(this.x), Math.floor(this.y), Math.floor(this.z));
     g.redstone.entityStepped(Math.floor(this.x), Math.floor(this.y + 0.2), Math.floor(this.z));
-    // pick up items
-    if (this.health > 0 && !this.isSpectator) this.pickupItems();
+    // pick up items (the host does this for guests and reports what they got)
+    if (this.health > 0 && !this.isSpectator && !this.clientSide) this.pickupItems();
     // portal
     this.checkPortal();
     // mining fatigue etc handled in speed
+  }
+
+  protected tickCooldowns(): void {
+    if (this.sleeping) { this.sleepTimer++; this.moveForward = this.moveStrafe = 0; this.jumping = false; }
+    else this.sleepTimer = 0;
+    this.ticksSinceLastSleep++;
+    for (const [k, v] of this.itemCooldowns) { if (v <= 1) this.itemCooldowns.delete(k); else this.itemCooldowns.set(k, v - 1); }
+    if (this.breakCooldown > 0) this.breakCooldown--;
+    if (this.useCooldown > 0) this.useCooldown--;
+    this.attackCooldownTicks++;
+    if (this.flyToggleTimer > 0) this.flyToggleTimer--;
+  }
+  /** Eating/drinking progress (vanilla LivingEntity.updatingUsingItem). */
+  protected tickItemUse(): void {
+    if (!this.usingItem) return;
+    const g = this.game;
+    this.itemUseTicks++;
+    const it = this.usingItem.item, n = it.name;
+    const drink = n === 'milk_bucket' || n === 'potion' || n === 'honey_bottle';
+    if (it.food || drink) {
+      if (this.itemUseTicks % 4 === 0 && this.itemUseTicks > 4) {
+        // the host's copy of a guest plays these sounds for everyone; the guest only shows the crumbs
+        if (drink) { if (!this.clientSide) g.sounds.playAt('entity.generic.drink', this.x, this.y, this.z, 0.5, Math.random() * 0.1 + 0.9); }
+        else { if (!this.clientSide) g.sounds.playAt('entity.generic.eat', this.x, this.y, this.z, 0.5 + 0.5 * Math.random(), 0.9 + Math.random() * 0.2); g.particles.spawnItemCrumbs(this, this.usingItem, 5); }
+      }
+      if (this.itemUseTicks >= this.useDuration) this.finishUsing();
+    }
+  }
+  /** How long using this item takes (vanilla Item.getUseDuration); 0 when it cannot be used from the hand. */
+  useDurationFor(stack: ItemStack): number {
+    const n = stack.item.name;
+    if (stack.item.food) return this.canEat(stack.item.food.alwaysEat) ? (stack.item.food.fast ? 16 : 32) : 0;
+    if (n === 'honey_bottle') return 40;
+    if (n === 'milk_bucket' || n === 'potion') return 32;
+    if (n === 'crossbow') return 25;
+    if (n === 'bow' || n === 'trident' || n === 'shield' || n === 'spyglass') return 72000;
+    return 0;
+  }
+  /** vanilla Player.checkMovementStatistics: sprinting and swimming cost exhaustion per block moved. */
+  protected tickMovementExhaustion(): void {
+    const dx = this.x - this.lastX, dz = this.z - this.lastZ; const dist = Math.hypot(dx, dz);
+    if (this.inWater && !this.flying) this.addExhaustion(0.01 * dist); else if (this.isSprinting && this.onGround) this.addExhaustion(0.1 * dist);
+    this.lastX = this.x; this.lastZ = this.z;
   }
 
   protected aiStep(): void {
@@ -284,7 +334,7 @@ export class Player extends LivingEntity {
   }
 
   protected fall(distance: number): void {
-    if (this.invulnerableMode) return;
+    if (this.invulnerableMode || this.clientSide) return;
     super.fall(distance);
   }
 
@@ -408,6 +458,9 @@ export class Player extends LivingEntity {
     this.swing();
   }
   throwItem(stack: ItemStack): void {
+    // a guest asks the host to throw it (vanilla ServerboundPlayerActionPacket DROP_ITEM / container throw click);
+    // the item entity appears once the host has taken the stack out of the authoritative inventory
+    if (this.clientSide) { this.game.client!.send({ t: 'throw', stack: stack.serialize() }); return; }
     const d = lookDir(this.yaw, this.pitch);
     const e = new ItemEntity(stack);
     e.setPos(this.x, this.eyeY - 0.3, this.z);
@@ -573,10 +626,10 @@ export class Player extends LivingEntity {
         else world.setBlock(hit.x, hit.y, hit.z, 0);
         g.sounds.playAt(lava ? 'item.bucket.fill_lava' : 'item.bucket.fill', hit.x + 0.5, hit.y + 0.5, hit.z + 0.5, 1, 1);
         const full = new ItemStack(g.items.get(lava ? 'lava_bucket' : 'water_bucket')!, 1);
-        if (!this.isCreative) { stack.count--; if (stack.count <= 0) (offhand ? this.offhand : this.inventory).set(offhand ? 0 : this.selectedSlot, full); else g.givePlayer(full); this.inventory.onChange?.(); }
+        if (!this.isCreative) { stack.count--; if (stack.count <= 0) (offhand ? this.offhand : this.inventory).set(offhand ? 0 : this.selectedSlot, full); else this.give(full); this.inventory.onChange?.(); }
         return true;
       }
-      if (tn === 'powder_snow') { world.setBlock(hit.x, hit.y, hit.z, 0); g.sounds.playAt('item.bucket.fill_powder_snow', hit.x + 0.5, hit.y + 0.5, hit.z + 0.5, 1, 1); const full = new ItemStack(g.items.get('powder_snow_bucket')!, 1); if (!this.isCreative) { stack.count--; if (stack.count <= 0) this.inventory.set(this.selectedSlot, full); else g.givePlayer(full); this.inventory.onChange?.(); } return true; }
+      if (tn === 'powder_snow') { world.setBlock(hit.x, hit.y, hit.z, 0); g.sounds.playAt('item.bucket.fill_powder_snow', hit.x + 0.5, hit.y + 0.5, hit.z + 0.5, 1, 1); const full = new ItemStack(g.items.get('powder_snow_bucket')!, 1); if (!this.isCreative) { stack.count--; if (stack.count <= 0) this.inventory.set(this.selectedSlot, full); else this.give(full); this.inventory.onChange?.(); } return true; }
       return false;
     }
     if (n === 'water_bucket' || n === 'lava_bucket' || n === 'powder_snow_bucket' || n.endsWith('_bucket') && ['cod', 'salmon', 'pufferfish', 'tropical_fish', 'axolotl', 'tadpole'].includes(n.replace('_bucket', ''))) {
@@ -598,7 +651,7 @@ export class Player extends LivingEntity {
       if (!this.isCreative) (offhand ? this.offhand : this.inventory).set(offhand ? 0 : this.selectedSlot, new ItemStack(g.items.get('bucket')!, 1));
       return true;
     }
-    if (n === 'glass_bottle' && target !== 0 && reg.hasWater(target)) { consume(); g.givePlayer(new ItemStack(g.items.get('potion')!, 1, 0, [], null, { potion: 'water' })); g.sounds.playAt('item.bottle.fill', hit.x + 0.5, hit.y + 0.5, hit.z + 0.5, 1, 1); return true; }
+    if (n === 'glass_bottle' && target !== 0 && reg.hasWater(target)) { consume(); this.give(new ItemStack(g.items.get('potion')!, 1, 0, [], null, { potion: 'water' })); g.sounds.playAt('item.bottle.fill', hit.x + 0.5, hit.y + 0.5, hit.z + 0.5, 1, 1); return true; }
     // tools on blocks
     if (item.tool === 'hoe' && (tn === 'dirt' || tn === 'grass_block' || tn === 'dirt_path' || tn === 'coarse_dirt' || tn === 'rooted_dirt') && hit.face !== 0) {
       const above = world.getBlock(hit.x, hit.y + 1, hit.z);
@@ -629,7 +682,7 @@ export class Player extends LivingEntity {
     }
     if (n.endsWith('_spawn_egg')) { const [dx, dy, dz] = [[0, -1, 0], [0, 1, 0], [0, 0, -1], [0, 0, 1], [-1, 0, 0], [1, 0, 0]][hit.face]; g.spawnMob(n.replace('_spawn_egg', ''), hit.x + dx + 0.5, hit.y + dy, hit.z + dz + 0.5, false); consume(); return true; }
     if (n === 'shears' && (tn === 'pumpkin')) { const carved = reg.stateWith(reg.blockByName('carved_pumpkin')!, { facing: oppositeFacing(hit.face >= 2 ? ['down', 'up', 'north', 'south', 'west', 'east'][hit.face] : this.horizontalFacing()) }); world.setBlock(hit.x, hit.y, hit.z, reg.withProp(carved, 'facing', hit.face >= 2 ? ['down', 'up', 'north', 'south', 'west', 'east'][hit.face] : this.horizontalFacing())); g.dropItem(hit.x + 0.5, hit.y + 1, hit.z + 0.5, new ItemStack(g.items.get('pumpkin_seeds')!, 4)); g.sounds.playAt('block.pumpkin.carve', hit.x + 0.5, hit.y + 0.5, hit.z + 0.5, 1, 1); this.damageHeld(stack, 1); return true; }
-    if (n === 'shears' && tn === 'beehive' || tn === 'bee_nest') { if (n === 'shears' && reg.getProps(target).honey_level === '5') { world.setBlock(hit.x, hit.y, hit.z, reg.withProp(target, 'honey_level', '0')); g.dropItem(hit.x + 0.5, hit.y + 1, hit.z + 0.5, new ItemStack(g.items.get('honeycomb')!, 3)); this.damageHeld(stack, 1); return true; } if (n === 'glass_bottle' && reg.getProps(target).honey_level === '5') { world.setBlock(hit.x, hit.y, hit.z, reg.withProp(target, 'honey_level', '0')); consume(); g.givePlayer(new ItemStack(g.items.get('honey_bottle')!, 1)); return true; } }
+    if (n === 'shears' && tn === 'beehive' || tn === 'bee_nest') { if (n === 'shears' && reg.getProps(target).honey_level === '5') { world.setBlock(hit.x, hit.y, hit.z, reg.withProp(target, 'honey_level', '0')); g.dropItem(hit.x + 0.5, hit.y + 1, hit.z + 0.5, new ItemStack(g.items.get('honeycomb')!, 3)); this.damageHeld(stack, 1); return true; } if (n === 'glass_bottle' && reg.getProps(target).honey_level === '5') { world.setBlock(hit.x, hit.y, hit.z, reg.withProp(target, 'honey_level', '0')); consume(); this.give(new ItemStack(g.items.get('honey_bottle')!, 1)); return true; } }
     // seeds / crops
     const cropFor: Record<string, string> = { wheat_seeds: 'wheat', carrot: 'carrots', potato: 'potatoes', beetroot_seeds: 'beetroots', melon_seeds: 'melon_stem', pumpkin_seeds: 'pumpkin_stem', torchflower_seeds: 'torchflower_crop', pitcher_pod: 'pitcher_crop', nether_wart: 'nether_wart', cocoa_beans: 'cocoa', sweet_berries: 'sweet_berry_bush', glow_berries: 'cave_vines', kelp: 'kelp', bamboo: 'bamboo_sapling', redstone: 'redstone_wire', string: 'tripwire', wheat: '', flower_pot: 'flower_pot', cake: 'cake', bucket: '', sugar_cane: 'sugar_cane', seagrass: 'seagrass', sea_pickle: 'sea_pickle' };
     let blockName = item.blockName;
@@ -726,26 +779,27 @@ export class Player extends LivingEntity {
   startUsing(stack: ItemStack, duration: number): void { this.usingItem = stack; this.itemUseTicks = 0; this.useDuration = duration; }
   stopUsing(): void {
     if (!this.usingItem) return;
+    if (this.clientSide) this.game.client!.send({ t: 'release' });
     const n = this.usingItem.item.name;
     if (n === 'bow') { const charge = Math.min(1, this.itemUseTicks / 20); const power = (charge * charge + charge * 2) / 3; if (power >= 0.1) this.shootArrow(this.usingItem, power * 3, power >= 1); }
     else if (n === 'crossbow') { if (this.itemUseTicks >= 25) { this.usingItem.extra.charged = true; this.game.sounds.playAt('item.crossbow.loading_end', this.x, this.y, this.z, 1, 1); if (!this.isCreative) this.findArrow(true); this.inventory.onChange?.(); } }
     else if (n === 'trident') { if (this.itemUseTicks >= 10) { const a = new ArrowEntity(this, 8, 'normal'); (a as any).trident = this.usingItem.clone(); (a as any).type = 'trident'; const d = lookDir(this.yaw, this.pitch); a.setPos(this.x, this.eyeY - 0.1, this.z); a.vx = d[0] * 2.5; a.vy = d[1] * 2.5; a.vz = d[2] * 2.5; this.game.addEntity(a); this.game.sounds.playAt('item.trident.throw', this.x, this.y, this.z, 1, 1); if (!this.isCreative) { this.inventory.set(this.selectedSlot, null); } } }
     this.usingItem = null; this.itemUseTicks = 0; this.game.gui.spyglass = false;
   }
-  private finishUsing(): void {
+  protected finishUsing(): void {
     const s = this.usingItem!;
     const item = s.item, n = item.name;
     const g = this.game;
     if (item.food) {
       this.eatFood(item.food.points, item.food.saturation);
-      g.sounds.playAt('entity.player.burp', this.x, this.y, this.z, 0.5, Math.random() * 0.1 + 0.9);
+      if (!this.clientSide) g.sounds.playAt('entity.player.burp', this.x, this.y, this.z, 0.5, Math.random() * 0.1 + 0.9);
       const effects: Record<string, [string, number, number][]> = { golden_apple: [['regeneration', 1, 100], ['absorption', 0, 2400]], enchanted_golden_apple: [['regeneration', 1, 400], ['absorption', 3, 2400], ['resistance', 0, 6000], ['fire_resistance', 0, 6000]], rotten_flesh: Math.random() < 0.8 ? [['hunger', 0, 600]] : [], spider_eye: [['poison', 0, 100]], pufferfish: [['poison', 1, 1200], ['hunger', 2, 300], ['nausea', 0, 300]], poisonous_potato: Math.random() < 0.6 ? [['poison', 0, 100]] : [], chicken: Math.random() < 0.3 ? [['hunger', 0, 600]] : [], suspicious_stew: [['regeneration', 0, 160]], chorus_fruit: [] };
       for (const [id, amp, dur] of effects[n] ?? []) this.addEffect({ id, amplifier: amp, duration: dur });
       if (n === 'chorus_fruit') { for (let i = 0; i < 16; i++) { const tx = this.x + (Math.random() - 0.5) * 16, ty = clamp(this.y + Math.floor(Math.random() * 16) - 8, MIN_Y, MAX_Y - 1), tz = this.z + (Math.random() - 0.5) * 16; if (g.canStandAt(tx, ty, tz)) { this.setPos(tx, ty, tz); g.sounds.playAt('item.chorus_fruit.teleport', tx, ty, tz, 1, 1); break; } } this.itemCooldowns.set(n, 20); }
       const container = n.endsWith('_stew') || n === 'beetroot_soup' || n === 'suspicious_stew' ? 'bowl' : null;
-      if (!this.isCreative) { s.count--; if (s.count <= 0) this.inventory.set(this.selectedSlot, null); if (container) g.givePlayer(new ItemStack(g.items.get(container)!, 1)); }
+      if (!this.isCreative) { s.count--; if (s.count <= 0) this.inventory.set(this.selectedSlot, null); if (container) this.give(new ItemStack(g.items.get(container)!, 1)); }
     } else if (n === 'milk_bucket') { this.effects = []; this.absorption = 0; if (!this.isCreative) this.replaceHeld(new ItemStack(g.items.get('bucket')!, 1)); }
-    else if (n === 'potion') { const e = s.extra?.effect; if (e) this.addEffect({ id: e.id, amplifier: e.amplifier, duration: e.duration }); if (!this.isCreative) this.replaceHeld(new ItemStack(g.items.get('glass_bottle')!, 1)); g.sounds.playAt('entity.generic.drink', this.x, this.y, this.z, 0.5, 1); }
+    else if (n === 'potion') { const e = s.extra?.effect; if (e) this.addEffect({ id: e.id, amplifier: e.amplifier, duration: e.duration }); if (!this.isCreative) this.replaceHeld(new ItemStack(g.items.get('glass_bottle')!, 1)); }
     else if (n === 'honey_bottle') { this.eatFood(6, 0.1); this.removeEffect('poison'); if (!this.isCreative) this.replaceHeld(new ItemStack(g.items.get('glass_bottle')!, 1)); }
     this.inventory.onChange?.();
     this.usingItem = null; this.itemUseTicks = 0;
@@ -856,6 +910,8 @@ export class Player extends LivingEntity {
     for (const e of g.entities) if ((e as any).hostile && !e.removed && e.distSq(x, y, z) < 8 * 8 + 5 * 5) { g.gui.showActionBar(g.assets.lang['block.minecraft.bed.not_safe'] ?? 'You may not rest now, there are monsters nearby'); return false; }
     if (this.distSq(x + 0.5, y, z + 0.5) > 3 * 3) { g.gui.showActionBar(g.assets.lang['block.minecraft.bed.too_far_away'] ?? 'You may not rest now, the bed is too far away'); return false; }
     this.sleeping = true; this.bedPos = [x, y, z];
+    // vanilla announces the sleep status to everyone (SleepStatus); a shared world does this from NetHost
+    if (!g.host && !g.client) g.gui.showActionBar(g.assets.lang['sleep.skipping_night'] ?? 'Sleeping through this night');
     this.setPos(hx + 0.5, y + 0.19, hz + 0.5);
     this.yaw = { north: 180, south: 0, west: 90, east: -90 }[props.facing] ?? 0;
     this.pitch = 0;

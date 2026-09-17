@@ -87,6 +87,12 @@ export abstract class Entity {
     // a vehicle moves its passengers before they tick and records their previous position itself
     if (!this.vehicle) { this.prevX = this.x; this.prevY = this.y; this.prevZ = this.z; }
     this.prevYaw = this.yaw; this.prevPitch = this.pitch;
+    this.baseTick();
+  }
+
+  /** vanilla Entity.baseTick: age, portal cooldown, void damage, fluid state and burning. Also run for players the
+   *  multiplayer host simulates from network movement, which skip the physics part of tick(). */
+  protected baseTick(): void {
     this.age++;
     if (this.portalCooldown > 0) this.portalCooldown--;
     if (this.y < -128) this.hurt({ amount: 4, source: 'void', bypassArmor: true });
@@ -354,21 +360,8 @@ export abstract class LivingEntity extends Entity {
     this.prevBodyYaw = this.bodyYaw; this.prevHeadYaw = this.headYaw;
     this.prevSwingProgress = this.swingProgress;
     this.prevLimbSwingAmount = this.limbSwingAmount;
-    if (this.hurtTime > 0) this.hurtTime--;
-    if (this.invulnerableTicks > 0) this.invulnerableTicks--;
     if (this.jumpTicks > 0) this.jumpTicks--;
-    // effects
-    for (const e of this.effects) e.duration--;
-    if (this.effects.some((e) => e.duration <= 0)) this.effects = this.effects.filter((e) => e.duration > 0);
-    if (this.hasEffect('regeneration') && this.age % Math.max(1, 50 >> this.effectLevel('regeneration') - 1) === 0) this.heal(1);
-    if (this.hasEffect('poison') && this.age % Math.max(1, 25 >> this.effectLevel('poison') - 1) === 0 && this.health > 1) this.hurt({ amount: 1, source: 'generic', bypassArmor: true });
-    if (this.hasEffect('wither') && this.age % Math.max(1, 40 >> this.effectLevel('wither') - 1) === 0) this.hurt({ amount: 1, source: 'wither', bypassArmor: true });
-    // air / drowning
-    if (this.eyeInWater && !this.hasEffect('water_breathing') && !this.canBreatheUnderwater()) {
-      const resp = this.respirationLevel();
-      if (resp === 0 || Math.random() < 1 / (resp + 1)) this.air--;
-      if (this.air <= -20) { this.air = 0; this.hurt({ amount: 2, source: 'drown', bypassArmor: true }); }
-    } else if (this.air < this.maxAir) this.air = Math.min(this.maxAir, this.air + 4);
+    this.tickEffectsAndAir();
     // swing animation
     this.updateSwing();
     // death
@@ -395,6 +388,23 @@ export abstract class LivingEntity extends Entity {
     if (this.limbSwingAmount > 0.05) this.bodyYaw = this.yaw;
     else if (Math.abs(hd) > 50) this.bodyYaw = this.yaw - Math.sign(hd) * 50;
     this.headYaw = this.yaw;
+  }
+
+  /** Hurt/invulnerability timers, potion effects and air (vanilla LivingEntity.baseTick + tickEffects). */
+  protected tickEffectsAndAir(): void {
+    if (this.hurtTime > 0) this.hurtTime--;
+    if (this.invulnerableTicks > 0) this.invulnerableTicks--;
+    for (const e of this.effects) e.duration--;
+    if (this.effects.some((e) => e.duration <= 0)) this.effects = this.effects.filter((e) => e.duration > 0);
+    if (this.hasEffect('regeneration') && this.age % Math.max(1, 50 >> this.effectLevel('regeneration') - 1) === 0) this.heal(1);
+    if (this.hasEffect('poison') && this.age % Math.max(1, 25 >> this.effectLevel('poison') - 1) === 0 && this.health > 1) this.hurt({ amount: 1, source: 'generic', bypassArmor: true });
+    if (this.hasEffect('wither') && this.age % Math.max(1, 40 >> this.effectLevel('wither') - 1) === 0) this.hurt({ amount: 1, source: 'wither', bypassArmor: true });
+    // air / drowning
+    if (this.eyeInWater && !this.hasEffect('water_breathing') && !this.canBreatheUnderwater()) {
+      const resp = this.respirationLevel();
+      if (resp === 0 || Math.random() < 1 / (resp + 1)) this.air--;
+      if (this.air <= -20) { this.air = 0; this.hurt({ amount: 2, source: 'drown', bypassArmor: true }); }
+    } else if (this.air < this.maxAir) this.air = Math.min(this.maxAir, this.air + 4);
   }
 
   /** vanilla LivingEntity.pushEntities / Entity.push: overlapping entities shove each other apart horizontally. */
@@ -669,9 +679,9 @@ export class ExperienceOrb extends Entity {
     if (this.age >= 6000) { this.remove(); return; }
     if (!this.noGravity) this.vy -= 0.03;
     if (this.inWater) { this.vy = Math.min(0.06, this.vy + 0.06); }
-    // attracted to player
-    const p = this.game.player;
-    if (p && !p.isDead) {
+    // attracted to the nearest player (vanilla ExperienceOrb.tick: followingPlayer within 8 blocks)
+    const p = this.game.nearestPlayer(this.x, this.y, this.z);
+    if (p && !p.isDead && !p.isSpectator) {
       const dx = p.x - this.x, dy = p.y + p.eyeHeight / 2 - this.y, dz = p.z - this.z;
       const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
       if (d < 8) { const f = (1 - d / 8); this.vx += dx / d * f * f * 0.1; this.vy += dy / d * f * f * 0.1; this.vz += dz / d * f * f * 0.1; }

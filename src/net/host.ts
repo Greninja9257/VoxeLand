@@ -10,8 +10,10 @@ import { BoatEntity } from '../entity/boat';
 import { ArrowEntity, FallingBlockEntity, PrimedTnt, ThrownProjectile } from '../entity/misc';
 import { Inventory, ItemStack } from '../items/stack';
 import type { WorldListener } from '../world/world';
-import { encodeChunk, packFrame, FRAME_CHUNK, PROTOCOL_VERSION, TARGET_SERVER, defaultRelayUrl, isGuestMessage, serializedStackIdentity } from './protocol';
+import { encodeChunk, packFrame, FRAME_CHUNK, PROTOCOL_VERSION, TARGET_SERVER, defaultRelayUrl, isGuestMessage, serializedStackIdentity, type PlayerListEntry } from './protocol';
 import type { Chunk } from '../world/chunk';
+import type { Player } from '../entity/player';
+import { runCommand } from '../game/commands';
 
 interface Guest {
   id: number; playerId: string; name: string; player: RemotePlayer;
@@ -27,6 +29,9 @@ interface Guest {
   inventoryRevision: number;
   crafting: Inventory;
   cursor: Inventory;
+  /** last server-owned stats sent (vanilla sends SetHealth/SetExperience/effect packets the moment they change) */
+  statsKey: string;
+  inventoryDirty: boolean;
 }
 
 export interface HostOptions {
@@ -49,6 +54,7 @@ export class NetHost implements WorldListener {
   private queue: any[] = [];
   private soundOrigin = 0;
   private ticks = 0;
+  private sleepAnnounced = '';
   hostName = 'Host';
   onStatus: ((s: string) => void) | null = null;
 
@@ -150,9 +156,14 @@ export class NetHost implements WorldListener {
       else if (!gu.ridingSent && gu.player.vehicle) gu.ridingSent = true;
       this.streamChunks(gu);
       this.pickups(gu);
+      const p = gu.player;
+      if (p.needsCorrection) { p.needsCorrection = false; this.send(gu.id, { t: 'correct', x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch }); }
+      const stats = this.stats(p), key = JSON.stringify(stats);
+      if (key !== gu.statsKey) { gu.statsKey = key; this.send(gu.id, { t: 'stats', ...stats }); }
       if (gu.container && this.ticks % 5 === 0) this.sendContainer(gu, false);
-      if (this.ticks % 20 === 0) this.send(gu.id, { t: 'self', mode: gu.player.gameMode, state: this.playerState(gu.player) });
+      if (gu.inventoryDirty || this.ticks % 20 === 0) { gu.inventoryDirty = false; this.send(gu.id, { t: 'self', mode: p.gameMode, state: this.playerState(p) }); }
     }
+    this.checkSleep();
     if (this.ticks % 2 === 0) this.sendEntities(this.ticks % 4 === 0);
     if (this.official && this.ticks % 20 === 0 && this.ws?.readyState === 1) {
       this.ws.send(JSON.stringify({ t: 'playerState', playerId: g.options.playerId, saved: g.player.serialize() }));
@@ -180,16 +191,17 @@ export class NetHost implements WorldListener {
     if ([...this.guests.values()].some((x) => x.name === name) || name === this.hostName) { name = name + '_' + id; }
     const p = new RemotePlayer(name);
     p.clientId = id; p.skin = skin === 'alex' ? 'alex' : 'steve';
-    p.hurtHandler = (d) => queueMicrotask(() => this.send(id, { t: 'hurt', damage: d.amount, source: d.source, health: p.health, absorption: p.absorption, vx: p.vx, vy: p.vy, vz: p.vz, fire: p.fireTicks, dead: p.health <= 0 }));
+    // sent synchronously so the damage cue precedes the stats update of the same tick
+    p.hurtHandler = (d) => { if (p.health <= 0) { const gu = this.guests.get(id); if (gu) gu.inventoryDirty = true; } this.send(id, { t: 'hurt', damage: d.amount, source: d.source, health: p.health, absorption: p.absorption, vx: p.vx, vy: p.vy, vz: p.vz, fire: p.fireTicks, dead: p.health <= 0, deathMessage: p.health <= 0 ? p.deathMessage : undefined, attacker: d.attacker ? { x: d.attacker.x, z: d.attacker.z } : null }); };
     // Stable ids prevent renamed players (or two players with the same display name) sharing inventories.
     // The name fallback migrates saves made by older versions.
     const saved = g.playerData.get(playerId) ?? g.playerData.get(name);
     const spawn = g.worldSpawn ?? [Math.floor(g.player.x), Math.floor(g.player.y), Math.floor(g.player.z)];
     g.addEntity(p);
     if (saved) { try { p.deserialize(saved); } catch { /* reject incompatible legacy state and use spawn */ } }
-    p.setPos(saved?.x ?? spawn[0] + 0.5, saved?.y ?? spawn[1], saved?.z ?? spawn[2] + 0.5); p.tx = p.x; p.ty = p.y; p.tz = p.z;
+    p.setPos(saved?.x ?? spawn[0] + 0.5, saved?.y ?? spawn[1], saved?.z ?? spawn[2] + 0.5); p.needsCorrection = false;
     p.setGameMode(this.opts.gameMode as any);
-    const gu: Guest = { id, playerId, name, player: p, known: new Set(), chunks: new Set(), wantChunks: new Set(), container: null, ready: false, lastMoveTick: this.ticks, movementViolations: 0, craftingSize: 2, inventoryRevision: 0, crafting: new Inventory(4), cursor: new Inventory(1) };
+    const gu: Guest = { id, playerId, name, player: p, known: new Set(), chunks: new Set(), wantChunks: new Set(), container: null, ready: false, lastMoveTick: this.ticks, movementViolations: 0, craftingSize: 2, inventoryRevision: 0, crafting: new Inventory(4), cursor: new Inventory(1), statsKey: '', inventoryDirty: false };
     this.guests.set(id, gu);
     this.send(id, { t: 'welcome', name, hostName: this.official ? this.opts.name : this.hostName, dimension: g.world.dimension, seed: g.world.seed, time: g.world.time, dayTime: g.world.dayTime, spawn, saved: saved ?? null, gameMode: this.opts.gameMode, cheats: this.opts.cheats, difficulty: g.difficulty, rules: g.rules, weather: g.weather.serialize(), version: g.version, protocol: PROTOCOL_VERSION, players: this.playerList(), music: g.sounds.currentMusic() });
     g.gui.addChat(`§e${name} joined the game`);
@@ -210,7 +222,15 @@ export class NetHost implements WorldListener {
     this.onStatus?.('players');
   }
 
-  playerList(): { name: string; id: number }[] { return [{ name: this.hostName, id: -1 }, ...[...this.guests.values()].map((gu) => ({ name: gu.name, id: gu.id }))]; }
+  playerList(): PlayerListEntry[] {
+    const g = this.game;
+    return [{ name: this.hostName, id: -1, ping: 0, skin: g.options.skin, mode: g.player.gameMode }, ...[...this.guests.values()].map((gu) => ({ name: gu.name, id: gu.id, ping: gu.player.ping, skin: gu.player.skin, mode: gu.player.gameMode }))];
+  }
+  /** Push a guest's complete inventory now (after a command or host-side change touched it). */
+  syncInventory(p: Player): void { for (const gu of this.guests.values()) if (gu.player === p) gu.inventoryDirty = true; }
+  private stats(p: RemotePlayer): any {
+    return { health: p.health, absorption: p.absorption, foodLevel: p.foodLevel, saturation: p.saturation, air: p.air, xpLevel: p.xpLevel, xpProgress: p.xpProgress, totalXp: p.totalXp, mode: p.gameMode, effects: p.effects, fire: p.fireTicks > 0 };
+  }
 
   private savePlayer(gu: Guest): void { this.game.playerData.set(gu.playerId, gu.player.serialize()); }
   saveAllPlayers(): void { for (const gu of this.guests.values()) this.savePlayer(gu); }
@@ -259,8 +279,8 @@ export class NetHost implements WorldListener {
         if (p.isCreative) {
           const held = m.held ? ItemStack.deserialize(m.held, g.items) : null;
           if (!held || held.count > 0) p.inventory.slots[p.selectedSlot] = held;
+          gu.inventoryDirty = true;
         }
-        this.send(gu.id, { t: 'self', mode: p.gameMode, state: this.playerState(p) });
         break;
       case 'invTxn': this.inventoryTransaction(gu, m); break;
       case 'contTxn': this.containerTransaction(gu, m); break;
@@ -303,22 +323,9 @@ export class NetHost implements WorldListener {
         else if (e instanceof BoatEntity) { if (e.interact(p, held) && p.vehicle === e) this.send(gu.id, { t: 'ride', id: e.id, seat: e.passengerIndex(p) }); }
         break;
       }
-      case 'drop': {
-        const held = p.heldItem();
-        if (!held) break;
-        const requested = Number.isInteger(m.count) ? m.count : Number.isInteger(m.stack?.count) ? m.stack.count : 1;
-        const count = Math.max(1, Math.min(held.count, requested));
-        const st = held.clone(); st.count = count; held.count -= count;
-        if (held.count <= 0) p.inventory.slots[p.selectedSlot] = null;
-        const yaw = p.yaw * Math.PI / 180, pitch = p.pitch * Math.PI / 180;
-        const speed = 0.3, dir: [number, number, number] = [-Math.sin(yaw) * Math.cos(pitch) * speed, -Math.sin(pitch) * speed + 0.1, Math.cos(yaw) * Math.cos(pitch) * speed];
-        const e = g.dropItem(p.x, p.eyeY - 0.3, p.z, st, dir);
-        if (e) { e.pickupDelay = 40; e.thrower = p.uuid; }
-        this.send(gu.id, { t: 'self', mode: p.gameMode, state: this.playerState(p) });
-        break;
-      }
+      case 'throw': this.remoteThrow(gu, m); break;
+      case 'release': { p.usingItem = null; p.itemUseTicks = 0; break; } // bows/tridents arrive as 'spawn'
       case 'chat': this.chat(gu, String(m.text).slice(0, 256)); break;
-      case 'death': break; // Death text and state are produced by the authoritative player simulation.
       case 'cont': {
         if (!gu.container || !Array.isArray(m.slots) || !Array.isArray(m.player)) break;
         const nextContainer = new Inventory(gu.container.inv.size), nextPlayer = new Inventory(p.inventory.size);
@@ -351,18 +358,46 @@ export class NetHost implements WorldListener {
           p.health = p.maxHealth; p.isDead = false; p.removed = false; p.deathTime = 0;
           p.foodLevel = 20; p.saturation = 5; p.exhaustion = 0; p.fireTicks = 0; p.effects = []; p.absorption = 0; p.air = 300; p.fallDistance = 0; p.vx = p.vy = p.vz = 0;
           p.setPos(target[0] + 0.5, target[1], target[2] + 0.5);
-          p.tx = p.x; p.ty = p.y; p.tz = p.z; p.lerpSteps = 0;
-          this.send(gu.id, { t: 'correct', x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch });
+          gu.inventoryDirty = true;
         }
         break;
       }
-      case 'sleep': { if (m.sleeping) { p.sleeping = true; } else p.sleeping = false; this.checkSleep(); break; }
+      case 'sleep': { p.sleeping = !!m.sleeping; if (!p.sleeping) p.sleepTimer = 0; break; }
       case 'xp': { const e = g.entities.find((x) => x.id === m.id); if (e instanceof ExperienceOrb && !e.removed && e.distSq(p.x, p.y + 0.9, p.z) <= 2.25) { p.addXp(e.value); this.send(gu.id, { t: 'givexp', v: e.value }); e.remove(); } break; }
       case 'spawn': this.remoteSpawn(gu, m); break;
       case 'boatInput': { const b = p.vehicle; if (b instanceof BoatEntity && b.passengerIndex(p) === 0) { b.inputUp = !!m.up; b.inputDown = !!m.down; b.inputLeft = !!m.left; b.inputRight = !!m.right; } break; }
       case 'dismount': { const b = p.vehicle; if (b instanceof BoatEntity) { b.ejectPassenger(p); this.send(gu.id, { t: 'ride', id: null, x: p.x, y: p.y, z: p.z }); } break; }
-      case 'ping': this.send(gu.id, { t: 'pong', time: m.time }); break;
+      case 'ping': { if (Number.isFinite(m.ping)) p.ping = Math.max(0, Math.min(9999, Math.round(m.ping))); this.send(gu.id, { t: 'pong', time: m.time }); break; }
     }
+  }
+
+  /** A guest throws a stack out of its window (Q, or a click outside the inventory). The stack has to exist in the
+   *  guest's cursor, inventory, offhand or crafting grid; it is removed there and thrown by the authoritative copy. */
+  private remoteThrow(gu: Guest, m: any): void {
+    const g = this.game, p = gu.player;
+    const st = m.stack ? ItemStack.deserialize(m.stack, g.items) : null;
+    const wanted = st ? serializedStackIdentity(st.serialize()) : null;
+    if (!st || !wanted) return;
+    const take = (inv: Inventory): boolean => {
+      for (let i = 0; i < inv.size; i++) {
+        const slot = inv.slots[i];
+        if (!slot || slot.count < wanted.count) continue;
+        const id = serializedStackIdentity(slot.serialize());
+        if (!id || id.key !== wanted.key) continue;
+        slot.count -= wanted.count;
+        if (slot.count <= 0) inv.slots[i] = null;
+        return true;
+      }
+      return false;
+    };
+    const held = p.inventory.slots[p.selectedSlot];
+    const fromHeld = !!held && held.count >= wanted.count && serializedStackIdentity(held.serialize())?.key === wanted.key;
+    if (fromHeld) { held!.count -= wanted.count; if (held!.count <= 0) p.inventory.slots[p.selectedSlot] = null; }
+    else if (!take(gu.cursor) && !take(p.inventory) && !take(p.offhand) && !take(gu.crafting)) { if (gu.container) this.sendContainerState(gu); else this.sendInventoryState(gu); return; }
+    p.inventory.onChange?.();
+    p.throwItem(st);
+    gu.inventoryRevision++;
+    if (gu.container) this.sendContainerState(gu, true); else this.sendInventoryState(gu, true);
   }
 
   /** Projectiles / spawn-egg mobs created by a guest. */
@@ -405,14 +440,12 @@ export class NetHost implements WorldListener {
     g.addEntity(e);
     this.send(gu.id, { t: 'self', mode: p.gameMode, state: this.playerState(p) });
   }
-  allSleeping(): boolean { return [...this.guests.values()].every((gu) => gu.player.sleeping); }
 
   private chat(gu: Guest, text: string): void {
     const g = this.game;
     if (text.startsWith('/')) {
-      // Opening a singleplayer world with cheats makes its owner an operator; it does not grant every joining
-      // player operator permissions. A later permission list can opt individual guests in explicitly.
-      this.send(gu.id, { t: 'chat', text: '§cYou do not have permission to use commands on this server' });
+      // vanilla IntegratedServer.publishServer: "Allow Cheats" makes every player on the shared world an operator
+      runCommand(g, text, gu.player, (t) => this.send(gu.id, { t: 'chat', text: t }), this.opts.cheats);
       return;
     }
     const line = `<${gu.name}> ${text}`;
@@ -420,11 +453,29 @@ export class NetHost implements WorldListener {
     for (const other of this.guests.values()) if (other !== gu) this.send(other.id, { t: 'chat', text: line }); // the sender already echoed it
   }
 
-  /** Night skipping needs every player in bed. */
+  /** vanilla ServerLevel sleep handling: everyone in bed (SleepStatus) for 100 ticks skips the night and clears the
+   *  weather; the "x/y players sleeping" / "Sleeping through this night" status goes to every player's action bar. */
   checkSleep(): void {
     const g = this.game;
     const all = [g.player, ...[...this.guests.values()].map((x) => x.player)];
-    if (all.every((p) => p.sleeping)) { g.world.dayTime = Math.floor(g.world.dayTime / 24000) * 24000 + 24000; g.weather.raining = false; g.weather.thundering = false; for (const p of all) { if (p === g.player) { p.wakeUp(); g.gui.sleepFade = 0; } } this.broadcast({ t: 'wake' }); }
+    const sleeping = all.filter((p) => p.sleeping).length;
+    const announce = sleeping === 0 ? '' : sleeping === all.length ? 'all' : `${sleeping}/${all.length}`;
+    if (announce !== this.sleepAnnounced) {
+      this.sleepAnnounced = announce;
+      if (announce) {
+        const lang = g.assets.lang;
+        const text = announce === 'all' ? (lang['sleep.skipping_night'] ?? 'Sleeping through this night') : (lang['sleep.players_sleeping'] ?? '%s/%s players sleeping').replace('%s', String(sleeping)).replace('%s', String(all.length));
+        g.gui.showActionBar(text);
+        this.broadcast({ t: 'actionbar', text });
+      }
+    }
+    if (sleeping === all.length && all.every((p) => p.sleepTimer >= 100)) {
+      if (g.rules.doDaylightCycle !== false) g.world.dayTime = Math.floor(g.world.dayTime / 24000) * 24000 + 24000;
+      if (g.rules.doWeatherCycle !== false) { g.weather.raining = false; g.weather.thundering = false; }
+      g.player.wakeUp(); g.gui.sleepFade = 0;
+      for (const p of all) { p.sleeping = false; p.sleepTimer = 0; }
+      this.broadcast({ t: 'wake' });
+    }
   }
 
   /** Run a block interaction for a guest with the GUI redirected to the guest. */

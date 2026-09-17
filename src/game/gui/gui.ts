@@ -1,4 +1,5 @@
 // GUI manager: 2D overlay canvas, HUD, screens, sprites, tooltips, chat.
+import type { PlayerListEntry } from '../../net/protocol';
 import type { Game } from '../game';
 import { MinecraftFont, loadImg } from './font';
 import type { Screen } from './widgets';
@@ -382,7 +383,8 @@ export class Gui {
         for (let i = 0; i < Math.ceil(hpAbs / 2); i++) { const idx = maxH + i; const x = left + (idx % 10) * 8, y = top - Math.floor(idx / 10) * rowH; this.drawSprite(ctx, 'gui/sprites/hud/heart/container', x, y, 9, 9); this.drawSprite(ctx, `gui/sprites/hud/heart/absorbing_${hpAbs >= (i + 1) * 2 ? 'full' : 'half'}`, x, y, 9, 9); }
         // armour
         const armor = p.armorValue();
-        if (armor > 0) for (let i = 0; i < 10; i++) { const x = left + i * 8, y = top - rows * rowH + (rows > 1 ? 0 : 0) - (rows === 1 ? 10 : 10 - (rows - 1) * (10 - rowH)); this.drawSprite(ctx, `gui/sprites/hud/armor_${armor > i * 2 + 1 ? 'full' : armor === i * 2 + 1 ? 'half' : 'empty'}`, x, y, 9, 9); }
+        // vanilla Gui.renderPlayerHealth: the armor row sits 10px above the top health row
+        if (armor > 0) for (let i = 0; i < 10; i++) { const x = left + i * 8, y = top - (rows - 1) * rowH - 10; this.drawSprite(ctx, `gui/sprites/hud/armor_${armor > i * 2 + 1 ? 'full' : armor === i * 2 + 1 ? 'half' : 'empty'}`, x, y, 9, 9); }
         // food
         const hunger = p.hasEffect('hunger') ? '_hunger' : '';
         const shakeFood = p.saturation <= 0 && g.world.time % (p.foodLevel * 3 + 1) === 0;
@@ -488,30 +490,34 @@ export class Gui {
 
   private drawTiledFull(ctx: CanvasRenderingContext2D, name: string, alpha: number): void { this.drawTiled(ctx, name, 0, 0, this.width, this.height, 64, alpha); }
 
-  /** Tab list: every player in the world (vanilla PlayerTabOverlay). */
+  /** Tab list (vanilla PlayerTabOverlay): up to 20 rows per column, each entry a skin head, the name and a
+   *  latency icon on a translucent white bar, all on a half-transparent black panel 10px from the top. */
   private drawPlayerList(ctx: CanvasRenderingContext2D): void {
     const g = this.game;
-    let names: string[];
-    if (g.client) names = g.client.players.map((p) => p.name);
-    else if (g.host) names = g.host.playerList().map((p) => p.name);
-    else names = [g.player.name];
-    const title = g.client ? `${g.client.welcome?.hostName ?? 'Host'}'s world · ping ${g.client.ping} ms`
-      : g.host ? (g.host.official ? g.worldMeta?.name ?? 'Public world' : `${g.worldMeta?.name ?? 'World'} (${g.host.isPublic ? 'public' : 'private'})`)
-      : g.worldMeta?.name ?? 'Singleplayer';
-    const cols = Math.max(1, Math.ceil(names.length / 20)), rows = Math.ceil(names.length / cols);
-    // the panel grows to fit its contents: the longest name and the header both have to fit (vanilla PlayerTabOverlay)
-    let cw = 60; for (const n of names) cw = Math.max(cw, this.font.width(n) + 6);
-    const gridW = cols * (cw + 5) + 5;
-    const w = Math.max(gridW, this.font.width(title) + 8), h = rows * 9 + 12;
-    const x0 = Math.floor((this.width - w) / 2), y0 = 10;
-    const gx = x0 + Math.floor((w - gridW) / 2);
-    ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(x0, y0, w, h);
-    this.font.drawCentered(ctx, title, x0 + w / 2, y0 + 2, 0xffffff);
-    names.forEach((n, i) => {
+    let entries: { name: string; ping: number; skin: string; mode: string }[];
+    if (g.client) entries = (g.client.players as Partial<PlayerListEntry>[]).map((p) => ({ name: p.name ?? '', ping: p.ping ?? 0, skin: p.skin ?? 'steve', mode: p.mode ?? 'survival' }));
+    else if (g.host) entries = g.host.playerList();
+    else entries = [{ name: g.player.name, ping: 0, skin: g.options.skin, mode: g.player.gameMode }];
+    entries = entries.slice(0, 80).sort((a, b) => a.name.localeCompare(b.name));
+    let nameW = 0; for (const e of entries) nameW = Math.max(nameW, this.font.width(e.name));
+    const n = entries.length;
+    let cols = 1, rows = n;
+    for (cols = 1; rows > 20; cols++) rows = Math.ceil(n / cols);
+    const colW = Math.min(cols * (9 + nameW + 13), this.width - 50) / cols;
+    const totalW = colW * cols + (cols - 1) * 5;
+    const x0 = Math.floor(this.width / 2 - totalW / 2), y0 = 10;
+    ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(x0 - 1, y0 - 1, totalW + 2, rows * 9 + 1);
+    entries.forEach((e, i) => {
       const c = Math.floor(i / rows), r = i % rows;
-      const x = gx + 5 + c * (cw + 5), y = y0 + 12 + r * 9;
-      ctx.fillStyle = 'rgba(255,255,255,0.15)'; ctx.fillRect(x, y - 1, cw, 9);
-      this.font.draw(ctx, n, x + 2, y, n === g.player.name ? 0xffff55 : 0xffffff);
+      let x = x0 + c * colW + c * 5; const y = y0 + r * 9;
+      ctx.fillStyle = 'rgba(255,255,255,0.125)'; ctx.fillRect(x, y, colW, 8);
+      // head: the face with its hat layer, straight from the skin texture
+      const skin = this.sprite(e.skin === 'alex' ? 'entity/player/slim/alex' : 'entity/player/wide/steve');
+      if (skin) { ctx.drawImage(skin, 8, 8, 8, 8, x, y, 8, 8); ctx.drawImage(skin, 40, 8, 8, 8, x, y, 8, 8); }
+      x += 9;
+      this.font.draw(ctx, e.mode === 'spectator' ? '§7§o' + e.name : e.name, x, y, 0xffffff);
+      const bars = e.ping < 0 ? 'unknown' : e.ping < 150 ? '5' : e.ping < 300 ? '4' : e.ping < 600 ? '3' : e.ping < 1000 ? '2' : '1';
+      this.drawSprite(ctx, `gui/sprites/icon/ping_${bars}`, x - 9 + colW - 11, y, 10, 8);
     });
   }
 

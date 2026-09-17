@@ -18,7 +18,7 @@ import path from 'node:path';
 import { WebSocketServer } from 'ws';
 import { createJavaSession, pingJavaServer, JAVA_VERSION } from './java-gateway.mjs';
 
-const VOXELAND_PROTOCOL = 16;
+const VOXELAND_PROTOCOL = 17;
 
 const PORT = +(process.env.PORT || 8080);
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');

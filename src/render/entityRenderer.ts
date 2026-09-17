@@ -209,6 +209,8 @@ export class EntityRenderer {
     // vanilla rabbit variants (the "Toast" skin is the rare named one)
     if (e.type === 'rabbit') tex = 'entity/rabbit/rabbit_' + (['brown', 'white', 'black', 'white_splotched', 'gold', 'salt'][e.variant % 6] ?? 'brown');
     if (e.isBaby && (e.type === 'zombie' || e.type === 'husk' || e.type === 'drowned' || e.type === 'rabbit')) tex = tex + '_baby';
+    // 26.1 baby rabbits are a separate full-size model on their own texture rather than a scaled-down adult
+    if (e.type === 'rabbit' && e.isBaby) modelName = 'rabbit_baby';
     const m = this.model(modelName);
     const pos = this.lerpPos(e, partial);
     const bodyYaw = e.prevBodyYaw + ((((e.bodyYaw - e.prevBodyYaw) % 360) + 540) % 360 - 180) * partial;
@@ -216,7 +218,7 @@ export class EntityRenderer {
     const pitch = e.prevPitch + (e.pitch - e.prevPitch) * partial;
     const light = this.lightAt(e);
     const hurt = e.hurtTime > 0 || e.deathTime > 0;
-    const scale = def.ai.slime ? e.slimeSize : e.isBaby ? 0.5 : 1;
+    const scale = def.ai.slime ? e.slimeSize : e.isBaby && modelName !== 'rabbit_baby' ? 0.5 : 1;
     const color: [number, number, number, number] = hurt ? [1, 0.5, 0.5, 1] : [1, 1, 1, 1];
     // creeper flash
     let flash = 0;
@@ -320,25 +322,22 @@ export class EntityRenderer {
         }
         break;
       }
-      case 'pig': case 'cow': case 'sheep': case 'wolf': case 'goat': case 'llama': case 'horse': case 'hoglin': case 'polar_bear': case 'panda': case 'cat': case 'fox': case 'rabbit': case 'turtle': case 'armadillo': case 'camel': case 'sniffer': case 'strider': case 'frog': case 'axolotl': case 'ravager': {
+      case 'pig': case 'cow': case 'sheep': case 'wolf': case 'goat': case 'llama': case 'horse': case 'hoglin': case 'polar_bear': case 'panda': case 'cat': case 'fox': case 'rabbit': case 'rabbit_baby': case 'turtle': case 'armadillo': case 'camel': case 'sniffer': case 'strider': case 'frog': case 'axolotl': case 'ravager': {
         pose.head = { ry: hy, rx: hp };
         pose.leg0 = { rx: swing }; pose.leg1 = { rx: swing2 }; pose.leg2 = { rx: swing2 }; pose.leg3 = { rx: swing };
         if (model === 'sheep' && e instanceof Mob && e.eatTimer > 0) pose.head = { ry: hy, rx: 0.8, ty: 3 };
         if (model === 'wolf' && e instanceof Mob) { pose.tail = { rx: e.angerTicks > 0 || e.tamed ? 0.6 : Math.PI / 4 + Math.sin(t * 3) * 0.1 }; if (e.sitting) { pose.body = { rx: Math.PI / 4 * 2, ty: 4 }; pose.leg0 = { rx: -1.3, ty: 4 }; pose.leg1 = { rx: -1.3, ty: 4 }; pose.leg2 = { rx: 0, ty: 4 }; pose.leg3 = { rx: 0, ty: 4 }; pose.mane = { ty: 4, rx: Math.PI / 2 }; pose.head = { ry: hy, rx: hp, ty: 4 }; } }
         if (model === 'wolf' && e instanceof Mob && e.attackAnim > 0) pose.head = { ry: hy, rx: hp + 0.3 };
         if (model === 'turtle') { pose.leg0 = { rx: swing2 }; pose.leg1 = { rx: swing }; pose.leg2 = { rz: swing2 }; pose.leg3 = { rz: swing }; }
-        if (model === 'rabbit') {
-          // vanilla: jumpRotation = sin(jumpCompletion * PI) drives haunches, feet, front legs and body pitch
+        if (model === 'rabbit' || model === 'rabbit_baby') {
+          // vanilla RabbitModel.setupAnim: jumpRotation = sin(jumpCompletion * PI) swings the front legs forward
+          // and kicks the hind feet back; the head (with its ears) follows the look direction
           const jc = e instanceof Mob ? Math.max(0, Math.min(1, e.jumpProgress(partial))) : 0;
           const j = Math.sin(jc * Math.PI);
-          pose.head = { ry: hy, rx: hp };
-          pose.earL = { ry: 0, rx: hp + j * 0.2 }; pose.earR = { ry: 0, rx: hp + j * 0.2 };
-          pose.body = { rx: j * 0.5 };
-          pose.haunchL = { rx: j * 0.8 }; pose.haunchR = { rx: j * 0.8 };
-          pose.footL = { rx: j * 0.8 }; pose.footR = { rx: j * 0.8 };
-          pose.legL = { rx: -j * 0.6 }; pose.legR = { rx: -j * 0.6 };
-          pose.tail = { rx: j * 0.3 };
           delete pose.leg0; delete pose.leg1; delete pose.leg2; delete pose.leg3;
+          pose.head = { ry: hy, rx: hp };
+          pose.legL = { rx: -j * 0.6981317 }; pose.legR = { rx: -j * 0.6981317 };
+          pose.footL = { rx: j * 0.87266463 }; pose.footR = { rx: j * 0.87266463 };
         }
         break;
       }
@@ -388,23 +387,7 @@ export class EntityRenderer {
     const pose = this.poseFor(p, 'player', limb, amt, headYaw - bodyYaw, pitch, partial);
     if (p.usingItem && p.usingItem.item.name === 'bow') { pose.rightArm = { rx: -Math.PI / 2 + pitch * DEG, ry: -0.1 + (headYaw - bodyYaw) * DEG }; pose.leftArm = { rx: -Math.PI / 2 + pitch * DEG + 0.3, ry: 0.4 + (headYaw - bodyYaw) * DEG }; }
     this.drawParts(m, base, pose, gl);
-    // armour
-    for (let i = 0; i < 4; i++) {
-      const a = p.armor.get(i);
-      if (!a || !a.item.armorSlot) continue;
-      const mat = a.item.name.split('_')[0];
-      if (a.item.name === 'elytra' || a.item.name === 'carved_pumpkin' || a.item.name.endsWith('_head') || a.item.name.endsWith('_skull')) continue;
-      const layer = i === 2 ? 2 : 1;
-      const tex = `entity/equipment/humanoid${layer === 2 ? '_leggings' : ''}/${mat === 'golden' ? 'gold' : mat}`;
-      const col = a.item.name.startsWith('leather') ? (a.extra?.dyeColor ?? 0xa06540) : 0xffffff;
-      this.beginEntityProgram(sky, this.texture(tex), light, hurt ? [1, 0.5, 0.5, 1] : [((col >> 16) & 255) / 255, ((col >> 8) & 255) / 255, (col & 255) / 255, 1]);
-      const armorPose = { ...pose };
-      const inflate = i === 0 ? 1.0 : i === 1 ? 1.01 : i === 2 ? 0.5 : 1.0;
-      const hide: Record<string, boolean> = { head: i !== 0, hat: true, body: i !== 1 && i !== 2, rightArm: i !== 1, leftArm: i !== 1, rightLeg: i !== 2 && i !== 3, leftLeg: i !== 2 && i !== 3 };
-      for (const k of Object.keys(hide)) if (hide[k]) armorPose[k] = { ...(armorPose[k] ?? {}), hidden: true };
-      for (const k of ['head', 'body', 'rightArm', 'leftArm', 'rightLeg', 'leftLeg']) if (!hide[k]) armorPose[k] = { ...(armorPose[k] ?? {}), scale: 1 + inflate / 8 * 0.5 };
-      this.drawParts(m, base, armorPose, gl);
-    }
+    this.drawArmor(p, base, pose, sky, light, hurt);
     // held items (vanilla ItemInHandLayer)
     const held = p.heldItem();
     if (held) this.drawHandItem(base, pose, held, sky, light, false, slim, hurt);
@@ -414,6 +397,34 @@ export class EntityRenderer {
     if ((p as any).isRemote && !p.sleeping && !p.isSneaking && p.health > 0 && p.deathTime === 0 && !p.isSpectator) {
       const cb = this.renderer.camBase;
       this.game.gui.queueNameTag(p.name, pos[0] + cb[0], pos[1] + cb[1] + p.height + 0.5, pos[2] + cb[2]);
+    }
+  }
+
+  /** vanilla HumanoidArmorLayer: each worn piece re-renders the humanoid armor model (outer layer, or the inner
+   *  0.5-inflated one for leggings) with only that slot's parts visible, posed exactly like the player model. */
+  private drawArmor(p: Player, base: Mat4, pose: Record<string, any>, sky: SkyState, light: [number, number], hurt: boolean): void {
+    const gl = this.renderer.gl;
+    for (let i = 0; i < 4; i++) {
+      const a = p.armor.get(i);
+      if (!a || !a.item.armorSlot) continue;
+      const n = a.item.name;
+      if (n === 'elytra' || n === 'carved_pumpkin' || n.endsWith('_head') || n.endsWith('_skull')) continue;
+      let mat = n.split('_')[0];
+      if (mat === 'golden') mat = 'gold'; else if (mat === 'turtle') mat = 'turtle_scute';
+      const inner = i === 2;
+      const m = this.model(inner ? 'armor_inner' : 'armor');
+      const folder = `entity/equipment/${inner ? 'humanoid_leggings' : 'humanoid'}`;
+      // vanilla HumanoidArmorModel.setPartVisibility
+      const shown: Record<string, boolean> = { head: i === 0, hat: i === 0, body: i === 1 || i === 2, rightArm: i === 1, leftArm: i === 1, rightLeg: i >= 2, leftLeg: i >= 2 };
+      const armorPose: Record<string, any> = { ...pose };
+      for (const k of Object.keys(shown)) if (!shown[k]) armorPose[k] = { ...(armorPose[k] ?? {}), hidden: true };
+      // leather: dyeable base layer (default #A06540) plus an undyed overlay
+      const layers: [string, number][] = mat === 'leather' ? [[`${folder}/leather`, a.extra?.dyeColor ?? 0xa06540], [`${folder}/leather_overlay`, 0xffffff]] : [[`${folder}/${mat}`, 0xffffff]];
+      for (const [tex, col] of layers) {
+        const color: [number, number, number, number] = hurt ? [1, 0.5, 0.5, 1] : [((col >> 16) & 255) / 255, ((col >> 8) & 255) / 255, (col & 255) / 255, 1];
+        this.beginEntityProgram(sky, this.texture(tex), light, color);
+        this.drawParts(m, base, armorPose, gl);
+      }
     }
   }
 
@@ -657,20 +668,7 @@ export class EntityRenderer {
     this.entityMatrix(base, [0, 0, 0], yaw * 0.5, 1);
     const pose = this.poseFor(p, 'player', 0, 0, yaw * 0.5, pitch, 0);
     this.drawParts(m, base, pose, gl);
-    // armour layers
-    for (let i = 0; i < 4; i++) {
-      const a = p.armor.get(i);
-      if (!a || !a.item.armorSlot || a.item.name === 'elytra' || a.item.name === 'carved_pumpkin' || a.item.name.endsWith('_head') || a.item.name.endsWith('_skull')) continue;
-      const mat = a.item.name.split('_')[0];
-      const tex = `entity/equipment/humanoid${i === 2 ? '_leggings' : ''}/${mat === 'golden' ? 'gold' : mat}`;
-      const col = a.item.name.startsWith('leather') ? (a.extra?.dyeColor ?? 0xa06540) : 0xffffff;
-      this.beginEntityProgram(sky, this.texture(tex), [15, 15], [((col >> 16) & 255) / 255, ((col >> 8) & 255) / 255, (col & 255) / 255, 1]);
-      const armorPose: Record<string, any> = { ...pose };
-      const hide: Record<string, boolean> = { head: i !== 0, hat: true, body: i !== 1 && i !== 2, rightArm: i !== 1, leftArm: i !== 1, rightLeg: i !== 2 && i !== 3, leftLeg: i !== 2 && i !== 3 };
-      for (const k of Object.keys(hide)) if (hide[k]) armorPose[k] = { ...(armorPose[k] ?? {}), hidden: true };
-      for (const k of ['head', 'body', 'rightArm', 'leftArm', 'rightLeg', 'leftLeg']) if (!hide[k]) armorPose[k] = { ...(armorPose[k] ?? {}), scale: 1 + (i === 2 ? 0.5 : 1) / 16 };
-      this.drawParts(m, base, armorPose, gl);
-    }
+    this.drawArmor(p, base, pose, sky, [15, 15], false);
     this.renderer.vp.set(savedVp);
     const px = new Uint8Array(W * H * 4);
     gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, px);

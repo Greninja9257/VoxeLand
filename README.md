@@ -124,7 +124,7 @@ Players can:
 - Add another VoxeLand backend using an IP address, `host:port`, or `ws://`/`wss://` URL.
 - View connected players with the Tab list and share chat, containers, mobs, and boats.
 
-For player-hosted worlds, the host simulates the world while guests simulate their own movement and inventory. A worker timer keeps hosted worlds ticking while the host tab is in the background. Guest dimension travel is not currently supported.
+Shared worlds follow vanilla's integrated-server model. The host is the server: it simulates the world and every guest's health, hunger, air, effects, fall damage, item use, pickups, death drops and inventory, and pushes changes to that player the moment they happen. Guests predict their own movement and block interaction, like a vanilla client. With **Allow Cheats** on, every player may use commands, as on a LAN world; night skipping counts everyone in bed and shows the vanilla sleep status. The Tab list shows heads, names and latency. A worker timer keeps hosted worlds ticking while the host tab is in the background. Guest dimension travel is not currently supported.
 
 ### Server configuration
 

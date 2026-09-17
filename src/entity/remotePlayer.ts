@@ -1,5 +1,6 @@
-// A player controlled by another client. On the host it stands in for a guest (mob targeting, explosions,
-// pickups); on guests it represents the host and other guests. Movement comes from network snapshots.
+// A player controlled by another client. On the host it is that guest's ServerPlayer: movement arrives as network
+// snapshots (validated by NetHost) while health, hunger, air, effects, item use, fall damage, death and inventory
+// are simulated here and reported back. On guests it is a purely visual mirror of the host and other guests.
 import { Player } from './player';
 import type { EntityDamage } from './entity';
 
@@ -17,9 +18,32 @@ export class RemotePlayer extends Player {
   skin: 'steve' | 'alex' = 'steve';
   remoteVehicleId: number | null = null;
   remoteVehicleSeat = -1;
+  /** host: round-trip latency the guest last measured, shown in the player list */
+  ping = 0;
+  /** host: something other than the guest's own movement moved this player (teleport, respawn, ender pearl,
+   *  chorus fruit): the owner must be told (vanilla ClientboundPlayerPositionPacket). */
+  needsCorrection = false;
+  /** host: the guest's last movement packet said it was standing on the ground */
+  reportedOnGround = true;
   constructor(name: string) { super(); this.name = name; this.cheats = false; }
 
+  setPos(x: number, y: number, z: number): void {
+    super.setPos(x, y, z);
+    if (!this.remote) { this.tx = x; this.ty = y; this.tz = z; this.lerpSteps = 0; this.needsCorrection = true; }
+  }
+
   applySnapshot(s: any): void {
+    const host = !this.remote;
+    // vanilla ServerGamePacketListenerImpl.handleMovePlayer + Entity.checkFallDamage: fall distance accumulates
+    // from the reported movement and is settled when the client reports touching the ground
+    if (host && this.hasSnapshot && !this.vehicle) {
+      const dy = s.y - this.ty;
+      const onGround = s.og !== undefined ? !!s.og : dy === 0;
+      if (this.flying || this.inWater || this.inLava || this.isClimbing() || this.hasEffect('levitation')) this.fallDistance = 0;
+      else if (!onGround && dy < 0) this.fallDistance -= dy;
+      if (onGround) { if (this.fallDistance > 0) this.fall(this.fallDistance); this.fallDistance = 0; }
+      this.reportedOnGround = onGround; this.onGround = onGround;
+    }
     this.tx = s.x; this.ty = s.y; this.tz = s.z; this.tyaw = s.yaw; this.tpitch = s.pitch;
     this.hasSnapshot = true;
     if (s.sneak !== undefined) this.isSneaking = !!s.sneak;
@@ -33,7 +57,16 @@ export class RemotePlayer extends Player {
     if (s.slot !== undefined) this.selectedSlot = s.slot;
     if (s.mode) this.gameMode = s.mode;
     if (s.swing) this.swing();
-    if (s.use !== undefined) { this.usingItem = s.use ? this.heldItem() : null; }
+    if (s.use !== undefined) {
+      if (s.use && !this.usingItem) {
+        const held = this.heldItem();
+        // the host actually consumes the item (vanilla ServerPlayer eats/drinks); mirrors only animate
+        const duration = held ? (host ? this.useDurationFor(held) : 72000) : 0;
+        if (held && duration > 0) this.startUsing(held, duration);
+      } else if (!s.use && this.usingItem && !host) { this.usingItem = null; this.itemUseTicks = 0; }
+      // the host keeps going until its own timer completes or the guest explicitly releases (vanilla
+      // RELEASE_USE_ITEM): the guest finishing a couple of ticks earlier must not cancel the meal
+    }
     if (s.hurt) this.hurtTime = this.hurtDuration;
     if (s.dead !== undefined && s.dead && this.deathTime === 0) this.deathTime = 1;
     if (s.dead === false) this.deathTime = 0;
@@ -41,7 +74,10 @@ export class RemotePlayer extends Player {
     else if (s.br === null) this.breaking = null;
     this.snapshotAge = 0;
     this.lerpSteps = 3;
-    if (Math.abs(this.x - this.tx) + Math.abs(this.z - this.tz) > 16) { this.setPos(this.tx, this.ty, this.tz); this.prevX = this.x; this.prevY = this.y; this.prevZ = this.z; this.yaw = this.prevYaw = this.tyaw; this.pitch = this.prevPitch = this.tpitch; this.lerpSteps = 0; }
+    if (Math.abs(this.x - this.tx) + Math.abs(this.z - this.tz) > 16) {
+      this.x = this.tx; this.y = this.ty; this.z = this.tz; this.updateBB();
+      this.prevX = this.x; this.prevY = this.y; this.prevZ = this.z; this.yaw = this.prevYaw = this.tyaw; this.pitch = this.prevPitch = this.tpitch; this.lerpSteps = 0;
+    }
   }
 
   networkSnapshot(): { x: number; y: number; z: number; yaw: number; pitch: number } {
@@ -52,17 +88,17 @@ export class RemotePlayer extends Player {
 
   remoteTick(): void { this.tick(); }
   tick(): void {
-    this.attackCooldownTicks++;
-    if (this.breakCooldown > 0) this.breakCooldown--;
-    if (this.useCooldown > 0) this.useCooldown--;
-    if (this.invulnerableTicks > 0) this.invulnerableTicks--;
+    const host = !this.remote;
+    if (host) this.tickCooldowns(); else { this.attackCooldownTicks++; if (this.breakCooldown > 0) this.breakCooldown--; if (this.useCooldown > 0) this.useCooldown--; }
     if (this.vehicle?.removed) this.vehicle = null;
     if (this.vehicle) { // the vehicle positions us; only animate
       this.prevYaw = this.yaw; this.prevPitch = this.pitch; this.prevBodyYaw = this.bodyYaw; this.prevHeadYaw = this.headYaw; this.prevSwingProgress = this.swingProgress; this.prevLimbSwingAmount = this.limbSwingAmount;
       const f = this.lerpSteps > 0 ? 1 / this.lerpSteps : 1;
       let dy = this.tyaw - this.yaw; while (dy > 180) dy -= 360; while (dy < -180) dy += 360; this.yaw += dy * f; this.pitch += (this.tpitch - this.pitch) * f; this.headYaw = this.yaw;
       if (this.lerpSteps > 0) this.lerpSteps--;
-      this.updateSwingRemote(); if (this.hurtTime > 0) this.hurtTime--; this.age++;
+      this.updateSwing();
+      if (host) this.serverTick(); else if (this.hurtTime > 0) this.hurtTime--;
+      this.fallDistance = 0;
       return;
     }
     // interpolate towards the last snapshot (3 ticks of smoothing, like vanilla's lerp steps)
@@ -86,26 +122,33 @@ export class RemotePlayer extends Player {
     const amt = Math.min(1, Math.hypot(dx, dz) * 4);
     this.limbSwingAmount += (amt - this.limbSwingAmount) * 0.4;
     this.limbSwing += this.limbSwingAmount;
-    this.updateSwingRemote();
-    if (this.hurtTime > 0) this.hurtTime--;
-    if (this.deathTime > 0) this.deathTime = Math.min(20, this.deathTime + 1);
+    this.updateSwing();
     this.height = this.sleeping ? 0.2 : this.swimmingPose ? 0.6 : this.isSneaking ? 1.5 : 1.8; this.updateBB();
     this.cameraEye = this.sleeping ? 0.2 : this.swimmingPose ? 0.4 : this.isSneaking ? 1.27 : 1.62; this.eyeHeight = this.cameraEye;
+    if (host) this.serverTick();
+    else { if (this.hurtTime > 0) this.hurtTime--; if (this.deathTime > 0) this.deathTime = Math.min(20, this.deathTime + 1); this.age++; }
     this.snapshotAge++;
-    this.age++;
   }
-  private updateSwingRemote(): void {
-    if (this.swinging) { this.swingTime++; if (this.swingTime >= 6) { this.swingTime = 0; this.swinging = false; } } else this.swingTime = 0;
-    this.swingProgress = this.swingTime / 6;
+
+  /** vanilla ServerPlayer.tick minus movement: everything the server owns about a player. */
+  private serverTick(): void {
+    this.baseTick();
+    this.tickEffectsAndAir();
+    if (this.health <= 0) { this.deathTime = Math.min(20, this.deathTime + 1); return; }
+    this.checkBlockContacts();
+    this.tickHunger();
+    this.tickItemUse();
+    this.tickMovementExhaustion();
+    if (this.flying || this.isSpectator) this.fallDistance = 0;
   }
 
   /** The host applies damage to this mirror, then forwards the authoritative result to its owner. */
   hurt(d: EntityDamage): boolean {
-    const before = this.health;
+    if (this.remote) return false;
+    const before = this.health + this.absorption;
     const hurt = super.hurt(d);
-    if (hurt) this.hurtHandler?.({ ...d, amount: Math.max(0, before - this.health), bypassArmor: true, attacker: null });
+    if (hurt) this.hurtHandler?.({ ...d, amount: Math.max(0, before - this.health - this.absorption), bypassArmor: true });
     return hurt;
   }
-  die(): void { this.health = 0; this.isDead = true; }
-  addExhaustion(): void {}
+  addExhaustion(n: number): void { if (!this.remote) super.addExhaustion(n); }
 }

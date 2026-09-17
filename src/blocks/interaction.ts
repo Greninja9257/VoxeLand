@@ -137,14 +137,14 @@ export function useBlock(game: Game, x: number, y: number, z: number, state: num
   }
   if (n.startsWith('potted_')) {
     const plant = game.items.get(n.slice(7));
-    if (plant) game.givePlayer(new ItemStack(plant, 1));
+    if (plant) player.give(new ItemStack(plant, 1));
     world.setBlock(x, y, z, reg.defaultState('flower_pot'));
     return true;
   }
   // composter
   if (n === 'composter') {
     const level = +props.level;
-    if (level === 8) { game.givePlayer(new ItemStack(game.items.get('bone_meal')!, 1)); world.setBlock(x, y, z, reg.withProp(state, 'level', '0')); sounds.playAt('block.composter.empty', x + 0.5, y + 0.5, z + 0.5, 1, 1); return true; }
+    if (level === 8) { player.give(new ItemStack(game.items.get('bone_meal')!, 1)); world.setBlock(x, y, z, reg.withProp(state, 'level', '0')); sounds.playAt('block.composter.empty', x + 0.5, y + 0.5, z + 0.5, 1, 1); return true; }
     if (held && level < 7) {
       const chance = COMPOST[held.item.name];
       if (chance) {
@@ -161,7 +161,7 @@ export function useBlock(game: Game, x: number, y: number, z: number, state: num
   if (n === 'cauldron' && held?.item.name === 'lava_bucket') { world.setBlock(x, y, z, reg.defaultState('lava_cauldron')); player.replaceHeld(new ItemStack(game.items.get('bucket')!, 1)); sounds.playAt('item.bucket.empty_lava', x + 0.5, y + 0.5, z + 0.5, 1, 1); return true; }
   if (n === 'water_cauldron' && held) {
     if (held.item.name === 'bucket' && props.level === '3') { world.setBlock(x, y, z, reg.defaultState('cauldron')); player.replaceHeld(new ItemStack(game.items.get('water_bucket')!, 1)); sounds.playAt('item.bucket.fill', x + 0.5, y + 0.5, z + 0.5, 1, 1); return true; }
-    if (held.item.name === 'glass_bottle') { const lv = +props.level; world.setBlock(x, y, z, lv > 1 ? reg.withProp(state, 'level', String(lv - 1)) : reg.defaultState('cauldron')); if (!player.isCreative) held.count--; game.givePlayer(new ItemStack(game.items.get('potion')!, 1, 0, [], null, { potion: 'water' })); sounds.playAt('item.bottle.fill', x + 0.5, y + 0.5, z + 0.5, 1, 1); return true; }
+    if (held.item.name === 'glass_bottle') { const lv = +props.level; world.setBlock(x, y, z, lv > 1 ? reg.withProp(state, 'level', String(lv - 1)) : reg.defaultState('cauldron')); if (!player.isCreative) held.count--; player.give(new ItemStack(game.items.get('potion')!, 1, 0, [], null, { potion: 'water' })); sounds.playAt('item.bottle.fill', x + 0.5, y + 0.5, z + 0.5, 1, 1); return true; }
     if (held.item.name === 'potion' && held.extra.potion === 'water' && props.level !== '3') { world.setBlock(x, y, z, reg.withProp(state, 'level', String(+props.level + 1))); player.replaceHeld(new ItemStack(game.items.get('glass_bottle')!, 1)); sounds.playAt('item.bottle.empty', x + 0.5, y + 0.5, z + 0.5, 1, 1); return true; }
   }
   if (n === 'lava_cauldron' && held?.item.name === 'bucket') { world.setBlock(x, y, z, reg.defaultState('cauldron')); player.replaceHeld(new ItemStack(game.items.get('lava_bucket')!, 1)); sounds.playAt('item.bucket.fill_lava', x + 0.5, y + 0.5, z + 0.5, 1, 1); return true; }

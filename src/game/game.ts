@@ -412,11 +412,12 @@ export class Game {
     if (this.client && !e.remote && !(e instanceof RemotePlayer)) { this.forwardSpawn(e); return; }
     this.entities.push(e);
   }
-  /** Guest-created entities (drops, projectiles, spawn eggs) are created by the host instead. */
+  /** Guest-created entities (projectiles, boats) are created by the host instead. Item drops are never forwarded:
+   *  the host runs the same interaction and spawns them itself; thrown stacks go through Player.throwItem. */
   private forwardSpawn(e: Entity): void {
     const c = this.client!;
-    if (e instanceof ItemEntity) c.send({ t: 'drop', count: e.stack.count });
-    else if (e instanceof BoatEntity) c.send({ t: 'spawn', kind: 'boat', x: e.x, y: e.y, z: e.z, v: [0, 0, 0], yaw: e.yaw, extra: { wood: e.wood, chest: e.chest } });
+    if (e instanceof ItemEntity) return;
+    if (e instanceof BoatEntity) c.send({ t: 'spawn', kind: 'boat', x: e.x, y: e.y, z: e.z, v: [0, 0, 0], yaw: e.yaw, extra: { wood: e.wood, chest: e.chest } });
     else if (e instanceof ArrowEntity || e instanceof ThrownProjectile || e instanceof Mob) c.send({ t: 'spawn', e: e.serialize(), x: e.x, y: e.y, z: e.z, v: [e.vx, e.vy, e.vz], kind: e instanceof ArrowEntity ? 'arrow' : e instanceof ThrownProjectile ? 'thrown' : 'mob', extra: e instanceof ArrowEntity ? { damage: e.damage, akind: e.kind, trident: (e as any).trident?.serialize?.(), effect: (e as any).effect } : e instanceof ThrownProjectile ? { tkind: e.kind, stack: e.stack?.serialize() ?? null } : { type: e.type, baby: (e as Mob).isBaby } });
   }
   /** number of dragon kills in this world (first kill drops far more XP and opens the gateway) */
@@ -457,7 +458,7 @@ export class Game {
       this.addEntity(o);
     }
   }
-  givePlayer(stack: ItemStack): void { const left = this.player.inventory.add(stack); if (left > 0) this.player.throwItem(stack); this.player.inventory.onChange?.(); }
+  givePlayer(stack: ItemStack): void { this.player.give(stack); }
   livingEntitiesIncludingPlayer(): LivingEntity[] { const out: LivingEntity[] = []; for (const e of this.entities) if (e instanceof LivingEntity && !e.removed) out.push(e); if (this.player && !this.player.removed) out.push(this.player); return out; }
   entityDisplayName(e: Entity): string { if (e === this.player) return this.player.name; return (e as any).customName ?? this.assets.lang['entity.minecraft.' + e.type] ?? e.type; }
   private restoreEntities(list: any[]): void {
@@ -484,12 +485,12 @@ export class Game {
     for (const e of this.entities) { if ((Math.floor(e.x) >> 4) === c.cx && (Math.floor(e.z) >> 4) === c.cz && !(e instanceof Mob && e.persistent)) { if (e instanceof Mob && e.def.category !== 'passive' && !e.tamed) e.remove(); } }
   }
   onItemPickedUp(e: ItemEntity, _n: number): void { void e; }
-  onPlayerDied(): void {
-    const text = this.player.deathMessage || `${this.player.name} died`;
-    this.gui.addChat(text);
-    if (this.client) this.client.send({ t: 'death', text });
-    else this.host?.broadcast({ t: 'chat', text });
-    this.gui.openDeath();
+  /** A player died: the death message goes to everyone (vanilla PlayerList.broadcastSystemMessage), the death
+   *  screen only to its owner. Guests receive their own message through the host's broadcast. */
+  onPlayerDied(p: Player): void {
+    const text = p.deathMessage || `${p.name} died`;
+    if (!this.client) { this.gui.addChat(text); this.host?.broadcast({ t: 'chat', text }); }
+    if (p === this.player) this.gui.openDeath();
   }
   respawnPlayer(): void {
     const p = this.player;
@@ -855,8 +856,8 @@ export class Game {
     // chunks stream
     if (this.host) this.chunks.extraCenters = this.host.extraCenters();
     this.chunks.update(p.x, p.z, 0.05);
-    // sleeping skips night
-    if (p.sleeping && p.sleepTimer >= 100 && (!this.host || this.host.allSleeping())) { w.dayTime = Math.floor(w.dayTime / 24000) * 24000 + 24000; this.weather.raining = false; this.weather.thundering = false; p.wakeUp(); this.gui.sleepFade = 0; this.host?.broadcast({ t: 'wake' }); }
+    // sleeping skips the night (a shared world counts every player: NetHost.checkSleep)
+    if (!this.host && p.sleeping && p.sleepTimer >= 100) { if (this.rules.doDaylightCycle !== false) w.dayTime = Math.floor(w.dayTime / 24000) * 24000 + 24000; if (this.rules.doWeatherCycle !== false) { this.weather.raining = false; this.weather.thundering = false; } p.wakeUp(); this.gui.sleepFade = 0; }
     // scheduled ticks
     for (const t of w.popDueTicks()) if (w.isLoaded(t.x, t.z)) this.blocks.scheduledTick(t.x, t.y, t.z, t.state);
     // random ticks
@@ -1069,11 +1070,11 @@ export class Game {
     const w = this.world;
     const speed = this.rules.randomTickSpeed ?? 3;
     if (speed <= 0) return;
-    const p = this.player;
-    const pcx = Math.floor(p.x) >> 4, pcz = Math.floor(p.z) >> 4;
+    // chunks within simulation distance of any player tick (vanilla ServerChunkCache: every player's chunks)
+    const centers = this.allPlayers().map((p) => ({ x: Math.floor(p.x) >> 4, z: Math.floor(p.z) >> 4 }));
     const sim = Math.min(this.chunks.simulationDistance, this.chunks.viewDistance);
     for (const c of w.chunks.values()) {
-      if (Math.abs(c.cx - pcx) > sim || Math.abs(c.cz - pcz) > sim) continue;
+      if (!centers.some((cc) => Math.abs(c.cx - cc.x) <= sim && Math.abs(c.cz - cc.z) <= sim)) continue;
       c.inhabitedTime++;
       for (let sy = 0; sy < SECTION_COUNT; sy++) {
         const sec = c.sections[sy];

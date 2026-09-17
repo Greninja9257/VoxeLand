@@ -22,6 +22,24 @@ function humanoid(texW: number, texH: number, slim = false, zombieArms = false):
   };
 }
 
+/** vanilla HumanoidArmorModel: the legacy 64x32 humanoid (wide arms even on slim skins) grown by a constant
+ *  CubeDeformation — 1.0 for the outer layer (helmet, chestplate, boots), 0.5 for the inner leggings layer;
+ *  the hat overlay is inflated a further 0.5. */
+function humanoidArmor(inflate: number): ModelDef {
+  const inf = inflate;
+  return {
+    texW: 64, texH: 32,
+    parts: [
+      part('head', [0, 0, 0], [box(-4, -8, -4, 8, 8, 8, 0, 0, { inflate: inf })], { children: [part('hat', [0, 0, 0], [box(-4, -8, -4, 8, 8, 8, 32, 0, { inflate: inf + 0.5 })])] }),
+      part('body', [0, 0, 0], [box(-4, 0, -2, 8, 12, 4, 16, 16, { inflate: inf })]),
+      part('rightArm', [-5, 2, 0], [box(-3, -2, -2, 4, 12, 4, 40, 16, { inflate: inf })]),
+      part('leftArm', [5, 2, 0], [box(-1, -2, -2, 4, 12, 4, 40, 16, { inflate: inf, mirror: true })]),
+      part('rightLeg', [-1.9, 12, 0], [box(-2, 0, -2, 4, 12, 4, 0, 16, { inflate: inf })]),
+      part('leftLeg', [1.9, 12, 0], [box(-2, 0, -2, 4, 12, 4, 0, 16, { inflate: inf, mirror: true })]),
+    ],
+  };
+}
+
 function skeleton(): ModelDef {
   return {
     texW: 64, texH: 32,
@@ -90,6 +108,8 @@ function quadruped(legH: number, bodyU = 28, bodyV = 8, o: { headBoxes?: BoxDef[
 const MODELS: Record<string, ModelDef> = {
   player: humanoid(64, 64),
   player_slim: humanoid(64, 64, true),
+  armor: humanoidArmor(1.0),
+  armor_inner: humanoidArmor(0.5),
   zombie: humanoid(64, 64, false, true),
   villager_biped: humanoid(64, 64),
   skeleton: skeleton(),
@@ -300,21 +320,35 @@ const MODELS: Record<string, ModelDef> = {
       part('leg3', [5, 21, -4], [box(0, 0, -2, 13, 1, 5, 27, 24)]),
     ],
   },
-  // vanilla RabbitModel: haunches + hind feet + front legs, ears on the head, nose, tail
+  // 26.1 RabbitModel (the remodel that came with the new baby-animal models): a big tilted body with the tail on
+  // its rump, a boxy head carrying tall ears, two small front legs and long, outward-splayed hind feet. Adults use
+  // a 64x64 texture, babies their own model on a 32x32 "_baby" texture; both render at full scale.
   rabbit: {
-    texW: 64, texH: 32,
+    texW: 64, texH: 64,
     parts: [
-      part('head', [0, 16, -1], [box(-2.5, -4, -5, 5, 4, 5, 32, 0), box(-0.5, -2.5, -5.5, 1, 1, 1, 32, 9)]),
-      part('earR', [0, 16, -1], [box(-2.5, -9, -1, 2, 5, 1, 52, 0)], { rot: [0, -0.2617994, 0] }),
-      part('earL', [0, 16, -1], [box(0.5, -9, -1, 2, 5, 1, 58, 0)], { rot: [0, 0.2617994, 0] }),
-      part('body', [0, 19, 8], [box(-3, -2, -10, 6, 5, 10, 0, 0)], { rot: [-0.34906584, 0, 0] }),
-      part('haunchL', [3, 17.5, 3.7], [box(-1, 0, 0, 2, 4, 5, 30, 15)], { rot: [-0.34906584, 0, 0] }),
-      part('haunchR', [-3, 17.5, 3.7], [box(-1, 0, 0, 2, 4, 5, 16, 15)], { rot: [-0.34906584, 0, 0] }),
-      part('footL', [3, 17.5, 3.7], [box(-1, 5.5, -3.7, 2, 1, 7, 26, 24)]),
-      part('footR', [-3, 17.5, 3.7], [box(-1, 5.5, -3.7, 2, 1, 7, 8, 24)]),
-      part('legL', [3, 17, -1], [box(-1, 0, -1, 2, 7, 2, 8, 15)], { rot: [-0.17453292, 0, 0] }),
-      part('legR', [-3, 17, -1], [box(-1, 0, -1, 2, 7, 2, 0, 15)], { rot: [-0.17453292, 0, 0] }),
-      part('tail', [0, 20, 7], [box(-1.5, -1.5, 0, 3, 3, 2, 52, 6)], { rot: [-0.34906584, 0, 0] }),
+      part('body', [0, 19, 0], [box(-4, -3, -5, 8, 6, 10, 0, 0), box(-2, -5, 3, 4, 4, 4, 20, 16)], { rot: [-0.39269908, 0, 0] }),
+      part('head', [0, 15.5, -4], [box(-2.5, -3, -3, 5, 5, 5, 0, 16)], { rot: [-0.2617994, 0, 0], children: [
+        part('earL', [0, 0, 0], [box(0.5, -8, 0, 2, 5, 1, 32, 0)], { rot: [0, 0.2617994, -0.17453292] }),
+        part('earR', [0, 0, 0], [box(-2.5, -8, 0, 2, 5, 1, 26, 0)], { rot: [0, -0.2617994, 0.17453292] }),
+      ] }),
+      part('legL', [3, 20, -3], [box(-2, 0, -1, 2, 4, 2, 36, 18)], { rot: [-0.17453292, 0, 0] }),
+      part('legR', [-3, 20, -3], [box(0, 0, -1, 2, 4, 2, 44, 18)], { rot: [-0.17453292, 0, 0] }),
+      part('footL', [3, 23.5, 2.2], [box(-1, -0.5, -4.7, 2, 1, 6, 20, 24)], { rot: [0, -0.61086524, 0] }),
+      part('footR', [-3, 23.5, 2.2], [box(-1, -0.5, -4.7, 2, 1, 6, 36, 24)], { rot: [0, 0.61086524, 0] }),
+    ],
+  },
+  rabbit_baby: {
+    texW: 32, texH: 32,
+    parts: [
+      part('body', [0, 20, 0], [box(-2, -1, -3, 4, 3, 6, 0, 8), box(-1.5, -3, 2, 3, 3, 3, 0, 21)], { rot: [-0.39269908, 0, 0] }),
+      part('head', [0, 18.5, -2], [box(-2.5, -3, -3, 5, 4, 4, 0, 0)], { children: [
+        part('earL', [0, 0, 0], [box(0.5, -7, 0, 2, 4, 1, 18, 0)], { rot: [0, 0.2617994, -0.17453292] }),
+        part('earR', [0, 0, 0], [box(-2.5, -7, 0, 2, 4, 1, 24, 0)], { rot: [0, -0.2617994, 0.17453292] }),
+      ] }),
+      part('legL', [1, 21, -1.5], [box(-0.5, 0, -0.5, 1, 3, 1, 14, 8)], { rot: [-0.17453292, 0, 0] }),
+      part('legR', [-1, 21, -1.5], [box(-0.5, 0, -0.5, 1, 3, 1, 18, 8)], { rot: [-0.17453292, 0, 0] }),
+      part('footL', [1.5, 23.5, 1.95], [box(-1, -0.5, -0.95, 2, 1, 3, 0, 17)], { rot: [0, -0.6981317, 0] }),
+      part('footR', [-1.5, 23.5, 1.95], [box(-1, -0.5, -0.95, 2, 1, 3, 10, 17)], { rot: [0, 0.6981317, 0] }),
     ],
   },
   cat: {

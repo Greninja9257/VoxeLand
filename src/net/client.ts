@@ -9,7 +9,7 @@ import { ArrowEntity, FallingBlockEntity, PrimedTnt, ThrownProjectile } from '..
 import { ItemStack, Inventory } from '../items/stack';
 import { SET_UPDATE_NEIGHBORS, type WorldListener } from '../world/world';
 import { Chunk, chunkKey } from '../world/chunk';
-import { decodeChunk, unpackFrame, FRAME_CHUNK, PROTOCOL_VERSION, defaultRelayUrl, shouldApplyInventoryState, type ServerInfo } from './protocol';
+import { decodeChunk, unpackFrame, FRAME_CHUNK, PROTOCOL_VERSION, defaultRelayUrl, shouldApplyInventoryState, type ServerInfo, type PlayerListEntry } from './protocol';
 
 /** Joining either lands us in a running world or assigns us as the public world's simulation coordinator. */
 export type JoinResult =
@@ -37,7 +37,7 @@ export class NetClient implements WorldListener {
   welcome: any = null;
   info: any = null;
   status = 'connecting';
-  players: { name: string; id: number }[] = [];
+  players: PlayerListEntry[] = [];
   private queue: any[] = [];
   private chunkFrames: Uint8Array[] = [];
   /** entity id (host side) -> local entity */
@@ -144,11 +144,15 @@ export class NetClient implements WorldListener {
     // our snapshot
     if (this.ticks === 1) this.send({ t: 'ready' });
     const face = p.breaking && g.targetBlock && p.breaking.x === g.targetBlock.x && p.breaking.y === g.targetBlock.y && p.breaking.z === g.targetBlock.z ? g.targetBlock.face : 1;
-    const snap: any = { t: 'move', x: r3(p.x), y: r3(p.y), z: r3(p.z), yaw: r1(p.yaw), pitch: r1(p.pitch), sneak: p.isSneaking, sprint: p.isSprinting, swim: p.swimmingPose, sleep: p.sleeping, fly: p.flying, health: p.health, slot: p.selectedSlot, swing: p.swinging && p.swingTime <= 1, use: !!p.usingItem, hurt: p.hurtTime === p.hurtDuration, dead: p.health <= 0, br: p.breaking ? { x: p.breaking.x, y: p.breaking.y, z: p.breaking.z, face, stage: p.breakStage, state: p.breaking.state } : null };
+    // vanilla ServerboundMovePlayerPacket: position, look, onGround plus the pose/animation flags others render
+    const snap: any = { t: 'move', x: r3(p.x), y: r3(p.y), z: r3(p.z), yaw: r1(p.yaw), pitch: r1(p.pitch), og: p.onGround, sneak: p.isSneaking, sprint: p.isSprinting, swim: p.swimmingPose, sleep: p.sleeping, fly: p.flying, slot: p.selectedSlot, swing: p.swinging && p.swingTime <= 1, use: !!p.usingItem, br: p.breaking ? { x: p.breaking.x, y: p.breaking.y, z: p.breaking.z, face, stage: p.breakStage, state: p.breaking.state } : null };
     this.send(snap);
-    const held = JSON.stringify(p.heldItem()?.serialize() ?? null), armor = JSON.stringify(p.armor.serialize()) + JSON.stringify(p.offhand.serialize());
-    if (held !== this.lastHeld || armor !== this.lastArmor) { this.lastHeld = held; this.lastArmor = armor; this.send({ t: 'inv', held: p.heldItem()?.serialize() ?? null, armor: p.armor.serialize(), off: p.offhand.serialize() }); }
-    if (this.ticks % 40 === 0) this.send({ t: 'ping', time: performance.now() });
+    // creative players pick items out of thin air, so the host has to be told what is in the hand
+    if (p.isCreative) {
+      const held = JSON.stringify(p.heldItem()?.serialize() ?? null), armor = JSON.stringify(p.armor.serialize()) + JSON.stringify(p.offhand.serialize());
+      if (held !== this.lastHeld || armor !== this.lastArmor) { this.lastHeld = held; this.lastArmor = armor; this.send({ t: 'inv', held: p.heldItem()?.serialize() ?? null, armor: p.armor.serialize(), off: p.offhand.serialize() }); }
+    }
+    if (this.ticks % 40 === 0) this.send({ t: 'ping', time: performance.now(), ping: this.ping });
   }
   containerDirty = false;
   private inventoryRevision = 0;
@@ -190,18 +194,13 @@ export class NetClient implements WorldListener {
           if (Array.isArray(s.armor)) p.armor.deserialize(s.armor, g.items);
           if (Array.isArray(s.offhand)) p.offhand.deserialize(s.offhand, g.items);
           if (Number.isInteger(s.selectedSlot) && s.selectedSlot >= 0 && s.selectedSlot < 9) p.selectedSlot = s.selectedSlot;
-          if (Number.isFinite(s.health)) p.health = s.health;
-          if (Number.isFinite(s.absorption)) p.absorption = s.absorption;
-          if (Number.isFinite(s.foodLevel)) p.foodLevel = s.foodLevel;
-          if (Number.isFinite(s.saturation)) p.saturation = s.saturation;
+          this.applyStats(s);
           if (Number.isFinite(s.exhaustion)) p.exhaustion = s.exhaustion;
-          if (Number.isFinite(s.xpLevel)) p.xpLevel = s.xpLevel;
-          if (Number.isFinite(s.xpProgress)) p.xpProgress = s.xpProgress;
-          if (Number.isFinite(s.totalXp)) p.totalXp = s.totalXp;
           p.inventory.onChange?.();
         }
         break;
       }
+      case 'stats': this.applyStats(m); break;
       case 'invState': {
         if (!shouldApplyInventoryState(this.inventoryRevision, m.rev, m.accepted === true)) break;
         this.inventoryRevision = m.rev;
@@ -235,16 +234,10 @@ export class NetClient implements WorldListener {
         }
         break;
       }
-      case 'hurt': {
-        const hook = g.sounds.onSound, enabled = g.sounds.enabled;
-        g.sounds.onSound = null; g.sounds.enabled = false;
-        try { p.hurt({ amount: m.damage, source: m.source ?? 'attack', bypassArmor: true }); }
-        finally { g.sounds.onSound = hook; g.sounds.enabled = enabled; }
-        p.health = m.health; p.absorption = m.absorption ?? p.absorption; p.vx = m.vx; p.vy = m.vy; p.vz = m.vz; p.fireTicks = m.fire ?? p.fireTicks; p.hurtTime = p.hurtDuration;
-        if (m.dead) { p.health = 0; p.isDead = true; }
-        break;
-      }
-      case 'give': { const st = ItemStack.deserialize(m.stack, g.items); if (!st) break; const left = p.inventory.add(st); g.sounds.playAt('entity.item.pickup', p.x, p.y, p.z, 0.2, 1.5 + Math.random() * 0.5); if (left > 0) this.send({ t: 'drop', stack: st.serialize(), x: p.x, y: p.y + 1, z: p.z, dir: [0, 0, 0] }); break; }
+      case 'hurt': { if (Number.isFinite(m.health)) p.applyServerHurt(m); break; }
+      // the host already fitted this into our authoritative inventory; anything that does not fit locally is a
+      // prediction mismatch the next inventory sync repairs
+      case 'give': { const st = ItemStack.deserialize(m.stack, g.items); if (!st) break; p.inventory.add(st); p.inventory.onChange?.(); g.sounds.playAt('entity.item.pickup', p.x, p.y, p.z, 0.2, ((Math.random() - Math.random()) * 0.7 + 1) * 2); break; }
       case 'givexp': p.addXp(m.v); g.sounds.playAt('entity.experience_orb.pickup', p.x, p.y, p.z, 0.1, 1 + Math.random() * 0.5); break;
       case 'consumed': { p.inventory.slots[p.selectedSlot] = m.held ? ItemStack.deserialize(m.held, g.items) : null; p.inventory.onChange?.(); break; }
       case 'open': this.openRemote(m); break;
@@ -255,6 +248,22 @@ export class NetClient implements WorldListener {
       case 'pong': this.ping = Math.round(performance.now() - m.time); break;
       case 'ride': { const v = m.id !== null ? this.entities.get(m.id) : null; if (v instanceof BoatEntity) { if (p.vehicle !== v) { if (p.vehicle instanceof BoatEntity) p.vehicle.detachPassenger(p); v.addPassenger(p, m.seat); } } else { if (p.vehicle instanceof BoatEntity) p.vehicle.detachPassenger(p); if (m.x !== undefined) { p.setPos(m.x, m.y, m.z); p.vy = 0; } } break; }
     }
+  }
+
+  /** Server-owned survival state (vanilla SetHealth / SetExperience / UpdateMobEffect / game mode packets). */
+  private applyStats(s: any): void {
+    const p = this.game.player;
+    if (s.mode) p.setGameMode(s.mode);
+    if (Number.isFinite(s.health)) p.health = s.health;
+    if (Number.isFinite(s.absorption)) p.absorption = s.absorption;
+    if (Number.isFinite(s.foodLevel)) p.foodLevel = s.foodLevel;
+    if (Number.isFinite(s.saturation)) p.saturation = s.saturation;
+    if (Number.isFinite(s.air)) p.air = s.air;
+    if (Number.isFinite(s.xpLevel)) p.xpLevel = s.xpLevel;
+    if (Number.isFinite(s.xpProgress)) p.xpProgress = s.xpProgress;
+    if (Number.isFinite(s.totalXp)) p.totalXp = s.totalXp;
+    if (Array.isArray(s.effects)) p.effects = s.effects.filter((e: any) => e && typeof e.id === 'string' && Number.isFinite(e.duration)).map((e: any) => ({ id: e.id, amplifier: e.amplifier | 0, duration: e.duration, ambient: !!e.ambient }));
+    if (s.fire === false) p.fireTicks = 0; else if (s.fire === true && p.fireTicks <= 0) p.fireTicks = 20;
   }
 
   private openRemote(m: any): void {

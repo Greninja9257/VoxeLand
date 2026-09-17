@@ -293,7 +293,7 @@ export class Redstone {
     const n = reg.nameOf(s);
     const props = reg.getProps(s);
     const entities = this.game.entities.filter((e) => !e.removed && e.bb.maxX > x + 0.0625 && e.bb.minX < x + 0.9375 && e.bb.maxZ > z + 0.0625 && e.bb.minZ < z + 0.9375 && e.bb.minY <= y + 0.25 && e.bb.maxY >= y);
-    if (this.game.player && !this.game.player.removed) { const p = this.game.player; if (p.bb.maxX > x + 0.0625 && p.bb.minX < x + 0.9375 && p.bb.maxZ > z + 0.0625 && p.bb.minZ < z + 0.9375 && p.bb.minY <= y + 0.25 && p.bb.maxY >= y) entities.push(p); }
+    { const p = this.game.player; if (p && !p.removed && !p.isSpectator && p.bb.maxX > x + 0.0625 && p.bb.minX < x + 0.9375 && p.bb.maxZ > z + 0.0625 && p.bb.minZ < z + 0.9375 && p.bb.minY <= y + 0.25 && p.bb.maxY >= y) entities.push(p); }
     let ns = s;
     if (n.startsWith('light_weighted') || n.startsWith('heavy_weighted')) {
       const power = Math.min(15, Math.ceil(entities.length / (n.startsWith('light') ? 1 : 10)));

@@ -238,8 +238,7 @@ export class BlockEntityManager {
     const g = this.game;
     const mob = be.mob ?? 'zombie';
     if (!MOB_DEFS[mob]) return;
-    const p = g.player;
-    if (!p || p.distSq(be.x + 0.5, be.y + 0.5, be.z + 0.5) > 16 * 16) return;
+    if (!g.allPlayers().some((p) => p.distSq(be.x + 0.5, be.y + 0.5, be.z + 0.5) <= 16 * 16)) return;
     if (g.world.time % 4 === 0 && Math.random() < 0.5) { g.particles.spawnFlame(be.x + Math.random(), be.y + Math.random(), be.z + Math.random()); g.particles.spawnSmoke(be.x + Math.random(), be.y + Math.random(), be.z + Math.random(), 1); }
     be.delay = (be.delay ?? 20) - 1;
     if (be.delay > 0) return;
@@ -263,7 +262,7 @@ export class BlockEntityManager {
       if (!ok) break; levels = l;
     }
     be.levels = levels;
-    if (levels > 0 && be.effect) { const r = 10 + levels * 10; const p = g.player; if (p && p.distSq(be.x, be.y, be.z) < r * r) p.addEffect({ id: be.effect, amplifier: levels >= 4 && be.effect === be.effect2 ? 1 : 0, duration: (9 + levels * 2) * 20 }); if (levels >= 4 && be.effect2 === 'regeneration' && p && p.distSq(be.x, be.y, be.z) < r * r) p.addEffect({ id: 'regeneration', amplifier: 0, duration: 180 }); }
+    if (levels > 0 && be.effect) { const r = 10 + levels * 10; for (const p of g.allPlayers()) { if (p.distSq(be.x, be.y, be.z) >= r * r) continue; p.addEffect({ id: be.effect, amplifier: levels >= 4 && be.effect === be.effect2 ? 1 : 0, duration: (9 + levels * 2) * 20 }); if (levels >= 4 && be.effect2 === 'regeneration') p.addEffect({ id: 'regeneration', amplifier: 0, duration: 180 }); } }
   }
 
   // ---------- persistence ----------

@@ -216,8 +216,9 @@ export class Mob extends LivingEntity {
   die(d: EntityDamage): void {
     super.die(d);
     const g = this.game;
-    const killedByPlayer = d.attacker === g.player;
-    const looting = killedByPlayer ? (g.player.heldItem()?.enchantLevel('looting') ?? 0) : 0;
+    const killer = d.attacker && (d.attacker as any).isPlayer ? (d.attacker as Player) : null;
+    const killedByPlayer = !!killer;
+    const looting = killer ? (killer.heldItem()?.enchantLevel('looting') ?? 0) : 0;
     const lootName = this.def.ai.sheep ? `sheep/${this.woolColor}` : this.def.loot ?? this.type;
     let drops = g.loot.entityDrops(lootName, { killedByPlayer, lootingLevel: looting, onFire: this.fireTicks > 0, entityProps: { color: this.woolColor, sheared: this.sheared } });
     if (this.def.ai.sheep && !this.sheared) drops = drops.concat(drops.some((s) => s.item.name.endsWith('_wool')) ? [] : [new ItemStack(g.items.get(this.woolColor + '_wool')!, 1)]);
@@ -286,7 +287,7 @@ export class Mob extends LivingEntity {
     if (this.def.ai.sheep && n === 'shears' && !this.sheared && !this.isBaby) { this.shear(); player.damageHeld(held!, 1); return true; }
     if (this.def.ai.sheep && n?.endsWith('_dye')) { const c = n.replace('_dye', ''); if (c !== this.woolColor) { this.woolColor = c; if (!player.isCreative) held!.count--; player.inventory.onChange?.(); return true; } }
     if ((this.type === 'cow' || this.type === 'mooshroom') && n === 'bucket' && !this.isBaby) { player.replaceHeld(new ItemStack(g.items.get('milk_bucket')!, 1)); g.sounds.playAt('entity.cow.milk', this.x, this.y, this.z, 1, 1); return true; }
-    if (this.type === 'mooshroom' && n === 'bowl' && !this.isBaby) { if (!player.isCreative) held!.count--; g.givePlayer(new ItemStack(g.items.get('mushroom_stew')!, 1)); g.sounds.playAt('entity.mooshroom.milk', this.x, this.y, this.z, 1, 1); return true; }
+    if (this.type === 'mooshroom' && n === 'bowl' && !this.isBaby) { if (!player.isCreative) held!.count--; player.give(new ItemStack(g.items.get('mushroom_stew')!, 1)); g.sounds.playAt('entity.mooshroom.milk', this.x, this.y, this.z, 1, 1); return true; }
     if (this.type === 'mooshroom' && n === 'shears') { const cow = new Mob(MOB_DEFS.cow); cow.setPos(this.x, this.y, this.z); cow.yaw = this.yaw; this.remove(); g.addEntity(cow); for (let i = 0; i < 5; i++) g.dropItem(this.x, this.y + 1, this.z, new ItemStack(g.items.get('red_mushroom')!, 1)); g.sounds.playAt('entity.mooshroom.shear', this.x, this.y, this.z, 1, 1); player.damageHeld(held!, 1); return true; }
     if (this.def.ai.tameable && n && this.def.ai.tameable.includes(n) && !this.tamed) { if (!player.isCreative) held!.count--; player.inventory.onChange?.(); if (Math.random() < 1 / 3) { this.tamed = true; this.ownerUuid = player.uuid; this.target = null; this.angerTicks = 0; this.health = this.maxHealth = this.type === 'wolf' ? 40 : this.maxHealth; g.particles.spawnHeart(this.x, this.y + this.height, this.z, 7); } else g.particles.spawnSmoke(this.x, this.y + this.height, this.z, 7); return true; }
     if (this.tamed && this.ownerUuid === player.uuid && (!n || !this.def.ai.breed?.includes(n))) { this.sitting = !this.sitting; return true; }
