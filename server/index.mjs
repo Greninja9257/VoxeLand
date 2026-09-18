@@ -28,8 +28,11 @@ const MAX_PLAYERS_DEFAULT = 8;
 const OFFICIAL_ID = 'official';
 const OFFICIAL_MAX = +(process.env.PUBLIC_MAX_PLAYERS || 16);
 const MAX_STORED_CHUNKS = +(process.env.PUBLIC_MAX_CHUNKS || 2048);
-const MAX_CONTROL_BYTES = 64 * 1024;
-const MAX_GUEST_MESSAGES_PER_SECOND = 80;
+/** Guests send small intents; the host's snapshots, inventories and public-world metadata are legitimately large. */
+const MAX_GUEST_CONTROL_BYTES = 64 * 1024;
+const MAX_HOST_CONTROL_BYTES = 4 * 1024 * 1024;
+const MAX_GUEST_MESSAGES_PER_SECOND = 400;
+const HEARTBEAT_MS = 30_000;
 
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.png': 'image/png', '.ogg': 'audio/ogg', '.txt': 'text/plain; charset=utf-8', '.wasm': 'application/wasm', '.ico': 'image/x-icon', '.svg': 'image/svg+xml' };
 
@@ -130,7 +133,19 @@ function assignOfficialCoordinator(ws) {
   send(ws, { t: 'worldReady' });
 }
 
+// Keep idle sockets alive through proxies and drop the ones that stopped answering (browsers answer pings
+// themselves, even from background tabs).
+setInterval(() => {
+  for (const ws of wss.clients) {
+    if (ws.alive === false) { ws.terminate(); continue; }
+    ws.alive = false;
+    try { ws.ping(); } catch { /* closing */ }
+  }
+}, HEARTBEAT_MS).unref?.();
+
 wss.on('connection', (ws) => {
+  ws.alive = true;
+  ws.on('pong', () => { ws.alive = true; });
   let role = null;          // 'host' | 'guest'
   let server = null;        // the server record this socket belongs to
   let clientId = 0;
@@ -162,7 +177,7 @@ wss.on('connection', (ws) => {
       }
       return;
     }
-    if (Buffer.byteLength(data) > MAX_CONTROL_BYTES) { ws.close(1009, 'Control message too large'); return; }
+    if (Buffer.byteLength(data) > (role === 'host' ? MAX_HOST_CONTROL_BYTES : MAX_GUEST_CONTROL_BYTES)) { ws.close(1009, 'Control message too large'); return; }
     let m; try { m = JSON.parse(data.toString()); } catch { return; }
     switch (m.t) {
       case 'javaPing': {

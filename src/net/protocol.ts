@@ -34,10 +34,8 @@ export function isGuestMessage(m: unknown): m is Record<string, any> {
   if (v.t === 'craft' && (typeof v.id !== 'string' || v.id.length > 256 || typeof v.all !== 'boolean')) return false;
   if (v.t === 'invTxn' && (!Number.isInteger(v.rev) || !Array.isArray(v.inventory) || !Array.isArray(v.armor) || !Array.isArray(v.offhand) || !Array.isArray(v.grid))) return false;
   if (v.t === 'contTxn' && (!Number.isInteger(v.rev) || !Array.isArray(v.inventory) || !Array.isArray(v.armor) || !Array.isArray(v.offhand) || !Array.isArray(v.slots))) return false;
-  if (['set', 'break', 'use'].includes(v.t)) {
-    const xyz = v.t === 'set' ? v.b?.slice?.(0, 3) : [v.x, v.y, v.z];
-    if (!Array.isArray(xyz) || xyz.length !== 3 || !xyz.every(Number.isInteger)) return false;
-  }
+  if (v.t === 'set' && (!Array.isArray(v.b) || v.b.length % 4 !== 0 || v.b.length > 1024 || !v.b.every(Number.isInteger))) return false;
+  if (v.t === 'break' || v.t === 'use') { if (![v.x, v.y, v.z].every(Number.isInteger)) return false; }
   return true;
 }
 

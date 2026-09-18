@@ -116,10 +116,10 @@ export class NetClient implements WorldListener {
   }
 
   // ---- world listener: locally predicted block changes are sent to the host ----
+  private predicted: number[] = [];
   onBlockChanged(x: number, y: number, z: number, _old: number, s: number): void {
     if (this.applying) return;
-    const be = this.game.blockEntities.get(x, y, z);
-    this.send({ t: 'set', b: [x, y, z, s], be: be ? this.game.blockEntities.serializeOne(be) : undefined });
+    if (this.predicted.length < 1024) this.predicted.push(x, y, z, s);
   }
 
   /** ChunkManager (remote mode) asks for chunks here. */
@@ -131,6 +131,8 @@ export class NetClient implements WorldListener {
     const g = this.game, p = g.player;
     this.ticks++;
     if (this.wanted.size) { this.send({ t: 'chunk', keys: [...this.wanted] }); this.wanted.clear(); }
+    // every block we predicted this tick, in one message; the host answers with the authoritative states
+    if (this.predicted.length) { this.send({ t: 'set', b: this.predicted }); this.predicted = []; }
     // chunks
     const frames = this.chunkFrames; this.chunkFrames = [];
     for (const f of frames) {

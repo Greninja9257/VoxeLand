@@ -170,6 +170,7 @@ export class NetHost implements WorldListener {
     }
     // Smooth persistence work across ticks: encoding several full chunks in one frame caused a visible hitch.
     if (this.official && this.ticks % 20 === 0) this.uploadWorld(1, this.ticks % 100 === 0);
+    if (this.ticks % 200 === 0 && this.ws?.readyState === 1) this.ws.send(JSON.stringify({ t: 'ping', time: 0 })); // keep the relay connection alive while nobody is here
     if (this.ticks % 20 === 0) this.broadcast({ t: 'time', time: g.world.time, day: g.world.dayTime, rain: g.weather.rainLevel, thunder: g.weather.thunderLevel, raining: g.weather.raining, thundering: g.weather.thundering, diff: g.difficulty });
   }
 
@@ -285,10 +286,11 @@ export class NetHost implements WorldListener {
       case 'invTxn': this.inventoryTransaction(gu, m); break;
       case 'contTxn': this.containerTransaction(gu, m); break;
       case 'chunk': for (const k of m.keys as number[]) gu.wantChunks.add(k); break;
-      case 'set': { // Never accept a guest-selected final state or block-entity payload.
-        const b = Array.isArray(m.b) ? m.b : [];
-        const [x, y, z] = b;
-        if ([x, y, z].every(Number.isInteger) && w.isLoaded(x, z)) this.send(gu.id, { t: 'blk', b: [x, y, z, w.getBlock(x, y, z)] });
+      case 'set': { // Never accept a guest-selected final state or block-entity payload: answer with the truth.
+        const b: number[] = Array.isArray(m.b) ? m.b : [];
+        const out: number[] = [];
+        for (let i = 0; i + 2 < b.length; i += 4) { const x = b[i], y = b[i + 1], z = b[i + 2]; if (w.isLoaded(x, z)) out.push(x, y, z, w.getBlock(x, y, z)); }
+        if (out.length) this.send(gu.id, { t: 'blk', b: out });
         break;
       }
       case 'break': {
@@ -685,7 +687,9 @@ export class NetHost implements WorldListener {
         for (const k of gu.known) if (!seen.has(k) && k !== -1) rm.push(k);
         for (const k of rm) gu.known.delete(k);
       }
-      if (ents.length || rm.length) this.send(gu.id, { t: 'ent', e: ents, rm });
+      // several small messages rather than one huge one: the relay caps message sizes and a single JSON blob
+      // for hundreds of entities stalls the guest's frame
+      for (let i = 0; i < ents.length || (i === 0 && rm.length); i += 80) this.send(gu.id, { t: 'ent', e: ents.slice(i, i + 80), rm: i === 0 ? rm : [] });
     }
   }
   private snapshot(e: Entity, gu: Guest): any | null {
