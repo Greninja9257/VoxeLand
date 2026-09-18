@@ -205,7 +205,7 @@ wss.on('connection', (ws) => {
         role = 'host';
         const id = wantOfficial ? OFFICIAL_ID : Math.random().toString(36).slice(2, 10);
         server = {
-          id, ws, guests: new Map(), official: wantOfficial,
+          id, ws, guests: new Map(), official: wantOfficial, playerId: String(m.playerId ?? '').slice(0, 80),
           info: {
             name: wantOfficial ? official.name : String(m.name ?? 'VoxeLand world').slice(0, 48),
             host: String(m.host ?? 'Player').slice(0, 24),
@@ -256,8 +256,18 @@ wss.on('connection', (ws) => {
         if (String(m.version ?? '') !== String(s.info.version ?? '')) { send(ws, { t: 'error', reason: 'Multiplayer version mismatch. Reload the page and try again.' }); return; }
         if (s.guests.size + 1 >= (s.info.maxPlayers ?? MAX_PLAYERS_DEFAULT)) { send(ws, { t: 'error', reason: 'The server is full.' }); return; }
         if (s.info.password && String(m.password ?? '') !== s.info.password) { send(ws, { t: 'error', reason: 'Incorrect password.', needPassword: true }); return; }
+        // vanilla PlayerList.placeNewPlayer: the same account logging in again kicks its earlier session
+        // ("You logged in from another location"); a different account using a taken name is refused
+        const joinId = String(m.playerId ?? m.name ?? 'Player').slice(0, 80), joinName = String(m.name ?? 'Player').slice(0, 16);
+        if (joinId && joinId === s.playerId) { send(ws, { t: 'error', reason: 'You are already playing in this world from another tab.' }); return; }
+        if (joinName.toLowerCase() === String(s.info.host).toLowerCase()) { send(ws, { t: 'error', reason: 'That name is already taken' }); return; }
+        for (const [gid, g] of s.guests) {
+          if (g.playerId === joinId) { send(g, { t: 'kicked', reason: 'You logged in from another location' }); g.close(); s.guests.delete(gid); send(s.ws, { t: 'guestLeft', from: gid }); }
+          else if (String(g.playerName).toLowerCase() === joinName.toLowerCase()) { send(ws, { t: 'error', reason: 'That name is already taken' }); return; }
+        }
         role = 'guest'; server = s; clientId = nextClientId++;
-        playerId = String(m.playerId ?? m.name ?? 'Player').slice(0, 80);
+        playerId = joinId;
+        ws.playerId = playerId; ws.playerName = joinName;
         s.guests.set(clientId, ws);
         send(ws, { t: 'joined', id: s.id, clientId, info: { name: s.info.name, host: s.official ? '' : s.info.host, motd: s.info.motd, gameMode: s.info.gameMode, maxPlayers: s.info.maxPlayers, official: s.official } });
         send(s.ws, { t: 'guestJoined', from: clientId, playerId, name: String(m.name ?? 'Player').slice(0, 16), skin: m.skin });
