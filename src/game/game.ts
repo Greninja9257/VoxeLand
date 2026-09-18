@@ -31,7 +31,7 @@ import { BlockEntityManager } from './blockEntities';
 import { mergeOptions, type Options } from './options';
 import { Weather } from './weather';
 import { NetHost, type HostOptions } from '../net/host';
-import { NetClient } from '../net/client';
+import { NetClient, RetryLater } from '../net/client';
 import { JavaNetClient } from '../net/javaClient';
 import { decodeChunk, unpackFrame, PROTOCOL_VERSION } from '../net/protocol';
 import { RemotePlayer } from '../entity/remotePlayer';
@@ -46,6 +46,12 @@ import { TitleScreen } from './gui/screens';
 import { DisconnectedScreen } from './gui/multiplayer';
 import { facingOffset } from '../blocks/placement';
 
+
+/** One simulated dimension (see Game.dims). */
+export interface DimensionInstance { dim: Dimension; world: World; chunks: ChunkManager; blocks: BlockTicker; redstone: Redstone; blockEntities: BlockEntityManager; spawner: Spawner; entities: Entity[] }
+
+/** Particle sink for dimensions the local player cannot see. */
+const NULL_PARTICLES: any = new Proxy({ list: [] }, { get: (t, k) => (k === 'list' ? t.list : () => {}) });
 
 export class Game {
   version = '0.1.0';
@@ -83,13 +89,34 @@ export class Game {
   worldSpawn: [number, number, number] = [0, 70, 0];
   lightningBolts: { x: number; y: number; z: number; life: number }[] = [];
   private otherDims = new Map<Dimension, { entities: any[]; time: number }>();
+  /** Every dimension being simulated: the one the local player is in (rendered) plus, when hosting, any other one a
+   *  guest is in (headless). `world`, `chunks`, `entities`… are the fields of whichever instance is bound right now;
+   *  all game systems read them dynamically, so switching the binding switches the whole simulation context. */
+  dims = new Map<Dimension, DimensionInstance>();
+  current!: DimensionInstance;
+  bound!: DimensionInstance;
   /** multiplayer */
   host: NetHost | null = null;
   client: NetClient | JavaNetClient | null = null;
   /** saved state of guests that visited this world (by name) */
   playerData = new Map<string, any>();
   get isRemote(): boolean { return this.client !== null; }
-  allPlayers(): Player[] { const out: Player[] = []; if (this.player && !this.player.removed) out.push(this.player); for (const e of this.entities) if (e instanceof RemotePlayer && !e.removed) out.push(e); return out; }
+  /** Players in the bound dimension: the local player when it is there, plus the guests whose copies live in it. */
+  allPlayers(): Player[] { const out: Player[] = []; if (this.player && !this.player.removed && this.player.world === this.world) out.push(this.player); for (const e of this.entities) if (e instanceof RemotePlayer && !e.removed) out.push(e); return out; }
+  /** Every player of the world regardless of dimension (commands, chat, the player list). */
+  allPlayersEverywhere(): Player[] {
+    const out: Player[] = [];
+    if (this.player && !this.player.removed) out.push(this.player);
+    for (const inst of this.dims.values()) for (const e of (inst === this.bound ? this.entities : inst.entities)) if (e instanceof RemotePlayer && !e.removed) out.push(e);
+    return out;
+  }
+  /** Teleport a player, changing dimension when needed (vanilla /tp to a destination in another level). */
+  teleportPlayer(p: Player, dim: Dimension, x: number, y: number, z: number): void {
+    const place = () => { p.setPos(x, y, z); p.fallDistance = 0; p.portalCooldown = Math.max(p.portalCooldown, 40); };
+    if (p.world.dimension === dim) { place(); return; }
+    if (p instanceof RemotePlayer) void this.travelRemotePlayer(p, dim, [x, y, z]);
+    else if (p === this.player) void this.travelDimension(dim).then(place);
+  }
   nearestPlayer(x: number, y: number, z: number): Player | null { let best: Player | null = null, bd = Infinity; for (const p of this.allPlayers()) { const d = p.distSq(x, y, z); if (d < bd) { bd = d; best = p; } } return best; }
   biomeColors!: Uint8Array;
   // loop
@@ -187,7 +214,7 @@ export class Game {
 
   // ---------- world lifecycle ----------
   async loadWorld(meta: WorldMeta, session?: { state: any; chunks: ChunkData[] }): Promise<void> {
-    this.sessionChunks = session ? new Map(session.chunks.map((c) => [`overworld:${c.cx},${c.cz}`, c])) : null;
+    this.sessionChunks = session ? new Map(session.chunks.map((c) => [`${(c as any).dim ?? 'overworld'}:${c.cx},${c.cz}`, c])) : null;
     this.worldMeta = meta;
     this.gui.open(new LoadingScreen('Loading world…'));
     this.difficulty = meta.difficulty; this.cheats = meta.cheats || meta.gameMode === 'creative';
@@ -225,24 +252,85 @@ export class Game {
     this.sounds.stopMusic();
   }
 
+  /** Fresh start in one dimension (world load, joining a server): every other instance is dropped. */
   private async setupDimension(dim: Dimension, seed: number, time?: { time: number; dayTime: number }): Promise<void> {
-    this.world = new World(this.registry, dim);
-    this.world.seed = seed;
-    if (time) { this.world.time = time.time; this.world.dayTime = time.dayTime; }
-    this.blocks = new BlockTicker(this);
-    this.redstone = new Redstone(this);
-    this.blockEntities = new BlockEntityManager(this);
-    this.weather = this.weather ?? new Weather(this);
-    this.spawner = new Spawner(this);
-    this.world.listeners = [this.blocks];
+    for (const inst of this.dims.values()) inst.chunks.dispose();
+    this.dims.clear();
     this.renderer.sections.clear();
-    this.chunks = new ChunkManager(this.world, this.assets, this.renderer, this.worldMeta!.id, this.biomeColors, this.client, this.sessionChunks);
-    this.chunks.viewDistance = this.options.renderDistance; this.renderer.viewDistance = this.options.renderDistance;
-    this.chunks.onChunkLoaded = (c) => { this.blockEntities.loadChunk(c); if ((c as any).fresh) this.spawner.populateChunk(c); };
-    this.chunks.onChunkUnloaded = (c) => { this.blockEntities.unloadChunk(c); this.unloadEntitiesIn(c); this.host?.onChunkUnloaded(c); };
-    if (this.client) this.chunks.simulationDistance = 0;
-    this.entities = [];
-    await this.chunks.ready();
+    const inst = await this.createDimension(dim, seed, time, false);
+    this.current = inst;
+    this.bind(inst);
+  }
+
+  /** Build a simulation instance for a dimension and register it. Headless instances stream and tick chunks for
+   *  the guests in them without meshing anything. */
+  private async createDimension(dim: Dimension, seed: number, time: { time: number; dayTime: number } | undefined, headless: boolean): Promise<DimensionInstance> {
+    const world = new World(this.registry, dim);
+    world.seed = seed;
+    if (time) { world.time = time.time; world.dayTime = time.dayTime; }
+    const inst: DimensionInstance = { dim, world, chunks: null!, blocks: null!, redstone: null!, blockEntities: null!, spawner: null!, entities: [] };
+    this.weather = this.weather ?? new Weather(this);
+    // the systems read game.world etc. dynamically, so they are built with this instance bound
+    const prev = this.bound;
+    this.bind(inst);
+    try {
+      inst.blocks = new BlockTicker(this);
+      inst.redstone = new Redstone(this);
+      inst.blockEntities = new BlockEntityManager(this);
+      inst.spawner = new Spawner(this);
+      world.listeners = [inst.blocks];
+      inst.chunks = new ChunkManager(world, this.assets, this.renderer, this.worldMeta!.id, this.biomeColors, this.client, this.sessionChunks, headless);
+      inst.chunks.viewDistance = this.options.renderDistance; this.renderer.viewDistance = this.options.renderDistance;
+      inst.chunks.onChunkLoaded = (c) => this.withDimension(inst, () => { this.blockEntities.loadChunk(c); if ((c as any).fresh) this.spawner.populateChunk(c); });
+      inst.chunks.onChunkUnloaded = (c) => this.withDimension(inst, () => { this.blockEntities.unloadChunk(c); this.unloadEntitiesIn(c); this.host?.onChunkUnloaded(c, dim); });
+      if (this.client) inst.chunks.simulationDistance = 0;
+      this.bind(inst);
+    } finally { if (prev) this.bind(prev); }
+    this.dims.set(dim, inst);
+    this.host?.attachTo(inst);
+    await inst.chunks.ready();
+    return inst;
+  }
+
+  /** Point the game's world/chunk/entity fields at an instance. */
+  private bind(inst: DimensionInstance): void {
+    if (this.bound && this.bound !== inst) this.bound.entities = this.entities;
+    this.bound = inst;
+    this.world = inst.world; this.chunks = inst.chunks; this.blocks = inst.blocks; this.redstone = inst.redstone; this.blockEntities = inst.blockEntities; this.spawner = inst.spawner; this.entities = inst.entities;
+  }
+  /** Run `fn` with another dimension bound (host handling something that happens in a guest's dimension). */
+  withDimension<T>(inst: DimensionInstance | Dimension, fn: () => T): T {
+    const target = typeof inst === 'string' ? this.dims.get(inst) : inst;
+    if (!target) throw new Error('dimension not loaded: ' + inst);
+    const prev = this.bound;
+    if (prev === target) return fn();
+    this.bind(target);
+    try { return fn(); } finally { this.bind(prev); }
+  }
+  /** dimensions a player is about to arrive in (join or travel in flight): never unloaded meanwhile */
+  private reservedDims = new Map<Dimension, number>();
+  reserveDimension(dim: Dimension): void { this.reservedDims.set(dim, (this.reservedDims.get(dim) ?? 0) + 1); }
+  releaseDimension(dim: Dimension): void { const n = (this.reservedDims.get(dim) ?? 1) - 1; if (n <= 0) this.reservedDims.delete(dim); else this.reservedDims.set(dim, n); }
+  /** Have a dimension simulated (headless) so a guest can be in it. Callers reserve it while they still need it. */
+  async ensureDimension(dim: Dimension): Promise<DimensionInstance> {
+    const existing = this.dims.get(dim);
+    if (existing) return existing;
+    const saved = this.otherDims.get(dim);
+    const inst = await this.createDimension(dim, this.worldMeta!.seed, { time: saved?.time ?? 0, dayTime: this.world.dayTime }, true);
+    if (saved) { this.withDimension(inst, () => this.restoreEntities(saved.entities)); this.otherDims.delete(dim); }
+    return inst;
+  }
+  /** Save and drop a background instance nobody is in any more. */
+  private unloadDimension(inst: DimensionInstance): void {
+    if (inst === this.current) return;
+    this.withDimension(inst, () => {
+      this.blockEntities.flushAll();
+      this.chunks.saveAll();
+      this.otherDims.set(inst.dim, { entities: this.entities.filter((e) => !e.removed && !(e instanceof RemotePlayer)).map((e) => e.serialize()), time: this.world.time });
+    });
+    inst.chunks.dispose();
+    this.host?.detachFrom(inst);
+    this.dims.delete(inst.dim);
   }
 
   private async waitForChunks(): Promise<void> {
@@ -258,14 +346,15 @@ export class Game {
 
   saveAll(): void {
     if (!this.inWorld || !this.worldMeta || this.isRemote) return;
-    this.blockEntities.flushAll();
-    this.chunks.saveAll();
     const entities: Record<string, any[]> = {};
-    for (const [d, v] of this.otherDims) entities[d] = v.entities;
-    entities[this.world.dimension] = this.entities.filter((e) => !e.removed && !(e instanceof ExperienceOrb) && !(e instanceof RemotePlayer)).map((e) => e.serialize());
     const time: Record<string, any> = {};
-    for (const [d, v] of this.otherDims) time[d] = { time: v.time, dayTime: this.world.dayTime };
-    time[this.world.dimension] = { time: this.world.time, dayTime: this.world.dayTime };
+    for (const [d, v] of this.otherDims) { entities[d] = v.entities; time[d] = { time: v.time, dayTime: this.world.dayTime }; }
+    for (const inst of this.dims.values()) this.withDimension(inst, () => {
+      this.blockEntities.flushAll();
+      this.chunks.saveAll();
+      entities[inst.dim] = this.entities.filter((e) => !e.removed && !(e instanceof ExperienceOrb) && !(e instanceof RemotePlayer)).map((e) => e.serialize());
+      time[inst.dim] = { time: this.world.time, dayTime: this.world.dayTime };
+    });
     this.host?.saveAllPlayers();
     if (!this.sessionChunks) storage.saveState(this.worldMeta.id, 'world', { player: this.player.serialize(), weather: this.weather.serialize(), entities, time, rules: this.rules, worldSpawn: this.worldSpawn, playerData: Object.fromEntries(this.playerData), dragonKills: this.dragonKills }).catch(console.error);
     this.worldMeta.lastPlayed = Date.now();
@@ -276,7 +365,8 @@ export class Game {
     this.saveAll();
     if (this.host) { this.host.stop(); this.host = null; }
     if (this.client) { this.client.send({ t: 'move', x: this.player.x, y: this.player.y, z: this.player.z, yaw: this.player.yaw, pitch: this.player.pitch }); this.client.close(); this.client = null; }
-    this.chunks.dispose();
+    for (const inst of this.dims.values()) inst.chunks.dispose();
+    this.dims.clear();
     this.renderer.sections.clear();
     this.entities = [];
     this.otherDims.clear();
@@ -288,43 +378,106 @@ export class Game {
   }
 
   // ---------- dimensions ----------
+  /** The local player changes dimension. When hosting, the dimension left behind keeps running for the guests in
+   *  it (headless); otherwise it is saved and unloaded like before. */
   async travelDimension(target: Dimension): Promise<void> {
     const p = this.player;
-    if (this.isRemote) { this.gui.showActionBar('Dimension travel is not available while playing on a server'); p.portalCooldown = 100; return; }
-    const from = this.world.dimension;
-    this.gui.open(new LoadingScreen(target === 'the_nether' ? 'Entering the Nether…' : target === 'the_end' ? 'Entering the End…' : 'Returning to the Overworld…'));
-    this.blockEntities.flushAll();
-    this.chunks.saveAll();
-    this.otherDims.set(from, { entities: this.entities.filter((e) => !e.removed).map((e) => e.serialize()), time: this.world.time });
-    this.chunks.dispose();
-    const saved = this.otherDims.get(target);
-    const dayTime = this.world.dayTime;
-    await this.setupDimension(target, this.worldMeta!.seed, { time: saved?.time ?? 0, dayTime });
-    p.world = this.world;
+    if (this.isRemote) return; // the host moves us (Game.switchDimensionRemote)
+    if (this.travelling) return;
+    this.travelling = true;
+    try {
+      const from = this.current;
+      this.gui.open(new LoadingScreen(target === 'the_nether' ? 'Entering the Nether…' : target === 'the_end' ? 'Entering the End…' : 'Returning to the Overworld…'));
+      this.reserveDimension(target);
+      let inst: DimensionInstance;
+      try { inst = this.dims.get(target) ?? await this.ensureDimension(target); } finally { this.releaseDimension(target); }
+      inst.chunks.setHeadless(false);
+      this.renderer.sections.clear();
+      this.current = inst;
+      this.bind(inst);
+      const dest = this.arrivalPosition(p, from.dim, target);
+      p.world = this.world;
+      p.setPos(dest[0], dest[1], dest[2]);
+      if (this.host?.guestsIn(from.dim)) from.chunks.setHeadless(true); else this.unloadDimension(from);
+      await this.waitForChunks();
+      this.arrive(p, from.dim, target);
+      this.gui.close();
+      this.sounds.playAt('block.portal.travel', p.x, p.y, p.z, 0.5, 1);
+      p.portalCooldown = 300;
+    } finally { this.travelling = false; }
+  }
+  private travelling = false;
+
+  /** Where a player lands in another dimension before the portal search (vanilla coordinate scaling / End island). */
+  private arrivalPosition(p: Player, from: Dimension, target: Dimension): [number, number, number] {
     let scale = 1;
     if (from === 'overworld' && target === 'the_nether') scale = 1 / 8; else if (from === 'the_nether' && target === 'overworld') scale = 8;
     let x = p.x * scale, z = p.z * scale, y = p.y;
     if (target === 'the_end') { x = 100; z = 0; y = 50; }
     else if (from === 'the_end') { const s = p.spawnPos ?? this.worldSpawn; x = s[0] + 0.5; y = s[1]; z = s[2] + 0.5; }
-    p.setPos(x, y, z);
-    if (saved) { this.restoreEntities(saved.entities); this.otherDims.delete(target); }
-    await this.waitForChunks();
-    if (target === 'the_nether' || (target === 'overworld' && from === 'the_nether')) this.placePortalNear(Math.floor(x), Math.floor(z), target);
+    return [x, y, z];
+  }
+  /** Portal placement / End platform once the destination chunks are loaded (bound to the destination). */
+  private arrive(p: Player, from: Dimension, target: Dimension): void {
+    if (target === 'the_nether' || (target === 'overworld' && from === 'the_nether')) this.placePortalNear(p, Math.floor(p.x), Math.floor(p.z), target);
     if (target === 'the_end') {
       for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) { this.world.setBlock(100 + dx, 48, dz, this.registry.defaultState('obsidian'), 0); for (let dy = 49; dy < 52; dy++) this.world.setBlock(100 + dx, dy, dz, 0, 0); } p.setPos(100.5, 49, 0.5);
       // the dragon (and its crystals) await on the first visit
       if (this.dragonKills === 0 && !this.entities.some((e) => e instanceof EnderDragonEntity)) { const d = this.spawnMob('ender_dragon', 0, 90, 0); if (d) { d.yaw = 0; } }
     }
+  }
+
+  /** Host: a guest's copy went through a portal. Move it between instances, tell the guest to switch worlds, and
+   *  finish the portal placement once the destination chunks are in. */
+  async travelRemotePlayer(p: RemotePlayer, target: Dimension, dest?: [number, number, number]): Promise<void> {
+    if (!this.host || (p as any).travelling) return;
+    (p as any).travelling = true;
+    this.reserveDimension(target);
+    try {
+      const from = p.world.dimension;
+      const fromInst = this.dims.get(from);
+      const inst = await this.ensureDimension(target);
+      if (fromInst) { const i = fromInst.entities.indexOf(p); if (i >= 0) fromInst.entities.splice(i, 1); if (fromInst === this.bound) { const j = this.entities.indexOf(p); if (j >= 0) this.entities.splice(j, 1); } }
+      const explicit = !!dest;
+      dest = dest ?? this.arrivalPosition(p, from, target);
+      p.world = inst.world; p.portalCooldown = 300; p.inPortalTicks = 0; p.isInPortal = false; p.fallDistance = 0;
+      inst.entities.push(p); if (inst === this.bound) this.entities = inst.entities;
+      p.setPos(dest[0], dest[1], dest[2]);
+      p.needsCorrection = false; // the 'dim' message carries the position; a correction follows the portal placement
+      this.host.onGuestDimension(p, target, dest);
+      // wait for the destination chunks (streamed around the guest by the headless instance)
+      for (let i = 0; i < 400; i++) {
+        if (inst.world.isChunkColumnLoaded(Math.floor(p.x) >> 4, Math.floor(p.z) >> 4, 1)) break;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      this.withDimension(inst, () => { if (!explicit) this.arrive(p, from, target); if (!this.canStandAt(p.x, p.y, p.z)) { const y = this.world.getHeight(Math.floor(p.x), Math.floor(p.z)); if (y > MIN_Y) p.setPos(p.x, y, p.z); } });
+      p.portalCooldown = 300; // the wait for chunks must not eat the cooldown, or the arrival portal sends the guest straight back
+      p.needsCorrection = true;
+      if (fromInst && fromInst !== this.current && !this.host.guestsIn(from)) this.unloadDimension(fromInst);
+    } finally { (p as any).travelling = false; this.releaseDimension(target); }
+  }
+
+  /** Guest: the host moved us to another dimension. */
+  async switchDimensionRemote(m: { dimension: Dimension; seed: number; time: number; dayTime: number; x: number; y: number; z: number }): Promise<void> {
+    const c = this.client as NetClient; if (!c) return;
+    const p = this.player;
+    this.gui.open(new LoadingScreen(m.dimension === 'the_nether' ? 'Entering the Nether…' : m.dimension === 'the_end' ? 'Entering the End…' : 'Returning to the Overworld…'));
+    c.resetWorld();
+    await this.setupDimension(m.dimension, m.seed, { time: m.time, dayTime: m.dayTime });
+    this.world.listeners = [c];
+    p.world = this.world; p.setPos(m.x, m.y, m.z); p.vx = p.vy = p.vz = 0; p.portalCooldown = 300; p.inPortalTicks = 0; p.isInPortal = false; p.fallDistance = 0;
+    this.particles.list = [];
+    // the new world exists: from here on the host's chunks and entities for it are welcome
+    c.resetWorld(); c.switching = false; c.send({ t: 'dimready' });
+    await this.waitForChunks();
     this.gui.close();
     this.sounds.playAt('block.portal.travel', p.x, p.y, p.z, 0.5, 1);
-    p.portalCooldown = 300;
-    this.host?.onDimensionChanged();
   }
 
   /** vanilla PortalForcer: reuse a portal within 16 blocks, else search for a spot with ground and headroom for a
    *  4x5 frame (radius 16); if nothing fits, force one at the target on a small obsidian platform. */
-  private placePortalNear(x: number, z: number, dim: Dimension): void {
-    const reg = this.registry, w = this.world, p = this.player;
+  private placePortalNear(p: Player, x: number, z: number, dim: Dimension): void {
+    const reg = this.registry, w = this.world;
     const yMin = dim === 'the_nether' ? 5 : MIN_Y + 5, yMax = dim === 'the_nether' ? 122 : Math.min(MAX_Y - 10, 250);
     // 1. existing portal within 16 blocks: enter at its lowest block
     let best: [number, number, number] | null = null, bd = Infinity;
@@ -459,7 +612,7 @@ export class Game {
     }
   }
   givePlayer(stack: ItemStack): void { this.player.give(stack); }
-  livingEntitiesIncludingPlayer(): LivingEntity[] { const out: LivingEntity[] = []; for (const e of this.entities) if (e instanceof LivingEntity && !e.removed) out.push(e); if (this.player && !this.player.removed) out.push(this.player); return out; }
+  livingEntitiesIncludingPlayer(): LivingEntity[] { const out: LivingEntity[] = []; for (const e of this.entities) if (e instanceof LivingEntity && !e.removed) out.push(e); if (this.player && !this.player.removed && this.player.world === this.world) out.push(this.player); return out; }
   entityDisplayName(e: Entity): string { if (e === this.player) return this.player.name; return (e as any).customName ?? this.assets.lang['entity.minecraft.' + e.type] ?? e.type; }
   private restoreEntities(list: any[]): void {
     for (const d of list) {
@@ -499,7 +652,7 @@ export class Game {
     // bed still there?
     if (spawn && !p.spawnForced) { const s = this.world.getBlock(spawn[0], spawn[1], spawn[2]); if (!s || !this.registry.nameOf(s).endsWith('_bed')) { spawn = null; this.gui.addChat(this.assets.lang['block.minecraft.spawn.not_valid'] ?? 'You have no home bed or charged respawn anchor, or it was obstructed'); } }
     const target = spawn ?? this.worldSpawn;
-    if (this.world.dimension !== 'overworld' && !spawn) { this.travelDimension('overworld').then(() => this.finishRespawn(this.worldSpawn)); return; }
+    if (this.world.dimension !== 'overworld' && !spawn) { if (this.client) { this.finishRespawn([Math.floor(p.x), Math.floor(p.y), Math.floor(p.z)]); return; } this.travelDimension('overworld').then(() => this.finishRespawn(this.worldSpawn)); return; }
     this.finishRespawn(target);
   }
   private finishRespawn(target: [number, number, number]): void {
@@ -848,29 +1001,24 @@ export class Game {
     const w = this.world;
     this.gui.tick();
     if (this.client) { this.tickRemote(); return; }
-    // time
-    w.time++;
-    if (this.rules.doDaylightCycle !== false && w.dimension === 'overworld') w.dayTime++;
+    // time: game time per dimension, the day only advances in the Overworld and every dimension shows it
+    const overworld = this.dims.get('overworld');
+    for (const inst of this.dims.values()) inst.world.time++;
+    if (this.rules.doDaylightCycle !== false && overworld) overworld.world.dayTime++;
+    if (overworld) for (const inst of this.dims.values()) inst.world.dayTime = overworld.world.dayTime;
+    // dimensions the host is not in but guests are: simulated in the background
+    for (const inst of [...this.dims.values()]) {
+      if (inst === this.current) continue;
+      if (this.host?.guestsIn(inst.dim) || this.reservedDims.has(inst.dim)) this.tickBackgroundDimension(inst); else this.unloadDimension(inst);
+    }
     // player input
     this.updatePlayerInput();
     // chunks stream
-    if (this.host) this.chunks.extraCenters = this.host.extraCenters();
+    if (this.host) this.chunks.extraCenters = this.host.extraCenters(this.current.dim);
     this.chunks.update(p.x, p.z, 0.05);
     // sleeping skips the night (a shared world counts every player: NetHost.checkSleep)
     if (!this.host && p.sleeping && p.sleepTimer >= 100) { if (this.rules.doDaylightCycle !== false) w.dayTime = Math.floor(w.dayTime / 24000) * 24000 + 24000; if (this.rules.doWeatherCycle !== false) { this.weather.raining = false; this.weather.thundering = false; } p.wakeUp(); this.gui.sleepFade = 0; }
-    // scheduled ticks
-    for (const t of w.popDueTicks()) if (w.isLoaded(t.x, t.z)) this.blocks.scheduledTick(t.x, t.y, t.z, t.state);
-    // random ticks
-    this.randomTicks();
-    // entities (only within the simulation distance)
-    const simD = this.chunks.simulationDistance, pcx = Math.floor(p.x) >> 4, pcz = Math.floor(p.z) >> 4;
-    for (const e of this.entities) {
-      if (e.removed) continue;
-      if (!w.isLoaded(Math.floor(e.x), Math.floor(e.z))) continue;
-      if (!(e instanceof RemotePlayer) && !this.host && (Math.abs((Math.floor(e.x) >> 4) - pcx) > simD || Math.abs((Math.floor(e.z) >> 4) - pcz) > simD)) continue;
-      e.tick();
-    }
-    if (this.entities.some((e) => e.removed)) this.entities = this.entities.filter((e) => !e.removed);
+    this.simulateDimension();
     // player
     p.tick();
     if (p.health <= 0 && !this.gui.isOpen) this.gui.openDeath();
@@ -910,6 +1058,40 @@ export class Game {
     // creative flying no fall
     if (p.flying) p.fallDistance = 0;
     // mob attacks on player use pressure plates via mobs; nothing here
+  }
+
+  /** Blocks and entities of the bound dimension for one tick. */
+  private simulateDimension(): void {
+    const w = this.world, p = this.player;
+    for (const t of w.popDueTicks()) if (w.isLoaded(t.x, t.z)) this.blocks.scheduledTick(t.x, t.y, t.z, t.state);
+    this.randomTicks();
+    // entities (singleplayer: only within the simulation distance of the player)
+    const simD = this.chunks.simulationDistance, pcx = Math.floor(p.x) >> 4, pcz = Math.floor(p.z) >> 4;
+    for (const e of this.entities) {
+      if (e.removed) continue;
+      if (!w.isLoaded(Math.floor(e.x), Math.floor(e.z))) continue;
+      if (!(e instanceof RemotePlayer) && !this.host && (Math.abs((Math.floor(e.x) >> 4) - pcx) > simD || Math.abs((Math.floor(e.z) >> 4) - pcz) > simD)) continue;
+      e.tick();
+    }
+    if (this.entities.some((e) => e.removed)) this.entities = this.bound.entities = this.entities.filter((e) => !e.removed);
+  }
+
+  /** Host: tick a dimension the local player is not in. Its sounds still reach the guests there (NetHost routes
+   *  by the bound dimension) but not the host's speakers, and its particles are discarded. */
+  private tickBackgroundDimension(inst: DimensionInstance): void {
+    const particles = this.particles;
+    this.particles = NULL_PARTICLES;
+    this.sounds.muteLocal = true;
+    try {
+      this.withDimension(inst, () => {
+        const centers = this.host!.extraCenters(inst.dim);
+        this.chunks.extraCenters = centers.slice(1);
+        if (centers.length) this.chunks.update(centers[0].x, centers[0].z, 0.05);
+        this.simulateDimension();
+        this.blockEntities.tick();
+        if (this.rules.doMobSpawning !== false) this.spawner.tick();
+      });
+    } finally { this.sounds.muteLocal = false; this.particles = particles; }
   }
 
   /** Guest tick: our player runs locally, the host drives everything else. */
@@ -962,10 +1144,27 @@ export class Game {
   }
 
   /** Join a server. The backend may assign this client to coordinate an idle public world's live simulation. */
+  /** true while a join/connect is in flight: a second click must not start a second connection */
+  private joining = false;
   async joinServer(relayUrl: string, serverId: string, password = ''): Promise<void> {
-    const c = new NetClient(this, relayUrl);
+    if (this.joining) return;
+    // one world at a time: joining from inside a world (e.g. after a coordinator hand-over left a local copy
+    // running) leaves that world first, exactly like Disconnect would
+    if (this.inWorld) this.quitToTitle();
+    this.joining = true;
+    try { await this.joinServerInner(relayUrl, serverId, password); }
+    catch (e) { if (this.inWorld || this.host || this.client) this.quitToTitle(); throw e; }
+    finally { this.joining = false; }
+  }
+  private async joinServerInner(relayUrl: string, serverId: string, password: string): Promise<void> {
+    let c = new NetClient(this, relayUrl);
     this.gui.open(new LoadingScreen('Connecting…'));
-    const res = await c.connect(serverId, this.options.playerId, this.options.playerName || 'Player', this.options.skin, password);
+    let res: Awaited<ReturnType<NetClient['connect']>>;
+    // the public world may be between coordinators for a moment: keep trying briefly
+    for (let attempt = 0; ; attempt++) {
+      try { res = await c.connect(serverId, this.options.playerId, this.options.playerName || 'Player', this.options.skin, password); break; }
+      catch (e) { if (!(e instanceof RetryLater) || attempt >= 10) throw e; c.close(); await new Promise((r) => setTimeout(r, 1500)); c = new NetClient(this, relayUrl); }
+    }
     if (res.kind === 'coordinator') { c.close(); await this.coordinatePublicWorld(relayUrl, res.world, res.chunks); return; }
     const welcome = res.welcome;
     this.gui.open(new LoadingScreen('Joining world…'));
@@ -999,6 +1198,14 @@ export class Game {
 
   /** Join a real Minecraft Java server through the backend TCP gateway. */
   async joinJavaServer(relayUrl: string, address: string, auth: 'offline' | 'microsoft' = 'offline'): Promise<void> {
+    if (this.joining) return;
+    if (this.inWorld) this.quitToTitle();
+    this.joining = true;
+    try { await this.joinJavaServerInner(relayUrl, address, auth); }
+    catch (e) { if (this.inWorld || this.client) this.quitToTitle(); throw e; }
+    finally { this.joining = false; }
+  }
+  private async joinJavaServerInner(relayUrl: string, address: string, auth: 'offline' | 'microsoft'): Promise<void> {
     const c = new JavaNetClient(this, relayUrl);
     const loading = new LoadingScreen(auth === 'microsoft' ? 'Waiting for Microsoft sign-in…' : 'Connecting to Minecraft server…');
     this.gui.open(loading);
@@ -1039,9 +1246,8 @@ export class Game {
     for (const f of chunkFrames) {
       try {
         const { json, body } = unpackFrame(f);
-        if (json.dim && json.dim !== 'overworld') continue;   // guests only ever see the overworld of the public world
         const d = decodeChunk(json, body);
-        data.push({ ...d, decorated: true });
+        data.push({ ...d, decorated: true, dim: json.dim ?? 'overworld' } as any);
       } catch (e) { console.error('snapshot chunk', e); }
     }
     const cheats = world.cheats === true;
@@ -1062,7 +1268,8 @@ export class Game {
   }
 
   private leaveRemoteWorld(reason: string): void {
-    this.chunks.dispose();
+    for (const inst of this.dims.values()) inst.chunks.dispose();
+    this.dims.clear();
     this.renderer.sections.clear();
     this.entities = [];
     this.inWorld = false;
@@ -1132,12 +1339,16 @@ export class Game {
         else if (this.targetEntity instanceof BoatEntity) { this.targetEntity.hurt({ amount: p.isCreative ? 100 : Math.max(1, p.heldItem()?.item.attackDamage ?? 1), source: 'attack', attacker: p }); p.swing(); p.attackCooldownTicks = 0; p.stopBreaking(); }
         else { p.attack(this.targetEntity); p.stopBreaking(); }
       }
-      else if (!this.targetEntity) p.continueBreaking(this.targetBlock);
+      // vanilla MultiPlayerGameMode: the 5-tick destroyDelay only throttles a held button; a fresh click starts at once
+      else if (!this.targetEntity) { if (input.wasPressed('attack')) p.breakCooldown = 0; p.continueBreaking(this.targetBlock); }
       else p.stopBreaking();
       if (input.wasPressed('attack') && !this.targetBlock && !this.targetEntity) p.swing();
     } else p.stopBreaking();
     // use
     const useDown = input.isDown('use');
+    // vanilla Minecraft.handleKeybinds: every fresh click uses immediately (consumeClick); rightClickDelay only
+    // paces a held button
+    if (input.wasPressed('use')) p.useCooldown = 0;
     if (input.wasPressed('use') || (useDown && p.useCooldown === 0 && !p.usingItem && input.pointerLocked)) {
       if (input.pointerLocked) {
         if (this.targetEntity && (this.targetEntity as any).interact && input.wasPressed('use')) {

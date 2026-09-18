@@ -372,7 +372,8 @@ export class Renderer implements SectionMeshTarget {
     gl.uniform4f(this.quadProg.u('uColor'), 1, 1, 1, alpha);
     gl.bindVertexArray(this.celestialVao);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.celestialVbo);
-    // sun
+    // vanilla sizes: the 32x32 sprites have always been a small bright body inside a soft glow, drawn on a
+    // 60-unit quad for the sun and a 40-unit one for the moon
     const s = 30;
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, new Float32Array([-s, 100, -s, 0, 0, s, 100, -s, 1, 0, s, 100, s, 1, 1, -s, 100, s, 0, 1]));
     gl.bindTexture(gl.TEXTURE_2D, sun);

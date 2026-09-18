@@ -51,6 +51,8 @@ const official = {
   playerData: {},        // by player name
   chunks: new Map(),     // "dim:cx,cz" -> binary chunk frame
   dirty: false,
+  /** socket that was handed the coordinator snapshot and has not registered as host yet */
+  pendingCoordinator: null,
 };
 
 function loadOfficial() {
@@ -199,6 +201,7 @@ wss.on('connection', (ws) => {
         if (!String(m.version ?? '').endsWith(`/${VOXELAND_PROTOCOL}`)) { send(ws, { t: 'error', reason: 'This page is out of date. Reload before hosting a world.' }); return; }
         const wantOfficial = m.official === true;
         if (wantOfficial && servers.has(OFFICIAL_ID)) { send(ws, { t: 'error', reason: 'The public world is already active.' }); return; }
+        if (wantOfficial) official.pendingCoordinator = null;
         role = 'host';
         const id = wantOfficial ? OFFICIAL_ID : Math.random().toString(36).slice(2, 10);
         server = {
@@ -241,7 +244,13 @@ wss.on('connection', (ws) => {
       case 'join': {
         if (role) return;
         if (!String(m.version ?? '').endsWith(`/${VOXELAND_PROTOCOL}`)) { send(ws, { t: 'error', reason: 'This page is out of date. Reload before joining multiplayer.' }); return; }
-        if (m.id === OFFICIAL_ID && !servers.has(OFFICIAL_ID)) { assignOfficialCoordinator(ws); return; }
+        if (m.id === OFFICIAL_ID && !servers.has(OFFICIAL_ID)) {
+          // two players joining an idle public world at once: only one may become its coordinator
+          const pending = official.pendingCoordinator;
+          if (pending && pending !== ws && pending.readyState === 1) { send(ws, { t: 'error', reason: 'The public world is starting up. Try again in a moment.', retry: true }); return; }
+          official.pendingCoordinator = ws;
+          assignOfficialCoordinator(ws); return;
+        }
         const s = servers.get(m.id);
         if (!s) { send(ws, { t: 'error', reason: 'That server is no longer online.' }); return; }
         if (String(m.version ?? '') !== String(s.info.version ?? '')) { send(ws, { t: 'error', reason: 'Multiplayer version mismatch. Reload the page and try again.' }); return; }
@@ -277,6 +286,7 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
+    if (official.pendingCoordinator === ws) official.pendingCoordinator = null;
     if (role === 'java') { javaSession?.close(); return; }
     if (role === 'host' && server) {
       servers.delete(server.id);

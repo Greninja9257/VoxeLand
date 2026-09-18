@@ -6,6 +6,7 @@ import { MOB_DEFS, Mob } from '../entity/mobs';
 import { BIOMES } from '../world/gen/biomes';
 import { Entity, LivingEntity, ItemEntity } from '../entity/entity';
 import { Player, type GameMode } from '../entity/player';
+import type { Dimension } from '../world/world';
 
 const EFFECTS = ['speed', 'slowness', 'haste', 'mining_fatigue', 'strength', 'instant_health', 'instant_damage', 'jump_boost', 'nausea', 'regeneration', 'resistance', 'fire_resistance', 'water_breathing', 'invisibility', 'blindness', 'night_vision', 'hunger', 'weakness', 'poison', 'wither', 'health_boost', 'absorption', 'saturation', 'glowing', 'levitation', 'luck', 'unluck', 'slow_falling', 'conduit_power', 'dolphins_grace', 'bad_omen', 'hero_of_the_village', 'darkness'];
 const GAMEMODES: Record<string, GameMode> = { survival: 'survival', creative: 'creative', adventure: 'adventure', spectator: 'spectator', s: 'survival', c: 'creative', a: 'adventure', sp: 'spectator', '0': 'survival', '1': 'creative', '2': 'adventure', '3': 'spectator' };
@@ -66,7 +67,7 @@ export function suggestCommand(g: Game, text: string): string[] {
   const pick = (opts: string[]) => opts.filter((o) => o.startsWith(last) && o !== last).slice(0, 50);
   if (parts.length === 1) return pick(names);
   const cmd = parts[0];
-  const players = g.allPlayers().map((x) => x.name);
+  const players = g.allPlayersEverywhere().map((x) => x.name);
   const targets = ['@s', '@p', '@a', '@e', '@r', ...players];
   const itemNames = () => g.items.items.filter((i) => i).map((i) => i.name);
   const blockNames = () => g.registry.blocks.map((b) => b.name);
@@ -128,8 +129,9 @@ class CommandError extends Error {}
 
 /** Parse a target selector or player name into entities. */
 function selectTargets(g: Game, sel: string, self: Player, playersOnly = false): Entity[] {
-  const all = (): Entity[] => [...g.allPlayers(), ...g.entities.filter((e) => !e.removed && !(e instanceof Player))];
-  const players = (): Player[] => g.allPlayers();
+  // players are found in every dimension; other entities only in the executor's
+  const all = (): Entity[] => [...g.allPlayersEverywhere(), ...g.entities.filter((e) => !e.removed && !(e instanceof Player))];
+  const players = (): Player[] => g.allPlayersEverywhere();
   if (!sel.startsWith('@')) {
     const p = players().find((x) => x.name.toLowerCase() === sel.toLowerCase());
     if (!p) throw new CommandError(`No player was found`);
@@ -188,7 +190,7 @@ export function runCommand(g: Game, text: string, executor?: Player, feedback?: 
   const blockCoord = (s: string | undefined, base: number): number => Math.floor(rel(s, Math.floor(base)));
   const targets = (sel: string | undefined, fallback: Entity[] = [self], playersOnly = false): Entity[] => sel === undefined ? fallback : selectTargets(g, sel, self, playersOnly);
   const nameOf = (e: Entity): string => e instanceof Player ? e.name : (e as any).customName ?? (g.assets.lang['entity.minecraft.' + e.type] ?? e.type);
-  const isSelector = (s?: string) => !!s && (s.startsWith('@') || g.allPlayers().some((x) => x.name.toLowerCase() === s.toLowerCase()));
+  const isSelector = (s?: string) => !!s && (s.startsWith('@') || g.allPlayersEverywhere().some((x) => x.name.toLowerCase() === s.toLowerCase()));
   try {
     switch (cmd) {
       case 'help': {
@@ -213,10 +215,10 @@ export function runCommand(g: Game, text: string, executor?: Player, feedback?: 
       }
       case 'tp': case 'teleport': {
         // /tp <x y z> | /tp <target> | /tp <targets> <x y z> | /tp <targets> <destination>
-        const move = (e: Entity, x: number, y: number, z: number) => { e.setPos(x, y, z); e.fallDistance = 0; (e as any).portalCooldown = Math.max((e as any).portalCooldown ?? 0, 40); };
+        const move = (e: Entity, x: number, y: number, z: number, dim: Dimension = e.world.dimension) => { if (e instanceof Player) g.teleportPlayer(e, dim, x, y, z); else { e.setPos(x, y, z); e.fallDistance = 0; e.portalCooldown = Math.max(e.portalCooldown, 40); } };
         if (parts.length === 4 && !isSelector(parts[1])) { const x = rel(parts[1], p.x), y = rel(parts[2], p.y), z = rel(parts[3], p.z); move(p, x, y, z); say(`Teleported ${p.name} to ${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)}`); }
-        else if (parts.length === 2) { const d = targets(parts[1])[0]; move(p, d.x, d.y, d.z); say(`Teleported ${p.name} to ${nameOf(d)}`); }
-        else if (parts.length === 3) { const d = targets(parts[2])[0]; for (const e of targets(parts[1])) { move(e, d.x, d.y, d.z); say(`Teleported ${nameOf(e)} to ${nameOf(d)}`); } }
+        else if (parts.length === 2) { const d = targets(parts[1])[0]; move(p, d.x, d.y, d.z, d.world.dimension); say(`Teleported ${p.name} to ${nameOf(d)}`); }
+        else if (parts.length === 3) { const d = targets(parts[2])[0]; for (const e of targets(parts[1])) { move(e, d.x, d.y, d.z, d.world.dimension); say(`Teleported ${nameOf(e)} to ${nameOf(d)}`); } }
         else if (parts.length >= 5) { for (const e of targets(parts[1])) { const x = rel(parts[2], e.x), y = rel(parts[3], e.y), z = rel(parts[4], e.z); move(e, x, y, z); if (parts[5] !== undefined && parts[6] !== undefined) { e.yaw = rel(parts[5], e.yaw); e.pitch = rel(parts[6], e.pitch); } say(`Teleported ${nameOf(e)} to ${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)}`); } }
         else usage(cmd);
         break;
@@ -387,15 +389,28 @@ export function runCommand(g: Game, text: string, executor?: Player, feedback?: 
       }
       case 'playsound': { if (!parts[1]) usage(cmd); const snd = parts[1].replace('minecraft:', ''); const x = parts[4] ? rel(parts[4], p.x) : p.x, y = parts[5] ? rel(parts[5], p.y) : p.y, z = parts[6] ? rel(parts[6], p.z) : p.z; g.sounds.playAt(snd, x, y, z, parseFloat(parts[7] ?? '1') || 1, parseFloat(parts[8] ?? '1') || 1); say(`Played sound ${snd} to ${parts[3] ?? p.name}`); break; }
       case 'particle': { if (!parts[1]) usage(cmd); const name = parts[1].replace('minecraft:', ''); const x = parts[2] ? rel(parts[2], p.x) : p.x, y = parts[3] ? rel(parts[3], p.y) : p.y, z = parts[4] ? rel(parts[4], p.z) : p.z; const count = parseInt(parts[8] ?? parts[5] ?? '1') || 1; const pa: any = g.particles; const fn = { flame: 'spawnFlame', smoke: 'spawnSmoke', heart: 'spawnHeart', happy_villager: 'spawnHappyVillager', portal: 'spawnPortal', explosion: 'spawnExplosion', splash: 'spawnSplash', bubble: 'spawnBubble', enchant: 'spawnEnchant', totem_of_undying: 'spawnTotem' }[name]; if (!fn || !pa[fn]) throw new CommandError(`Unknown particle '${name}'`); for (let i = 0; i < count; i++) pa[fn](x, y, z, name === 'splash' ? 0x3f76e4 : count); say(`Displaying particle minecraft:${name}`); break; }
-      case 'list': { const names = g.allPlayers().map((x) => x.name); say(`There are ${names.length} of a max of ${g.host ? g.host.opts.maxPlayers : 1} players online: ${names.join(', ')}`); break; }
+      case 'list': { const names = g.allPlayersEverywhere().map((x) => x.name); say(`There are ${names.length} of a max of ${g.host ? g.host.opts.maxPlayers : 1} players online: ${names.join(', ')}`); break; }
       case 'kick': { if (!g.host) throw new CommandError('No player was found'); const name = parts[1]; const gu = [...g.host.guests.values()].find((x) => x.name.toLowerCase() === (name ?? '').toLowerCase()); if (!gu) throw new CommandError('No player was found'); g.host.kick(gu.id, parts.slice(2).join(' ') || 'Kicked by an operator'); say(`Kicked ${gu.name}: ${parts.slice(2).join(' ') || 'Kicked by an operator'}`); break; }
       case 'save-all': g.saveAll(); say('Saved the game'); break;
       case 'daylock': g.rules.doDaylightCycle = parts[1] === 'false'; say(`Daylight cycle ${g.rules.doDaylightCycle ? 'enabled' : 'locked'}`); break;
       case 'spectate': { if (!p.isSpectator) throw new CommandError('Spectator mode is required'); if (!parts[1]) { say('Stopped spectating'); break; } const t = targets(parts[1])[0]; p.setPos(t.x, t.y, t.z); say(`Now spectating ${nameOf(t)}`); break; }
       case 'ride': {
         const rider = targets(parts[1])[0];
-        if (parts[2] === 'dismount') { if (rider.vehicle) { (rider.vehicle as any).ejectPassenger?.(rider) ?? (rider.vehicle = null); say(`${nameOf(rider)} stopped riding`); } else throw new CommandError(`${nameOf(rider)} is not riding any vehicle`); break; }
-        if (parts[2] === 'mount') { const v = targets(parts[3])[0]; if ((v as any).addPassenger) { (v as any).addPassenger(rider); say(`${nameOf(rider)} started riding ${nameOf(v)}`); } else throw new CommandError(`${nameOf(v)} cannot be ridden`); break; }
+        // vanilla RideCommand: dismount / mount <vehicle>, with the vanilla refusals
+        if (parts[2] === 'dismount') { if (rider.vehicle) { const v = rider.vehicle; if ((v as any).ejectPassenger) (v as any).ejectPassenger(rider); else rider.stopRiding(); say(`${nameOf(rider)} stopped riding ${nameOf(v)}`); } else throw new CommandError(`${nameOf(rider)} is not riding any vehicle`); break; }
+        if (parts[2] === 'mount') {
+          if (!parts[3]) usage(cmd);
+          const v = targets(parts[3])[0];
+          if (v === rider) throw new CommandError(`${nameOf(rider)} cannot ride itself`);
+          if (rider.vehicle === v) throw new CommandError(`${nameOf(rider)} is already riding ${nameOf(v)}`);
+          for (let c: Entity | null = v; c; c = c.vehicle) if (c === rider) throw new CommandError(`Mounting ${nameOf(v)} would result in a loop`);
+          if (v.world !== rider.world) throw new CommandError(`${nameOf(rider)} and ${nameOf(v)} are not in the same dimension`);
+          if (rider instanceof Player && rider.sleeping) throw new CommandError(`${nameOf(rider)} is sleeping and cannot ride anything`);
+          const ok = (v as any).addPassenger ? (v as any).addPassenger(rider) : rider.startRiding(v);
+          if (!ok) throw new CommandError(`${nameOf(rider)} could not start riding ${nameOf(v)}`);
+          g.host?.onRideChanged(rider);
+          say(`${nameOf(rider)} started riding ${nameOf(v)}`); break;
+        }
         usage(cmd); break;
       }
       case 'execute': {

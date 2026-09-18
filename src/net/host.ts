@@ -2,14 +2,14 @@
 // The host is authoritative for the world and every guest player. Guests send predicted movement and gameplay
 // intentions; the host validates them and sends corrections/state back. The player who opened the world remains
 // trusted as its owner, matching vanilla's integrated-server model.
-import type { Game } from '../game/game';
+import type { Game, DimensionInstance } from '../game/game';
+import type { Dimension, WorldListener } from '../world/world';
 import { RemotePlayer } from '../entity/remotePlayer';
 import { Entity, LivingEntity, ItemEntity, ExperienceOrb } from '../entity/entity';
 import { Mob } from '../entity/mobs';
 import { BoatEntity } from '../entity/boat';
 import { ArrowEntity, FallingBlockEntity, PrimedTnt, ThrownProjectile } from '../entity/misc';
 import { Inventory, ItemStack } from '../items/stack';
-import type { WorldListener } from '../world/world';
 import { encodeChunk, packFrame, FRAME_CHUNK, PROTOCOL_VERSION, TARGET_SERVER, defaultRelayUrl, isGuestMessage, serializedStackIdentity, type PlayerListEntry } from './protocol';
 import type { Chunk } from '../world/chunk';
 import type { Player } from '../entity/player';
@@ -17,12 +17,15 @@ import { runCommand } from '../game/commands';
 
 interface Guest {
   id: number; playerId: string; name: string; player: RemotePlayer;
+  /** the dimension this guest's copy lives in (its world instance on the host) */
+  dim: Dimension;
   known: Set<number>;            // entity ids the guest has full info for
   chunks: Set<number>;           // chunk keys sent
   wantChunks: Set<number>;       // requested but not yet loaded
   container: { x: number; y: number; z: number; inv: Inventory; onClose?: () => void; be?: any } | null;
   ready: boolean;
-  ridingSent?: boolean;
+  /** network id of the vehicle the guest was last told about (null = on foot) */
+  rideId: number | null;
   lastMoveTick: number;
   movementViolations: number;
   craftingSize: 2 | 3;
@@ -42,15 +45,18 @@ export interface HostOptions {
   official?: boolean;
 }
 
-export class NetHost implements WorldListener {
+export class NetHost {
   ws: WebSocket | null = null;
   serverId = '';
   guests = new Map<number, Guest>();
   status = 'connecting';
   isPublic = true; official = false;
-  /** chunks changed since the last upload of the public world (key -> [cx, cz]) */
-  private dirtyChunks = new Map<number, [number, number]>();
-  private blockBatch: number[] = [];
+  /** chunks changed since the last upload of the public world ("dim:cx,cz" -> [dim, cx, cz]) */
+  private dirtyChunks = new Map<string, [Dimension, number, number]>();
+  /** block changes since the last tick, per dimension */
+  private blockBatches = new Map<Dimension, number[]>();
+  /** the world listener registered on each simulated dimension */
+  private listeners = new Map<DimensionInstance, WorldListener>();
   private queue: any[] = [];
   private soundOrigin = 0;
   private ticks = 0;
@@ -92,33 +98,48 @@ export class NetHost implements WorldListener {
 
   private attach(): void {
     const g = this.game;
-    g.world.listeners.push(this);
-    g.sounds.onSound = (event, x, y, z, volume, pitch, attenuate) => this.broadcast({ t: 'snd', e: event, x, y, z, v: volume, p: pitch, a: attenuate, o: this.soundOrigin });
+    for (const inst of g.dims.values()) this.attachTo(inst);
+    // sounds and records belong to the dimension the game is simulating at that moment (Game.bound)
+    g.sounds.onSound = (event, x, y, z, volume, pitch, attenuate) => this.broadcastIn(g.bound.dim, { t: 'snd', e: event, x, y, z, v: volume, p: pitch, a: attenuate, o: this.soundOrigin });
     g.sounds.onMusic = (name, kind, volume) => this.broadcast({ t: 'music', name, kind, v: volume });
-    g.sounds.onRecord = (disc, x, y, z) => this.broadcast({ t: 'record', disc, x, y, z });
+    g.sounds.onRecord = (disc, x, y, z) => this.broadcastIn(g.bound.dim, { t: 'record', disc, x, y, z });
   }
   private detach(): void {
     const g = this.game;
-    if (g.world) g.world.listeners = g.world.listeners.filter((l) => l !== this);
+    for (const inst of [...this.listeners.keys()]) this.detachFrom(inst);
     g.sounds.onSound = null; g.sounds.onMusic = null; g.sounds.onRecord = null;
     for (const gu of this.guests.values()) gu.player.remove();
     this.guests.clear();
   }
-
-  /** World changed dimension (host travelled): guests stay behind, so tell them and drop them. */
-  onDimensionChanged(): void { for (const gu of this.guests.values()) this.send(gu.id, { t: 'kicked', reason: 'The host travelled to another dimension.' }); this.detach(); this.game.world.listeners.push(this); this.attach(); }
+  /** Follow block changes of a simulated dimension (called for every instance, including ones created later). */
+  attachTo(inst: DimensionInstance): void {
+    if (this.listeners.has(inst)) return;
+    const l: WorldListener = { onBlockChanged: (x, y, z, _o, s) => this.onBlockChanged(inst.dim, x, y, z, s) };
+    inst.world.listeners.push(l);
+    this.listeners.set(inst, l);
+  }
+  detachFrom(inst: DimensionInstance): void {
+    const l = this.listeners.get(inst);
+    if (l) { inst.world.listeners = inst.world.listeners.filter((x) => x !== l); this.listeners.delete(inst); }
+    const k = inst.dim;
+    for (const gu of this.guests.values()) if (gu.dim === k) gu.chunks.clear();
+  }
+  guestsIn(dim: Dimension): number { let n = 0; for (const gu of this.guests.values()) if (gu.dim === dim) n++; return n; }
 
   send(to: number, m: any): void { if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify({ t: 'msg', to, d: m })); }
   broadcast(m: any): void { if (this.guests.size) this.send(0, m); }
+  /** Everyone whose copy is in that dimension. */
+  broadcastIn(dim: Dimension, m: any): void { for (const gu of this.guests.values()) if (gu.dim === dim) this.send(gu.id, m); }
   private sendBinary(to: number, payload: Uint8Array): void {
     if (!this.ws || this.ws.readyState !== 1) return;
     const out = new Uint8Array(4 + payload.length); new DataView(out.buffer).setUint32(0, to, true); out.set(payload, 4); this.ws.send(out);
   }
 
-  // ---- world listener ----
-  onBlockChanged(x: number, y: number, z: number, _old: number, s: number): void {
-    this.blockBatch.push(x, y, z, s);
-    if (this.official) { const cx = x >> 4, cz = z >> 4; this.dirtyChunks.set(((cx + 0x8000) << 16) | ((cz + 0x8000) & 0xffff), [cx, cz]); }
+  private onBlockChanged(dim: Dimension, x: number, y: number, z: number, s: number): void {
+    let batch = this.blockBatches.get(dim);
+    if (!batch) this.blockBatches.set(dim, batch = []);
+    batch.push(x, y, z, s);
+    if (this.official) { const cx = x >> 4, cz = z >> 4; this.dirtyChunks.set(`${dim}:${cx},${cz}`, [dim, cx, cz]); }
   }
 
   /** Public world: push changed chunks and world meta to the backend so it survives us leaving. */
@@ -126,11 +147,11 @@ export class NetHost implements WorldListener {
     const g = this.game;
     if (!this.ws || this.ws.readyState !== 1) return;
     let sent = 0;
-    for (const [key, [cx, cz]] of this.dirtyChunks) {
-      const c = g.world.getChunk(cx, cz);
+    for (const [key, [dim, cx, cz]] of this.dirtyChunks) {
+      const c = g.dims.get(dim)?.world.getChunk(cx, cz);
       this.dirtyChunks.delete(key);
       if (!c) continue;
-      const { header, body } = encodeChunk(c, g.world.dimension);
+      const { header, body } = encodeChunk(c, dim);
       const payload = packFrame(FRAME_CHUNK, header, body);
       const out = new Uint8Array(4 + payload.length);
       new DataView(out.buffer).setUint32(0, TARGET_SERVER, true); out.set(payload, 4);
@@ -149,14 +170,19 @@ export class NetHost implements WorldListener {
     this.ticks++;
     this.processQueue();
     const g = this.game;
-    if (this.blockBatch.length) { this.broadcast({ t: 'blk', b: this.blockBatch }); this.blockBatch = []; }
+    for (const [dim, batch] of this.blockBatches) if (batch.length) this.broadcastIn(dim, { t: 'blk', b: batch });
+    this.blockBatches.clear();
     for (const gu of this.guests.values()) {
-      if (!gu.ready) continue;
-      if (gu.ridingSent && (!gu.player.vehicle || gu.player.vehicle.removed)) { gu.ridingSent = false; gu.player.vehicle = null; this.send(gu.id, { t: 'ride', id: null, x: gu.player.x, y: gu.player.y, z: gu.player.z }); }
-      else if (!gu.ridingSent && gu.player.vehicle) gu.ridingSent = true;
-      this.streamChunks(gu);
-      this.pickups(gu);
+      if (!gu.ready || !g.dims.has(gu.dim)) continue;
       const p = gu.player;
+      g.withDimension(gu.dim, () => {
+        // vanilla ClientboundSetPassengersPacket: whenever what the guest rides changes, tell it
+        if (p.vehicle?.removed) p.stopRiding();
+        const vid = p.vehicle ? this.netId(p.vehicle) : null;
+        if (vid !== gu.rideId) { gu.rideId = vid; this.send(gu.id, { t: 'ride', id: vid, seat: p.vehicle instanceof BoatEntity ? p.vehicle.passengerIndex(p) : -1, x: p.x, y: p.y, z: p.z }); }
+        this.streamChunks(gu);
+        this.pickups(gu);
+      });
       if (p.needsCorrection) { p.needsCorrection = false; this.send(gu.id, { t: 'correct', x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch }); }
       const stats = this.stats(p), key = JSON.stringify(stats);
       if (key !== gu.statsKey) { gu.statsKey = key; this.send(gu.id, { t: 'stats', ...stats }); }
@@ -181,7 +207,7 @@ export class NetHost implements WorldListener {
         if (m.t === 'bin') continue; // guests send no binary
         if (m.t === 'guestJoined') this.onJoin(m.from, m.playerId, m.name, m.skin);
         else if (m.t === 'guestLeft') this.onLeave(m.from);
-        else if (m.from !== undefined) { const gu = this.guests.get(m.from); if (gu && isGuestMessage(m)) this.onGuestMessage(gu, m); }
+        else if (m.from !== undefined) { const gu = this.guests.get(m.from); if (gu && isGuestMessage(m) && this.game.dims.has(gu.dim)) this.game.withDimension(gu.dim, () => this.onGuestMessage(gu, m)); }
       } catch (e) { console.error('host message error', e); }
     }
   }
@@ -190,21 +216,31 @@ export class NetHost implements WorldListener {
     const g = this.game;
     playerId = String(playerId || name).slice(0, 80);
     if ([...this.guests.values()].some((x) => x.name === name) || name === this.hostName) { name = name + '_' + id; }
+    // Stable ids prevent renamed players (or two players with the same display name) sharing inventories.
+    // The name fallback migrates saves made by older versions.
+    const saved = g.playerData.get(playerId) ?? g.playerData.get(name);
+    const dim: Dimension = ['overworld', 'the_nether', 'the_end'].includes(saved?.dimension) ? saved.dimension : 'overworld';
+    // the guest's dimension has to be simulated before its copy can exist; the join completes once it is
+    const inst = g.dims.get(dim);
+    if (inst) this.finishJoin(id, playerId, name, skin, saved, inst);
+    else { g.reserveDimension(dim); g.ensureDimension(dim).then((created) => { if (this.status === 'open' && !this.guests.has(id)) this.finishJoin(id, playerId, name, skin, saved, created); }).catch((e) => console.error('join', e)).finally(() => g.releaseDimension(dim)); }
+  }
+  private finishJoin(id: number, playerId: string, name: string, skin: string | undefined, saved: any, inst: DimensionInstance): void {
+    const g = this.game;
     const p = new RemotePlayer(name);
     p.clientId = id; p.skin = skin === 'alex' ? 'alex' : 'steve';
     // sent synchronously so the damage cue precedes the stats update of the same tick
     p.hurtHandler = (d) => { if (p.health <= 0) { const gu = this.guests.get(id); if (gu) gu.inventoryDirty = true; } this.send(id, { t: 'hurt', damage: d.amount, source: d.source, health: p.health, absorption: p.absorption, vx: p.vx, vy: p.vy, vz: p.vz, fire: p.fireTicks, dead: p.health <= 0, deathMessage: p.health <= 0 ? p.deathMessage : undefined, attacker: d.attacker ? { x: d.attacker.x, z: d.attacker.z } : null }); };
-    // Stable ids prevent renamed players (or two players with the same display name) sharing inventories.
-    // The name fallback migrates saves made by older versions.
-    const saved = g.playerData.get(playerId) ?? g.playerData.get(name);
     const spawn = g.worldSpawn ?? [Math.floor(g.player.x), Math.floor(g.player.y), Math.floor(g.player.z)];
-    g.addEntity(p);
-    if (saved) { try { p.deserialize(saved); } catch { /* reject incompatible legacy state and use spawn */ } }
+    g.withDimension(inst, () => {
+      g.addEntity(p);
+      if (saved) { try { p.deserialize(saved); } catch { /* reject incompatible legacy state and use spawn */ } }
+    });
     p.setPos(saved?.x ?? spawn[0] + 0.5, saved?.y ?? spawn[1], saved?.z ?? spawn[2] + 0.5); p.needsCorrection = false;
     p.setGameMode(this.opts.gameMode as any);
-    const gu: Guest = { id, playerId, name, player: p, known: new Set(), chunks: new Set(), wantChunks: new Set(), container: null, ready: false, lastMoveTick: this.ticks, movementViolations: 0, craftingSize: 2, inventoryRevision: 0, crafting: new Inventory(4), cursor: new Inventory(1), statsKey: '', inventoryDirty: false };
+    const gu: Guest = { id, playerId, name, player: p, dim: inst.dim, known: new Set(), chunks: new Set(), wantChunks: new Set(), container: null, ready: false, lastMoveTick: this.ticks, movementViolations: 0, craftingSize: 2, inventoryRevision: 0, crafting: new Inventory(4), cursor: new Inventory(1), statsKey: '', inventoryDirty: false, rideId: null };
     this.guests.set(id, gu);
-    this.send(id, { t: 'welcome', name, hostName: this.official ? this.opts.name : this.hostName, dimension: g.world.dimension, seed: g.world.seed, time: g.world.time, dayTime: g.world.dayTime, spawn, saved: saved ?? null, gameMode: this.opts.gameMode, cheats: this.opts.cheats, difficulty: g.difficulty, rules: g.rules, weather: g.weather.serialize(), version: g.version, protocol: PROTOCOL_VERSION, players: this.playerList(), music: g.sounds.currentMusic() });
+    this.send(id, { t: 'welcome', name, selfId: p.id, hostName: this.official ? this.opts.name : this.hostName, dimension: inst.dim, seed: inst.world.seed, time: inst.world.time, dayTime: inst.world.dayTime, spawn, saved: saved ?? null, gameMode: this.opts.gameMode, cheats: this.opts.cheats, difficulty: g.difficulty, rules: g.rules, weather: g.weather.serialize(), version: g.version, protocol: PROTOCOL_VERSION, players: this.playerList(), music: g.sounds.currentMusic() });
     g.gui.addChat(`§e${name} joined the game`);
     this.broadcast({ t: 'chat', text: `§e${name} joined the game` });
     this.broadcast({ t: 'players', list: this.playerList() });
@@ -223,10 +259,24 @@ export class NetHost implements WorldListener {
     this.onStatus?.('players');
   }
 
+  /** Game.travelRemotePlayer moved a guest's copy: reset what the guest knows and tell it to switch worlds. */
+  onGuestDimension(p: RemotePlayer, dim: Dimension, dest: [number, number, number]): void {
+    for (const gu of this.guests.values()) {
+      if (gu.player !== p) continue;
+      gu.dim = dim; gu.chunks.clear(); gu.wantChunks.clear(); gu.known.clear(); gu.rideId = null; p.stopRiding();
+      if (gu.container) { gu.container.onClose?.(); gu.container = null; }
+      const inst = this.game.dims.get(dim)!;
+      this.send(gu.id, { t: 'dim', dimension: dim, seed: inst.world.seed, time: inst.world.time, dayTime: inst.world.dayTime, x: dest[0], y: dest[1], z: dest[2] });
+    }
+  }
   playerList(): PlayerListEntry[] {
     const g = this.game;
     return [{ name: this.hostName, id: -1, ping: 0, skin: g.options.skin, mode: g.player.gameMode }, ...[...this.guests.values()].map((gu) => ({ name: gu.name, id: gu.id, ping: gu.player.ping, skin: gu.player.skin, mode: gu.player.gameMode }))];
   }
+  /** Entity id as guests know it: the host player is -1, everything else its entity id. */
+  netId(e: Entity): number { return e === this.game.player ? -1 : e.id; }
+  /** A command mounted/dismounted a player: the tick loop notices via rideId, nothing else to do here. */
+  onRideChanged(_rider: Entity): void {}
   /** Push a guest's complete inventory now (after a command or host-side change touched it). */
   syncInventory(p: Player): void { for (const gu of this.guests.values()) if (gu.player === p) gu.inventoryDirty = true; }
   private stats(p: RemotePlayer): any {
@@ -359,7 +409,9 @@ export class NetHost implements WorldListener {
           const target = spawn ?? g.worldSpawn;
           p.health = p.maxHealth; p.isDead = false; p.removed = false; p.deathTime = 0;
           p.foodLevel = 20; p.saturation = 5; p.exhaustion = 0; p.fireTicks = 0; p.effects = []; p.absorption = 0; p.air = 300; p.fallDistance = 0; p.vx = p.vy = p.vz = 0;
-          p.setPos(target[0] + 0.5, target[1], target[2] + 0.5);
+          // vanilla: no usable bed in this dimension means respawning at the Overworld spawn
+          if (!spawn && p.world.dimension !== 'overworld') void g.travelRemotePlayer(p, 'overworld', [target[0] + 0.5, target[1], target[2] + 0.5]);
+          else p.setPos(target[0] + 0.5, target[1], target[2] + 0.5);
           gu.inventoryDirty = true;
         }
         break;
@@ -368,7 +420,8 @@ export class NetHost implements WorldListener {
       case 'xp': { const e = g.entities.find((x) => x.id === m.id); if (e instanceof ExperienceOrb && !e.removed && e.distSq(p.x, p.y + 0.9, p.z) <= 2.25) { p.addXp(e.value); this.send(gu.id, { t: 'givexp', v: e.value }); e.remove(); } break; }
       case 'spawn': this.remoteSpawn(gu, m); break;
       case 'boatInput': { const b = p.vehicle; if (b instanceof BoatEntity && b.passengerIndex(p) === 0) { b.inputUp = !!m.up; b.inputDown = !!m.down; b.inputLeft = !!m.left; b.inputRight = !!m.right; } break; }
-      case 'dismount': { const b = p.vehicle; if (b instanceof BoatEntity) { b.ejectPassenger(p); this.send(gu.id, { t: 'ride', id: null, x: p.x, y: p.y, z: p.z }); } break; }
+      case 'dismount': { const b = p.vehicle; if (b instanceof BoatEntity) b.ejectPassenger(p); else if (b) p.stopRiding(); break; }
+      case 'dimready': { gu.known.clear(); gu.chunks.clear(); gu.wantChunks.clear(); gu.inventoryDirty = true; break; }
       case 'ping': { if (Number.isFinite(m.ping)) p.ping = Math.max(0, Math.min(9999, Math.round(m.ping))); this.send(gu.id, { t: 'pong', time: m.time }); break; }
     }
   }
@@ -459,7 +512,9 @@ export class NetHost implements WorldListener {
    *  weather; the "x/y players sleeping" / "Sleeping through this night" status goes to every player's action bar. */
   checkSleep(): void {
     const g = this.game;
-    const all = [g.player, ...[...this.guests.values()].map((x) => x.player)];
+    // vanilla counts the players of the Overworld (beds explode anywhere else)
+    const all = [...(g.current.dim === 'overworld' ? [g.player] : []), ...[...this.guests.values()].filter((x) => x.dim === 'overworld').map((x) => x.player)];
+    if (!all.length) return;
     const sleeping = all.filter((p) => p.sleeping).length;
     const announce = sleeping === 0 ? '' : sleeping === all.length ? 'all' : `${sleeping}/${all.length}`;
     if (announce !== this.sleepAnnounced) {
@@ -614,9 +669,10 @@ export class NetHost implements WorldListener {
   // ---- chunk streaming ----
   private streamChunks(gu: Guest): void {
     const g = this.game;
+    const world = g.dims.get(gu.dim)?.world; if (!world) return;
     let sent = 0;
     for (const key of gu.wantChunks) {
-      const c = g.world.chunks.get(key);
+      const c = world.chunks.get(key);
       if (!c) continue;
       gu.wantChunks.delete(key);
       if (gu.chunks.has(key)) continue;
@@ -625,13 +681,13 @@ export class NetHost implements WorldListener {
     }
   }
   private sendChunk(gu: Guest, c: Chunk): void {
-    const { header, body } = encodeChunk(c);
+    const { header, body } = encodeChunk(c, gu.dim);
     this.sendBinary(gu.id, packFrame(FRAME_CHUNK, header, body));
     gu.chunks.add(chunkKeyOf(c.cx, c.cz));
   }
-  /** Positions the chunk manager should keep loaded (guest positions). */
-  extraCenters(): { x: number; z: number }[] { return [...this.guests.values()].map((gu) => ({ x: gu.player.x, z: gu.player.z })); }
-  onChunkUnloaded(c: Chunk): void { const k = chunkKeyOf(c.cx, c.cz); for (const gu of this.guests.values()) gu.chunks.delete(k); }
+  /** Positions a dimension's chunk manager should keep loaded (the guests in it). */
+  extraCenters(dim: Dimension): { x: number; z: number }[] { return [...this.guests.values()].filter((gu) => gu.dim === dim).map((gu) => ({ x: gu.player.x, z: gu.player.z })); }
+  onChunkUnloaded(c: Chunk, dim: Dimension): void { const k = chunkKeyOf(c.cx, c.cz); for (const gu of this.guests.values()) if (gu.dim === dim) gu.chunks.delete(k); }
 
   // ---- pickups for remote players ----
   private pickups(gu: Guest): void {
@@ -660,22 +716,25 @@ export class NetHost implements WorldListener {
   // ---- entity snapshots ----
   private sendEntities(includeWorld: boolean): void {
     const g = this.game;
-    const list: Entity[] = [];
-    for (const e of g.entities) if (!e.removed) list.push(e);
     for (const gu of this.guests.values()) {
       if (!gu.ready) continue;
+      const inst = g.dims.get(gu.dim); if (!inst) continue;
+      const list = inst === g.bound ? g.entities : inst.entities;
       const p = gu.player;
       const ents: any[] = [], rm: number[] = [];
       const seen = new Set<number>();
       const R2 = 96 * 96;
-      // host player as an entity
+      // host player as an entity, when it is in the same dimension
       const hp = g.player;
-      const hostBoat = hp.vehicle instanceof BoatEntity ? hp.vehicle : null;
-      const hostSnap: any = { i: -1, pid: -1, t: 'player', x: r3(hp.x), y: r3(hp.y), z: r3(hp.z), yaw: r1(hp.yaw), pitch: r1(hp.pitch), sneak: hp.isSneaking, sprint: hp.isSprinting, swim: hp.swimmingPose, sleep: hp.sleeping, fly: hp.flying, hurt: hp.hurtTime > 0, dead: hp.health <= 0, swing: hp.swinging && hp.swingTime <= 1, use: !!hp.usingItem, mode: hp.gameMode, vid: hostBoat?.id ?? null, seat: hostBoat?.passengerIndex(hp) ?? -1, br: hp.breaking ? { x: hp.breaking.x, y: hp.breaking.y, z: hp.breaking.z, stage: hp.breakStage, state: hp.breaking.state } : null };
-      if (!gu.known.has(-1)) { hostSnap.full = { name: this.hostName, skin: g.options.skin }; gu.known.add(-1); }
-      if (this.ticks % 10 === 0) hostSnap.held = hp.heldItem()?.serialize() ?? null, hostSnap.armor = hp.armor.serialize();
-      ents.push(hostSnap); seen.add(-1);
+      if (g.current === inst) {
+        const hostBoat = hp.vehicle instanceof BoatEntity ? hp.vehicle : null;
+        const hostSnap: any = { i: -1, pid: -1, t: 'player', x: r3(hp.x), y: r3(hp.y), z: r3(hp.z), yaw: r1(hp.yaw), pitch: r1(hp.pitch), sneak: hp.isSneaking, sprint: hp.isSprinting, swim: hp.swimmingPose, sleep: hp.sleeping, fly: hp.flying, hurt: hp.hurtTime > 0, dead: hp.health <= 0, swing: hp.swinging && hp.swingTime <= 1, use: !!hp.usingItem, mode: hp.gameMode, vid: hp.vehicle ? this.netId(hp.vehicle) : null, seat: hostBoat?.passengerIndex(hp) ?? -1, br: hp.breaking ? { x: hp.breaking.x, y: hp.breaking.y, z: hp.breaking.z, stage: hp.breakStage, state: hp.breaking.state } : null };
+        if (!gu.known.has(-1)) { hostSnap.full = { name: this.hostName, skin: g.options.skin }; gu.known.add(-1); }
+        if (this.ticks % 10 === 0) hostSnap.held = hp.heldItem()?.serialize() ?? null, hostSnap.armor = hp.armor.serialize();
+        ents.push(hostSnap); seen.add(-1);
+      } else if (gu.known.has(-1)) { rm.push(-1); gu.known.delete(-1); }
       for (const e of list) {
+        if (e.removed) continue;
         if (e === p) continue;
         if (!includeWorld && !(e instanceof RemotePlayer)) continue;
         if (e.distSq(p.x, p.y, p.z) > R2) continue;
@@ -687,6 +746,7 @@ export class NetHost implements WorldListener {
         for (const k of gu.known) if (!seen.has(k) && k !== -1) rm.push(k);
         for (const k of rm) gu.known.delete(k);
       }
+      // guests only ever see the entities of their own dimension; the copies of players elsewhere are not sent
       // several small messages rather than one huge one: the relay caps message sizes and a single JSON blob
       // for hundreds of entities stalls the guest's frame
       for (let i = 0; i < ents.length || (i === 0 && rm.length); i += 80) this.send(gu.id, { t: 'ent', e: ents.slice(i, i + 80), rm: i === 0 ? rm : [] });
@@ -697,11 +757,11 @@ export class NetHost implements WorldListener {
     const s: any = { i: e.id, x: r3(e.x), y: r3(e.y), z: r3(e.z), yaw: r1(e.yaw), pitch: r1(e.pitch) };
     if (e instanceof RemotePlayer) {
       const boat = e.vehicle instanceof BoatEntity ? e.vehicle : null;
-      s.t = 'player'; s.pid = e.clientId; s.sneak = e.isSneaking; s.sprint = e.isSprinting; s.swim = e.swimmingPose; s.sleep = e.sleeping; s.fly = e.flying; s.hurt = e.hurtTime > 0; s.dead = e.health <= 0; s.swing = e.swinging && e.swingTime <= 1; s.mode = e.gameMode; s.use = !!e.usingItem; s.vid = boat?.id ?? null; s.seat = boat?.passengerIndex(e) ?? -1; s.br = e.breaking ? { x: e.breaking.x, y: e.breaking.y, z: e.breaking.z, stage: e.breakStage, state: e.breaking.state } : null;
+      s.t = 'player'; s.pid = e.clientId; s.sneak = e.isSneaking; s.sprint = e.isSprinting; s.swim = e.swimmingPose; s.sleep = e.sleeping; s.fly = e.flying; s.hurt = e.hurtTime > 0; s.dead = e.health <= 0; s.swing = e.swinging && e.swingTime <= 1; s.mode = e.gameMode; s.use = !!e.usingItem; s.vid = e.vehicle ? this.netId(e.vehicle) : null; s.seat = boat?.passengerIndex(e) ?? -1; s.br = e.breaking ? { x: e.breaking.x, y: e.breaking.y, z: e.breaking.z, stage: e.breakStage, state: e.breaking.state } : null;
       if (first) s.full = { name: e.name, skin: e.skin };
       if (this.ticks % 10 === 0 || first) { s.held = e.heldItem()?.serialize() ?? null; s.armor = e.armor.serialize(); }
     } else if (e instanceof Mob) {
-      s.t = e.type; s.hy = r1(e.headYaw); s.by = r1(e.bodyYaw); s.h = r1(e.health); s.hurt = e.hurtTime > 0; s.dt = e.deathTime; s.swing = e.swinging && e.swingTime <= 1; s.og = e.onGround;
+      s.t = e.type; s.hy = r1(e.headYaw); s.by = r1(e.bodyYaw); s.h = r1(e.health); s.hurt = e.hurtTime > 0; s.dt = e.deathTime; s.swing = e.swinging && e.swingTime <= 1; s.og = e.onGround; s.vid = e.vehicle ? this.netId(e.vehicle) : null;
       s.ex = { baby: e.isBaby, sheared: e.sheared, wool: e.woolColor, tamed: e.tamed, sit: e.sitting, swell: e.swell, anger: e.angerTicks > 0, size: e.slimeSize, variant: e.variant, charged: e.charged, name: (e as any).customName, eat: e.eatTimer, scream: e.screaming, carried: e.carriedBlock, attack: e.attackAnim, saddled: e.saddled };
       if (first) s.full = { type: e.type };
     } else if (e instanceof ItemEntity) { s.t = 'item'; if (first) s.full = { stack: e.stack.serialize() }; else if (this.ticks % 20 === 0) s.stack = e.stack.serialize(); }

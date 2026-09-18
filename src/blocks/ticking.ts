@@ -58,6 +58,8 @@ export class BlockTicker implements WorldListener {
       if (n.endsWith('_leaves')) world.scheduleTick(x, y, z, 1);
       if (n === 'composter' && reg.getProps(newState).level === '7') world.scheduleTick(x, y, z, 20);
       if (n === 'sponge') this.absorbWater(x, y, z, newState);
+      // vanilla FallingBlock.onPlace: a freshly placed sand/gravel/anvil checks its support two ticks later
+      if (this.isGravityBlock(n)) world.scheduleTick(x, y, z, 2);
     }
     if (oldState !== 0 && reg.nameOf(oldState).endsWith('_leaves') === false && reg.nameOf(oldState).endsWith('_log')) {
       // logs removed -> leaves distances update via neighbour ticks

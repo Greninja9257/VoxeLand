@@ -13,6 +13,8 @@ export interface SectionMeshTarget {
   removeChunkMeshes(cx: number, cz: number): void;
 }
 
+const NULL_TARGET: SectionMeshTarget = { setSectionMesh() {}, removeChunkMeshes() {} };
+
 export class ChunkManager {
   genPool: WorkerPool;
   meshPool: WorkerPool;
@@ -33,18 +35,39 @@ export class ChunkManager {
   remote: { requestChunk(cx: number, cz: number): void; forgetChunk(cx: number, cz: number): void } | null;
   /** Additional positions (other players) whose surroundings stay loaded (host). */
   extraCenters: { x: number; z: number }[] = [];
-  constructor(public world: World, public assets: Assets, public target: SectionMeshTarget, public worldId: string, public biomeColors: Uint8Array, remote: { requestChunk(cx: number, cz: number): void; forgetChunk(cx: number, cz: number): void } | null = null, private sessionChunks: Map<string, ChunkData> | null = null) {
+  /** A dimension the host simulates for guests but does not look at: chunks stream and tick, nothing is meshed. */
+  headless: boolean;
+  private renderTarget: SectionMeshTarget;
+  private meshOptions: { smoothLighting: boolean; fancy: boolean } | null = null;
+  constructor(public world: World, public assets: Assets, target: SectionMeshTarget, public worldId: string, public biomeColors: Uint8Array, remote: { requestChunk(cx: number, cz: number): void; forgetChunk(cx: number, cz: number): void } | null = null, private sessionChunks: Map<string, ChunkData> | null = null, headless = false) {
     this.remote = remote;
+    this.renderTarget = target; this.headless = headless;
+    this.target = headless ? NULL_TARGET : target;
     const hw = Math.max(2, Math.min(8, (navigator.hardwareConcurrency || 4)));
     const genCount = Math.max(1, Math.floor(hw / 2));
-    const meshCount = Math.max(1, hw - genCount - 1);
     this.genPool = this.remote ? new WorkerPool(() => new Worker(new URL('../workers/gen.worker.ts', import.meta.url), { type: 'module' }), 0, null) : new WorkerPool(() => new Worker(new URL('../workers/gen.worker.ts', import.meta.url), { type: 'module' }), genCount, { type: 'init', mcdata: assets.mcdata, seed: world.seed, dimension: world.dimension });
-    this.meshPool = new WorkerPool(() => new Worker(new URL('../workers/mesh.worker.ts', import.meta.url), { type: 'module' }), meshCount, { type: 'init', mcdata: assets.mcdata, models: assets.models, atlas: assets.atlas, redstoneTint: assets.mcdata.tints.redstone.data });
+    this.meshPool = this.makeMeshPool(headless ? 0 : Math.max(1, hw - genCount - 1));
+  }
+  public target: SectionMeshTarget;
+  private makeMeshPool(count: number): WorkerPool {
+    return new WorkerPool(() => new Worker(new URL('../workers/mesh.worker.ts', import.meta.url), { type: 'module' }), count, { type: 'init', mcdata: this.assets.mcdata, models: this.assets.models, atlas: this.assets.atlas, redstoneTint: this.assets.mcdata.tints.redstone.data });
+  }
+  /** Switch between being looked at (meshed into the renderer) and simulated in the background. */
+  setHeadless(headless: boolean): void {
+    if (headless === this.headless) return;
+    this.headless = headless;
+    for (const c of this.world.chunks.values()) this.target.removeChunkMeshes(c.cx, c.cz);
+    this.meshPool.terminate(); this.pendingMesh.clear();
+    const hw = Math.max(2, Math.min(8, (navigator.hardwareConcurrency || 4)));
+    this.meshPool = this.makeMeshPool(headless ? 0 : Math.max(1, hw - Math.max(1, Math.floor(hw / 2)) - 1));
+    this.target = headless ? NULL_TARGET : this.renderTarget;
+    if (!headless) { if (this.meshOptions) this.meshPool.broadcast({ type: 'options', options: this.meshOptions }); for (const c of this.world.chunks.values()) { c.dirtySections = (1 << SECTION_COUNT) - 1; (c as any).tintsDirty = true; } }
   }
 
   /** Push mesh-affecting video options to the workers and rebuild every loaded section. */
   setMeshOptions(o: { smoothLighting: boolean; fancy: boolean; biomeBlend: number }): void {
-    this.meshPool.broadcast({ type: 'options', options: { smoothLighting: o.smoothLighting, fancy: o.fancy } });
+    this.meshOptions = { smoothLighting: o.smoothLighting, fancy: o.fancy };
+    this.meshPool.broadcast({ type: 'options', options: this.meshOptions });
     this.biomeBlend = o.biomeBlend;
     for (const c of this.world.chunks.values()) { c.dirtySections = (1 << SECTION_COUNT) - 1; (c as any).tintsDirty = true; }
   }
@@ -173,6 +196,7 @@ export class ChunkManager {
   }
 
   private dispatchMeshes(ccx: number, ccz: number): void {
+    if (this.headless) return;
     const maxInFlight = this.meshPool.size * 4;
     if (this.meshPool.inFlight >= maxInFlight) return;
     const world = this.world;

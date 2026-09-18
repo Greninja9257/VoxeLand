@@ -45,6 +45,9 @@ export abstract class Entity {
   /** Multiplayer guest: this entity mirrors one simulated on the host (id on the host side). */
   remote = false;
   remoteId = 0;
+  /** guest: the host-side id of what this entity rides (-1 = the host player), and its boat seat */
+  remoteVehicleId: number | null = null;
+  remoteVehicleSeat = -1;
   protected snap: { x: number; y: number; z: number; yaw: number; pitch: number } | null = null;
 
   /** Latest authoritative network state. Relative packets must build on this, not the displayed lerp position. */
@@ -56,6 +59,8 @@ export abstract class Entity {
   applySnapshot(s: any): void {
     if (!this.snap || Math.abs(s.x - this.x) + Math.abs(s.y - this.y) + Math.abs(s.z - this.z) > 12) { this.setPos(s.x, s.y, s.z); this.yaw = this.prevYaw = s.yaw; this.pitch = this.prevPitch = s.pitch; }
     this.snap = { x: s.x, y: s.y, z: s.z, yaw: s.yaw, pitch: s.pitch };
+    if (s.vid !== undefined) this.remoteVehicleId = Number.isInteger(s.vid) ? s.vid : null;
+    if (s.seat !== undefined) this.remoteVehicleSeat = Number.isInteger(s.seat) ? s.seat : -1;
     if (s.vx !== undefined) { this.vx = s.vx; this.vy = s.vy; this.vz = s.vz; }
     if (s.og !== undefined) this.onGround = !!s.og;
   }
@@ -64,6 +69,7 @@ export abstract class Entity {
     this.prevX = this.x; this.prevY = this.y; this.prevZ = this.z; this.prevYaw = this.yaw; this.prevPitch = this.pitch;
     this.age++;
     if (!this.snap) return;
+    if (this.vehicle && this.vehicle.type !== 'boat') { let dy = this.snap.yaw - this.yaw; while (dy > 180) dy -= 360; while (dy < -180) dy += 360; this.yaw += dy * 0.5; this.pitch += (this.snap.pitch - this.pitch) * 0.5; return; }
     const f = 0.5;
     this.x += (this.snap.x - this.x) * f; this.y += (this.snap.y - this.y) * f; this.z += (this.snap.z - this.z) * f;
     let dy = this.snap.yaw - this.yaw; while (dy > 180) dy -= 360; while (dy < -180) dy += 360;
@@ -208,6 +214,38 @@ export abstract class Entity {
 
   hurt(_d: EntityDamage): boolean { return false; }
   remove(): void { this.removed = true; }
+
+  // ---- riding (vanilla Entity.startRiding / stopRiding / positionRider) ----
+  /** Mount another entity. Boats keep their own seats (BoatEntity.addPassenger); everything else can carry riders
+   *  on its back, players included. Refused for self-mounting and loops (riding something that rides you). */
+  startRiding(vehicle: Entity): boolean {
+    if (vehicle === this || vehicle.removed) return false;
+    for (let v: Entity | null = vehicle; v; v = v.vehicle) if (v === this) return false;
+    if (this.vehicle === vehicle) return true;
+    this.stopRiding();
+    this.vehicle = vehicle;
+    vehicle.passengers.push(this);
+    return true;
+  }
+  stopRiding(): void {
+    const v = this.vehicle;
+    if (!v) return;
+    this.vehicle = null;
+    const i = v.passengers.indexOf(this); if (i >= 0) v.passengers.splice(i, 1);
+    this.fallDistance = 0;
+  }
+  /** Vertical offset riders sit at (vanilla LivingEntity: 3/4 of the height; players sink 0.35 into the mount). */
+  passengerRidingOffset(): number { return this.height * 0.75; }
+  myRidingOffset(): number { return 0; }
+  /** Keep riders on top after this entity moved (boats position their seats themselves). */
+  protected tickPassengers(): void {
+    if (!this.passengers.length || this.type === 'boat') return;
+    for (const p of [...this.passengers]) {
+      if (p.removed || p.vehicle !== this) { const i = this.passengers.indexOf(p); if (i >= 0) this.passengers.splice(i, 1); continue; }
+      p.setPos(this.x, this.y + this.passengerRidingOffset() + p.myRidingOffset(), this.z);
+      p.vx = this.vx; p.vy = this.vy; p.vz = this.vz; p.onGround = this.onGround; p.fallDistance = 0;
+    }
+  }
 
   /** Distance squared to a point. */
   distSq(x: number, y: number, z: number): number { return (this.x - x) ** 2 + (this.y - y) ** 2 + (this.z - z) ** 2; }
@@ -373,7 +411,7 @@ export abstract class LivingEntity extends Entity {
     // block contact effects
     this.checkBlockContacts();
     // riding: the vehicle moves us
-    if (this.vehicle) { if (this.vehicle.removed) this.vehicle = null; else { this.aiStep(); this.fallDistance = 0; this.headYaw = this.yaw; const hd = wrapDegrees(this.yaw - this.bodyYaw); if (Math.abs(hd) > 50) this.bodyYaw = this.yaw - Math.sign(hd) * 50; return; } }
+    if (this.vehicle) { if (this.vehicle.removed) this.stopRiding(); else { this.aiStep(); this.fallDistance = 0; this.headYaw = this.yaw; const hd = wrapDegrees(this.yaw - this.bodyYaw); if (Math.abs(hd) > 50) this.bodyYaw = this.yaw - Math.sign(hd) * 50; this.tickPassengers(); return; } }
     // movement
     this.aiStep();
     this.travel();
@@ -388,6 +426,7 @@ export abstract class LivingEntity extends Entity {
     if (this.limbSwingAmount > 0.05) this.bodyYaw = this.yaw;
     else if (Math.abs(hd) > 50) this.bodyYaw = this.yaw - Math.sign(hd) * 50;
     this.headYaw = this.yaw;
+    this.tickPassengers();
   }
 
   /** Hurt/invulnerability timers, potion effects and air (vanilla LivingEntity.baseTick + tickEffects). */

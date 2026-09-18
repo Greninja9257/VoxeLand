@@ -106,8 +106,10 @@ export class SoundManager {
     // UI feedback belongs only to the player interacting with their local screen.
     // Never forward it to multiplayer, even if a caller accidentally uses playAt.
     if (this.category(event) !== 'ui') this.onSound?.(event, x, y, z, volume, pitch, attenuate);
-    this.playAtRemote(event, x, y, z, volume, pitch, attenuate);
+    if (!this.muteLocal) this.playAtRemote(event, x, y, z, volume, pitch, attenuate);
   }
+  /** Set while the host simulates a dimension it is not in: sounds still reach the guests there, not the host. */
+  muteLocal = false;
 
   /** Play a sound received from the network without sending it back. */
   playAtRemote(event: string, x: number, y: number, z: number, volume = 1, pitch = 1, attenuate = true): void {

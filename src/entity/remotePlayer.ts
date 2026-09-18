@@ -3,6 +3,7 @@
 // are simulated here and reported back. On guests it is a purely visual mirror of the host and other guests.
 import { Player } from './player';
 import type { EntityDamage } from './entity';
+import type { Dimension } from '../world/world';
 
 export class RemotePlayer extends Player {
   isRemote = true;
@@ -16,8 +17,6 @@ export class RemotePlayer extends Player {
   /** last full player state reported by the guest (persisted by the host) */
   lastSaved: any = null;
   skin: 'steve' | 'alex' = 'steve';
-  remoteVehicleId: number | null = null;
-  remoteVehicleSeat = -1;
   /** host: round-trip latency the guest last measured, shown in the player list */
   ping = 0;
   /** host: something other than the guest's own movement moved this player (teleport, respawn, ender pearl,
@@ -90,7 +89,7 @@ export class RemotePlayer extends Player {
   tick(): void {
     const host = !this.remote;
     if (host) this.tickCooldowns(); else { this.attackCooldownTicks++; if (this.breakCooldown > 0) this.breakCooldown--; if (this.useCooldown > 0) this.useCooldown--; }
-    if (this.vehicle?.removed) this.vehicle = null;
+    if (this.vehicle?.removed) this.stopRiding();
     if (this.vehicle) { // the vehicle positions us; only animate
       this.prevYaw = this.yaw; this.prevPitch = this.pitch; this.prevBodyYaw = this.bodyYaw; this.prevHeadYaw = this.headYaw; this.prevSwingProgress = this.swingProgress; this.prevLimbSwingAmount = this.limbSwingAmount;
       const f = this.lerpSteps > 0 ? 1 / this.lerpSteps : 1;
@@ -127,6 +126,7 @@ export class RemotePlayer extends Player {
     this.cameraEye = this.sleeping ? 0.2 : this.swimmingPose ? 0.4 : this.isSneaking ? 1.27 : 1.62; this.eyeHeight = this.cameraEye;
     if (host) this.serverTick();
     else { if (this.hurtTime > 0) this.hurtTime--; if (this.deathTime > 0) this.deathTime = Math.min(20, this.deathTime + 1); this.age++; }
+    this.tickPassengers();
     this.snapshotAge++;
   }
 
@@ -140,7 +140,9 @@ export class RemotePlayer extends Player {
     this.tickItemUse();
     this.tickMovementExhaustion();
     if (this.flying || this.isSpectator) this.fallDistance = 0;
+    this.checkPortal();
   }
+  protected travelTo(target: Dimension): void { void this.game.travelRemotePlayer(this, target); }
 
   /** The host applies damage to this mirror, then forwards the authoritative result to its owner. */
   hurt(d: EntityDamage): boolean {

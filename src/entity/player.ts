@@ -9,6 +9,7 @@ import { useBlock } from '../blocks/interaction';
 import { clamp, lookDir, wrapDegrees } from '../math';
 import { SET_UPDATE_NEIGHBORS } from '../world/world';
 import { MIN_Y, MAX_Y } from '../world/chunk';
+import type { Dimension } from '../world/world';
 
 export type GameMode = 'survival' | 'creative' | 'adventure' | 'spectator';
 
@@ -98,6 +99,7 @@ export class Player extends LivingEntity {
     this.setPos(x, y, z);
   }
 
+  myRidingOffset(): number { return -0.35; }
   heldItem(): ItemStack | null { return this.inventory.get(this.selectedSlot); }
   /** Put a stack in this player's inventory, dropping what does not fit (vanilla Inventory.placeItemBackInInventory). */
   give(stack: ItemStack): void { const left = this.inventory.add(stack); if (left > 0 && !this.clientSide) this.throwItem(stack); this.inventory.onChange?.(); }
@@ -348,6 +350,12 @@ export class Player extends LivingEntity {
   /** Apply input each tick (called from Game). */
   applyInput(fwd: number, strafe: number, jump: boolean, sneak: boolean, sprintKey: boolean, sprintToggle: boolean, flyToggle: boolean): void {
     if (this.sleeping || this.health <= 0) { this.moveForward = this.moveStrafe = 0; this.jumping = false; return; }
+    // riding something that is not a boat (a mob, another player): it carries us, sneak gets off
+    if (this.vehicle && !(this.vehicle instanceof BoatEntity)) {
+      this.isSneaking = false; this.isSprinting = false; this.moveForward = this.moveStrafe = 0; this.jumping = false;
+      if (sneak) { if (this.clientSide) this.game.client!.send({ t: 'dismount' }); else this.stopRiding(); }
+      return;
+    }
     // riding a boat: the movement keys steer it, sneak dismounts
     if (this.vehicle instanceof BoatEntity) {
       const b = this.vehicle;
@@ -393,6 +401,9 @@ export class Player extends LivingEntity {
   private collidesNow(): boolean { let hit = false; const bb = this.bb; this.world.forEachCollisionBox(bb.minX, bb.minY, bb.minZ, bb.maxX, bb.maxY, bb.maxZ, (x0, y0, z0, x1, y1, z1) => { if (bb.minX < x1 && bb.maxX > x0 && bb.minY < y1 && bb.maxY > y0 && bb.minZ < z1 && bb.maxZ > z0) hit = true; }); return hit; }
 
   protected travel(): void {
+    // vanilla LivingEntity.aiStep: a client-side player whose chunk has not arrived yet does not move (no falling
+    // through the void while the world streams in after joining or changing dimension)
+    if (this.clientSide && !this.world.isLoaded(Math.floor(this.x), Math.floor(this.z))) { this.vx = this.vy = this.vz = 0; return; }
     if (this.flying) {
       const speed = (this.isSpectator ? 0.1 : 0.05) * (this.isSprinting ? 2 : 1);
       this.moveRelative(this.moveForward, this.moveStrafe, speed);
@@ -933,17 +944,20 @@ export class Player extends LivingEntity {
 
   /** vanilla LocalPlayer portalTime / spinningEffectIntensity: drives the screen overlay and nausea whirl. */
   portalTime = 0; prevPortalTime = 0;
-  private checkPortal(): void {
+  protected checkPortal(): void {
     const g = this.game, reg = this.world.registry;
     this.prevPortalTime = this.portalTime;
     if (this.isInPortal) this.portalTime = Math.min(1, this.portalTime + 0.0125); else this.portalTime = Math.max(0, this.portalTime - 0.05);
     if (this.hasEffect('nausea')) this.portalTime = Math.min(1, this.portalTime + 0.05);
     const s = this.world.getBlock(Math.floor(this.x), Math.floor(this.y + 0.5), Math.floor(this.z));
     const n = s ? reg.nameOf(s) : '';
-    if (n === 'nether_portal') { if (!this.isInPortal && this.portalTime === 0) g.sounds.playAt('block.portal.trigger', this.x, this.y, this.z, 1, Math.random() * 0.4 + 0.8, false); this.isInPortal = true; if (this.portalCooldown <= 0) { this.inPortalTicks++; if (this.inPortalTicks >= (this.isCreative ? 1 : 80)) { this.inPortalTicks = 0; this.portalCooldown = 300; g.travelDimension(this.world.dimension === 'the_nether' ? 'overworld' : 'the_nether'); } } }
-    else if (n === 'end_portal') { if (this.portalCooldown <= 0) { this.portalCooldown = 300; g.travelDimension(this.world.dimension === 'the_end' ? 'overworld' : 'the_end'); } }
+    if (n === 'nether_portal') { if (!this.isInPortal && this.portalTime === 0) g.sounds.playAt('block.portal.trigger', this.x, this.y, this.z, 1, Math.random() * 0.4 + 0.8, false); this.isInPortal = true; if (this.portalCooldown <= 0) { this.inPortalTicks++; if (this.inPortalTicks >= (this.isCreative ? 1 : 80)) { this.inPortalTicks = 0; this.portalCooldown = 300; this.travelTo(this.world.dimension === 'the_nether' ? 'overworld' : 'the_nether'); } } }
+    else if (n === 'end_portal') { if (this.portalCooldown <= 0) { this.portalCooldown = 300; this.travelTo(this.world.dimension === 'the_end' ? 'overworld' : 'the_end'); } }
     else { this.isInPortal = false; if (this.inPortalTicks > 0) this.inPortalTicks = Math.max(0, this.inPortalTicks - 4); }
   }
+
+  /** A portal completed: the local player travels; a guest's copy is moved by the host (RemotePlayer). */
+  protected travelTo(target: Dimension): void { if (!this.clientSide) void this.game.travelDimension(target); }
 
   serialize(): any {
     return { ...super.serialize(), inventory: this.inventory.serialize(), armor: this.armor.serialize(), offhand: this.offhand.serialize(), enderChest: this.enderChest.serialize(), selectedSlot: this.selectedSlot, gameMode: this.gameMode, foodLevel: this.foodLevel, saturation: this.saturation, exhaustion: this.exhaustion, xpLevel: this.xpLevel, xpProgress: this.xpProgress, totalXp: this.totalXp, flying: this.flying, spawnPos: this.spawnPos, spawnForced: this.spawnForced, score: this.score, dimension: this.world.dimension };

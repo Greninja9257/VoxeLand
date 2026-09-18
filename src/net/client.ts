@@ -16,6 +16,9 @@ export type JoinResult =
   | { kind: 'joined'; welcome: any; info: any }
   | { kind: 'coordinator'; world: any; chunks: Uint8Array[] };
 
+/** The relay asked us to try again shortly (someone is just becoming the public world's coordinator). */
+export class RetryLater extends Error { constructor(msg = 'Try again in a moment') { super(msg); } }
+
 /** Thrown when a private server refused the password we sent (or were missing). */
 export class PasswordRequired extends Error { constructor(msg = 'This server is private.') { super(msg); } }
 
@@ -73,7 +76,7 @@ export class NetClient implements WorldListener {
         if (typeof e.data !== 'string') { (this.collectingSnapshot ? this.snapshotChunks : this.chunkFrames).push(new Uint8Array(e.data)); return; }
         const m = JSON.parse(e.data);
         if (this.status === 'connecting') {
-          if (m.t === 'error') { clearTimeout(timer); this.status = 'error'; reject(m.needPassword ? new PasswordRequired(m.reason) : new Error(m.reason)); return; }
+          if (m.t === 'error') { clearTimeout(timer); this.status = 'error'; ws.close(); reject(m.needPassword ? new PasswordRequired(m.reason) : m.retry ? new RetryLater(m.reason) : new Error(m.reason)); return; }
           // Accept the former name during rolling deploys: an old backend may still be serving a newly loaded UI.
           if (m.t === 'becomeCoordinator' || m.t === 'becomeHost') { this.collectingSnapshot = true; this.snapshotChunks = []; (this as any).pendingWorld = m.world; return; }
           if (m.t === 'worldReady') {
@@ -122,6 +125,11 @@ export class NetClient implements WorldListener {
     if (this.predicted.length < 1024) this.predicted.push(x, y, z, s);
   }
 
+  /** Forget everything about the current dimension before the host moves us to another one. */
+  resetWorld(): void {
+    for (const e of this.entities.values()) e.remove();
+    this.entities.clear(); this.wanted.clear(); this.requested.clear(); this.chunkFrames = []; this.container = null; this.predicted = [];
+  }
   /** ChunkManager (remote mode) asks for chunks here. */
   requestChunk(cx: number, cz: number): void { const k = chunkKey(cx, cz); if (this.requested.has(k)) return; this.requested.add(k); this.wanted.add(k); }
   forgetChunk(cx: number, cz: number): void { this.requested.delete(chunkKey(cx, cz)); }
@@ -135,6 +143,7 @@ export class NetClient implements WorldListener {
     if (this.predicted.length) { this.send({ t: 'set', b: this.predicted }); this.predicted = []; }
     // chunks
     const frames = this.chunkFrames; this.chunkFrames = [];
+    if (this.switching) frames.length = 0;
     for (const f of frames) {
       try {
         const { kind, json, body } = unpackFrame(f);
@@ -143,8 +152,9 @@ export class NetClient implements WorldListener {
     }
     const q = this.queue; this.queue = [];
     for (const m of q) { try { this.handle(m); } catch (e) { console.error('client message error', e); } }
-    // our snapshot
+    // our snapshot (not while the host is moving us to another dimension: our position is meaningless there)
     if (this.ticks === 1) this.send({ t: 'ready' });
+    if (this.switching) return;
     const face = p.breaking && g.targetBlock && p.breaking.x === g.targetBlock.x && p.breaking.y === g.targetBlock.y && p.breaking.z === g.targetBlock.z ? g.targetBlock.face : 1;
     // vanilla ServerboundMovePlayerPacket: position, look, onGround plus the pose/animation flags others render
     const snap: any = { t: 'move', x: r3(p.x), y: r3(p.y), z: r3(p.z), yaw: r1(p.yaw), pitch: r1(p.pitch), og: p.onGround, sneak: p.isSneaking, sprint: p.isSprinting, swim: p.swimmingPose, sleep: p.sleeping, fly: p.flying, slot: p.selectedSlot, swing: p.swinging && p.swingTime <= 1, use: !!p.usingItem, br: p.breaking ? { x: p.breaking.x, y: p.breaking.y, z: p.breaking.z, face, stage: p.breakStage, state: p.breaking.state } : null };
@@ -175,8 +185,12 @@ export class NetClient implements WorldListener {
     });
   }
 
+  /** set while the host has moved us to another dimension and the new world is still being set up */
+  switching = false;
   private handle(m: any): void {
     const g = this.game, p = g.player, w = g.world;
+    // world-bound messages for the dimension we are leaving are dropped; the host resends after 'dimready'
+    if (this.switching && ['blk', 'breakFx', 'ent', 'contUpd', 'open', 'snd', 'record'].includes(m.t)) return;
     switch (m.t) {
       case 'blk': { this.applying = true; try { const b = m.b as number[]; for (let i = 0; i < b.length; i += 4) { if (w.isLoaded(b[i], b[i + 2])) w.setBlock(b[i], b[i + 1], b[i + 2], b[i + 3], SET_UPDATE_NEIGHBORS); } } finally { this.applying = false; } break; }
       case 'breakFx': g.particles.spawnBlockBreak(m.x, m.y, m.z, m.s); break;
@@ -245,10 +259,23 @@ export class NetClient implements WorldListener {
       case 'open': this.openRemote(m); break;
       case 'contUpd': { if (this.container && this.container.x === m.x && this.container.y === m.y && this.container.z === m.z && !this.containerDirty) { this.container.inv.deserialize(m.slots, g.items); if (m.be && this.container.be) Object.assign(this.container.be, m.be); } break; }
       case 'wake': { if (p.sleeping) { p.wakeUp(); g.gui.sleepFade = 0; } break; }
+      case 'dim': {
+        if (!['overworld', 'the_nether', 'the_end'].includes(m.dimension) || ![m.x, m.y, m.z, m.seed, m.time, m.dayTime].every(Number.isFinite)) break;
+        this.switching = true;
+        g.switchDimensionRemote(m).catch((e) => console.error('dimension switch', e)).finally(() => { if (this.switching) { this.switching = false; this.send({ t: 'dimready' }); } });
+        break;
+      }
       case 'kicked': { this.disconnectReason = m.reason ?? 'Disconnected'; this.status = 'closed'; break; }
       case 'rehost': { this.disconnectReason = m.reason ?? 'Reconnecting…'; this.rehostId = m.id ?? null; this.status = 'closed'; break; }
       case 'pong': this.ping = Math.round(performance.now() - m.time); break;
-      case 'ride': { const v = m.id !== null ? this.entities.get(m.id) : null; if (v instanceof BoatEntity) { if (p.vehicle !== v) { if (p.vehicle instanceof BoatEntity) p.vehicle.detachPassenger(p); v.addPassenger(p, m.seat); } } else { if (p.vehicle instanceof BoatEntity) p.vehicle.detachPassenger(p); if (m.x !== undefined) { p.setPos(m.x, m.y, m.z); p.vy = 0; } } break; }
+      case 'ride': {
+        const v = m.id !== null && m.id !== undefined ? this.entities.get(m.id) : null;
+        const leave = () => { if (p.vehicle instanceof BoatEntity) p.vehicle.detachPassenger(p); else p.stopRiding(); };
+        if (v instanceof BoatEntity) { if (p.vehicle !== v) { leave(); v.addPassenger(p, m.seat); } }
+        else if (v) { if (p.vehicle !== v) { leave(); p.startRiding(v); } }
+        else { leave(); if (m.x !== undefined) { p.setPos(m.x, m.y, m.z); p.vy = 0; } }
+        break;
+      }
     }
   }
 
@@ -318,14 +345,17 @@ export class NetClient implements WorldListener {
     this.reconcileRemotePassengers();
   }
 
+  /** Mirror who rides what: boats seat their passengers, anything else (mobs, players, even us) carries them. */
   private reconcileRemotePassengers(): void {
+    const g = this.game, selfId = this.welcome?.selfId;
     for (const e of this.entities.values()) {
-      if (!(e instanceof RemotePlayer)) continue;
-      const wanted = e.remoteVehicleId === null ? null : this.entities.get(e.remoteVehicleId);
+      const id = e.remoteVehicleId;
+      const wanted = id === null ? null : id === selfId ? g.player : this.entities.get(id) ?? null;
       const boat = wanted instanceof BoatEntity ? wanted : null;
       const wrongSeat = boat !== null && e.vehicle === boat && boat.passengerIndex(e) !== e.remoteVehicleSeat;
-      if ((e.vehicle !== boat || wrongSeat) && e.vehicle instanceof BoatEntity) e.vehicle.detachPassenger(e);
+      if ((e.vehicle !== wanted || wrongSeat) && e.vehicle) { if (e.vehicle instanceof BoatEntity) e.vehicle.detachPassenger(e); else e.stopRiding(); }
       if (boat && e.vehicle !== boat) boat.addPassenger(e, e.remoteVehicleSeat);
+      else if (wanted && !boat && e.vehicle !== wanted) e.startRiding(wanted);
     }
   }
 
