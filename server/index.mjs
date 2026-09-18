@@ -42,7 +42,7 @@ const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.
 const official = {
   seed: +(process.env.PUBLIC_SEED || 0) || Math.floor(Math.random() * 2 ** 31),
   name: process.env.PUBLIC_NAME || 'VoxeLand Public Server',
-  motd: process.env.PUBLIC_MOTD || 'Open to everyone · survival',
+  motd: process.env.PUBLIC_MOTD || 'Open to everyone · Try it out! · Cheats enabled',
   gameMode: process.env.PUBLIC_GAMEMODE || 'survival',
   difficulty: +(process.env.PUBLIC_DIFFICULTY ?? 2),
   /** every player is an operator, like a LAN world with Allow Cheats on (it is a test server) */
