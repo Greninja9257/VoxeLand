@@ -5,7 +5,7 @@ import { Chunk, ChunkStage, MIN_Y, SECTION_COUNT, chunkKey, type ChunkData } fro
 import { World } from './world';
 import { WorkerPool } from '../workers/pool';
 import { storage } from '../save/storage';
-import type { MeshOutput } from '../render/mesher';
+import type { MeshOutput, Mesher } from '../render/mesher';
 import { BIOMES } from './gen/biomes';
 
 export interface SectionMeshTarget {
@@ -31,6 +31,11 @@ export class ChunkManager {
   onChunkLoaded?: (c: Chunk) => void;
   onChunkUnloaded?: (c: Chunk) => void;
 
+  /** Main-thread mesher for the blocking chunk-builder modes (vanilla prioritizeChunkUpdates). */
+  syncMesher: Mesher | null = null;
+  chunkBuilder: 'threaded' | 'semi' | 'full' = 'threaded';
+  /** per-section build counter: an async result older than the newest build of that section is discarded */
+  private meshVersion = new Map<number, number>();
   /** Multiplayer guest: chunks come from the host instead of the generator. */
   remote: { requestChunk(cx: number, cz: number): void; forgetChunk(cx: number, cz: number): void } | null;
   /** Additional positions (other players) whose surroundings stay loaded (host). */
@@ -68,6 +73,7 @@ export class ChunkManager {
   setMeshOptions(o: { smoothLighting: boolean; fancy: boolean; biomeBlend: number }): void {
     this.meshOptions = { smoothLighting: o.smoothLighting, fancy: o.fancy };
     this.meshPool.broadcast({ type: 'options', options: this.meshOptions });
+    if (this.syncMesher) this.syncMesher.options = { ...this.syncMesher.options, ...this.meshOptions };
     this.biomeBlend = o.biomeBlend;
     for (const c of this.world.chunks.values()) { c.dirtySections = (1 << SECTION_COUNT) - 1; (c as any).tintsDirty = true; }
   }
@@ -195,8 +201,38 @@ export class ChunkManager {
     return w.hasChunk(cx - 1, cz) && w.hasChunk(cx + 1, cz) && w.hasChunk(cx, cz - 1) && w.hasChunk(cx, cz + 1) && w.hasChunk(cx - 1, cz - 1) && w.hasChunk(cx + 1, cz - 1) && w.hasChunk(cx - 1, cz + 1) && w.hasChunk(cx + 1, cz + 1);
   }
 
+  /** Compile every dirty section of the chunk column at (x, z) right now (Semi/Fully Blocking modes). */
+  rebuildNow(x: number, z: number, y?: number): void {
+    if (this.headless || !this.syncMesher || this.chunkBuilder === 'threaded') return;
+    const cx = x >> 4, cz = z >> 4;
+    // a block change also dirties the neighbouring columns' border sections
+    for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+      const c = this.world.getChunk(cx + dx, cz + dz);
+      if (!c || !c.dirtySections || !this.neighborsLoaded(c.cx, c.cz)) continue;
+      for (let sy = 0; sy < SECTION_COUNT; sy++) {
+        if (!(c.dirtySections & (1 << sy))) continue;
+        if (y !== undefined && Math.abs(((y - MIN_Y) >> 4) - sy) > 1) continue;
+        this.buildSection(c, sy, true);
+      }
+    }
+  }
+  private buildSection(c: Chunk, sy: number, sync: boolean): void {
+    c.dirtySections &= ~(1 << sy);
+    if (!c.sections[sy]) { this.target.setSectionMesh(c.cx, sy, c.cz, { cx: c.cx, sy, cz: c.cz, layers: [null, null, null], time: 0 }); return; }
+    this.meshSection(c, sy, sync);
+  }
+
   private dispatchMeshes(ccx: number, ccz: number): void {
     if (this.headless) return;
+    // Fully Blocking: everything dirty around the player is compiled before this frame draws
+    if (this.chunkBuilder === 'full' && this.syncMesher) {
+      let built = 0;
+      for (let dx = -1; dx <= 1 && built < 24; dx++) for (let dz = -1; dz <= 1 && built < 24; dz++) {
+        const c = this.world.getChunk(ccx + dx, ccz + dz);
+        if (!c || !c.dirtySections || !this.neighborsLoaded(c.cx, c.cz)) continue;
+        for (let sy = 0; sy < SECTION_COUNT && built < 24; sy++) if (c.dirtySections & (1 << sy)) { this.buildSection(c, sy, true); built++; }
+      }
+    }
     const maxInFlight = this.meshPool.size * 4;
     if (this.meshPool.inFlight >= maxInFlight) return;
     const world = this.world;
@@ -219,18 +255,14 @@ export class ChunkManager {
     for (let i = 0; i < list.length && this.meshPool.inFlight < maxInFlight; i++) {
       const { cx, sy, cz } = list[i];
       const c = world.getChunk(cx, cz)!;
-      c.dirtySections &= ~(1 << sy);
-      if (!c.sections[sy]) { // empty section: nothing to draw
-        this.target.setSectionMesh(cx, sy, cz, { cx, sy, cz, layers: [null, null, null], time: 0 });
-        continue;
-      }
-      this.meshSection(c, sy);
+      this.buildSection(c, sy, false);
     }
   }
 
-  private meshSection(c: Chunk, sy: number): void {
+  private meshSection(c: Chunk, sy: number, sync = false): void {
     const key = sectionKey(c.cx, sy, c.cz);
-    this.pendingMesh.add(key);
+    const version = (this.meshVersion.get(key) ?? 0) + 1;
+    this.meshVersion.set(key, version);
     const blocks = new Uint16Array(18 * 18 * 18);
     const light = new Uint8Array(18 * 18 * 18);
     const world = this.world;
@@ -253,8 +285,16 @@ export class ChunkManager {
     }
     const tints = this.chunkTints(c);
     const input = { cx: c.cx, sy, cz: c.cz, blocks, light, tints };
+    if (sync && this.syncMesher) {
+      const out = this.syncMesher.mesh(input);
+      this.stats.meshTime += out.time; this.stats.meshCount++;
+      if (world.getChunk(c.cx, c.cz) === c) this.target.setSectionMesh(c.cx, sy, c.cz, out);
+      return;
+    }
+    this.pendingMesh.add(key);
     this.meshPool.request({ type: 'mesh', input }, [blocks.buffer, light.buffer]).then((r) => {
       this.pendingMesh.delete(key);
+      if (this.meshVersion.get(key) !== version) return; // a newer (synchronous) build already replaced it
       const out = r.out as MeshOutput;
       this.stats.meshTime += out.time; this.stats.meshCount++;
       if (world.getChunk(c.cx, c.cz) === c) this.target.setSectionMesh(c.cx, sy, c.cz, out);

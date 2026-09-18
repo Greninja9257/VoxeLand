@@ -746,6 +746,7 @@ export class Player extends LivingEntity {
     (offhand ? this.offhand : this.inventory).onChange?.();
     this.swing();
     g.onBlockPlaced(placement.x, placement.y, placement.z, placement.state);
+    if (this === g.player) g.chunks.rebuildNow(placement.x, placement.z, placement.y); // Semi/Fully Blocking chunk builder
     return true;
   }
 

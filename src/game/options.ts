@@ -20,6 +20,9 @@ export interface Options {
   // video
   fov: number; renderDistance: number; simulationDistance: number; gamma: number; guiScale: number; fullscreen: boolean;
   graphics: 'fast' | 'fancy' | 'fabulous'; clouds: 'off' | 'fast' | 'fancy'; smoothLighting: boolean; particles: 0 | 1 | 2; mipmapLevels: number;
+  /** vanilla "Chunk Builder" (prioritizeChunkUpdates): threaded, semi blocking (your own block changes rebuild at
+   *  once) or fully blocking (every nearby rebuild happens before the frame is drawn) */
+  chunkBuilder: 'threaded' | 'semi' | 'full';
   entityDistance: number; entityShadows: boolean; fovEffects: number; screenEffects: number; viewBobbing: boolean; biomeBlend: number;
   maxFps: number; vsync: boolean; attackIndicator: 'off' | 'crosshair' | 'hotbar'; autosaveIndicator: boolean; glintSpeed: number; glintStrength: number;
   damageTilt: number; darknessPulsing: boolean; menuBlur: number; showChunkBorders?: boolean;
@@ -41,7 +44,7 @@ export interface Options {
 
 export const DEFAULT_OPTIONS: Options = {
   fov: 70, renderDistance: 10, simulationDistance: 8, gamma: 0.5, guiScale: 0, fullscreen: false,
-  graphics: 'fancy', clouds: 'fancy', smoothLighting: true, particles: 0, mipmapLevels: 4,
+  graphics: 'fancy', clouds: 'fancy', smoothLighting: true, particles: 0, mipmapLevels: 4, chunkBuilder: 'threaded',
   entityDistance: 1, entityShadows: true, fovEffects: 1, screenEffects: 1, viewBobbing: true, biomeBlend: 2,
   maxFps: 120, vsync: true, attackIndicator: 'crosshair', autosaveIndicator: true, glintSpeed: 0.5, glintStrength: 0.75,
   damageTilt: 1, darknessPulsing: true, menuBlur: 5,
@@ -63,6 +66,7 @@ export const VIDEO_OPTIONS: OptionSpec[] = [
   { key: 'renderDistance', label: 'Render Distance', kind: 'slider', min: 2, max: 32, step: 1, format: (v) => `${v} chunks`, apply: true },
   { key: 'simulationDistance', label: 'Simulation Distance', kind: 'slider', min: 5, max: 32, step: 1, format: (v) => `${v} chunks`, apply: true, tooltip: 'Chunks within this distance tick (crops grow, mobs act, redstone runs).' },
   { key: 'smoothLighting', label: 'Smooth Lighting', kind: 'cycle', values: onOff, apply: true },
+  { key: 'chunkBuilder', label: 'Chunk Builder', kind: 'cycle', values: [{ value: 'threaded', label: 'Threaded' }, { value: 'semi', label: 'Semi Blocking' }, { value: 'full', label: 'Fully Blocking' }], apply: true, tooltip: 'Threaded: chunks are compiled in the background.\nSemi Blocking: chunks changed by your own actions are compiled immediately.\nFully Blocking: all nearby chunk compilations happen immediately, which may cause stutters.' },
   { key: 'maxFps', label: 'Max Framerate', kind: 'slider', min: 10, max: 260, step: 10, format: (v) => (v >= 260 || v <= 0 ? 'Unlimited' : `${v} fps`) },
   { key: 'vsync', label: 'VSync', kind: 'cycle', values: onOff },
   { key: 'viewBobbing', label: 'View Bobbing', kind: 'cycle', values: onOff },

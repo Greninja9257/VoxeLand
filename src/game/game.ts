@@ -3,6 +3,7 @@ import type { Assets } from '../assets';
 import { loadImage } from '../assets';
 import { BlockRegistry } from '../blocks/registry';
 import { ModelBaker } from '../render/models';
+import { Mesher } from '../render/mesher';
 import { Renderer } from '../render/renderer';
 import { computeSky, type SkyState } from '../render/sky';
 import { World, SET_UPDATE_NEIGHBORS, type Dimension } from '../world/world';
@@ -140,6 +141,8 @@ export class Game {
     this.recipes = new RecipeManager(this.items, assets.data);
     this.loot = new LootTables(this.items, this.registry, assets.data);
     this.baker = new ModelBaker(assets.models, assets.atlas, this.registry);
+    // main-thread mesher for the blocking "Chunk Builder" modes
+    this.syncMesher = new Mesher(this.registry, this.baker, assets.mcdata.tints.redstone.data);
     this.renderer = new Renderer(canvas, assets);
     this.itemRenderer = new ItemRenderer(assets, this.baker, this.renderer);
     this.entityRenderer = new EntityRenderer(this.renderer, this.itemRenderer, this);
@@ -209,8 +212,10 @@ export class Game {
     // mesh-affecting options need the chunks rebuilt
     const meshKey = `${o.smoothLighting}|${o.graphics}|${o.biomeBlend}`;
     if (this.chunks && meshKey !== this.meshOptionsKey) { this.meshOptionsKey = meshKey; this.chunks.setMeshOptions({ smoothLighting: o.smoothLighting, fancy: o.graphics !== 'fast', biomeBlend: o.biomeBlend }); }
+    for (const inst of this.dims?.values() ?? []) inst.chunks.chunkBuilder = o.chunkBuilder;
   }
   private meshOptionsKey = '';
+  private syncMesher!: Mesher;
 
   // ---------- world lifecycle ----------
   async loadWorld(meta: WorldMeta, session?: { state: any; chunks: ChunkData[] }): Promise<void> {
@@ -281,6 +286,8 @@ export class Game {
       world.listeners = [inst.blocks];
       inst.chunks = new ChunkManager(world, this.assets, this.renderer, this.worldMeta!.id, this.biomeColors, this.client, this.sessionChunks, headless);
       inst.chunks.viewDistance = this.options.renderDistance; this.renderer.viewDistance = this.options.renderDistance;
+      inst.chunks.syncMesher = this.syncMesher; inst.chunks.chunkBuilder = this.options.chunkBuilder;
+      this.syncMesher.options = { smoothLighting: this.options.smoothLighting, fancy: this.options.graphics !== 'fast' };
       inst.chunks.onChunkLoaded = (c) => this.withDimension(inst, () => { this.blockEntities.loadChunk(c); if ((c as any).fresh) this.spawner.populateChunk(c); });
       inst.chunks.onChunkUnloaded = (c) => this.withDimension(inst, () => { this.blockEntities.unloadChunk(c); this.unloadEntitiesIn(c); this.host?.onChunkUnloaded(c, dim); });
       if (this.client) inst.chunks.simulationDistance = 0;
@@ -764,6 +771,7 @@ export class Game {
     if (this.client && player === this.player) {
       // guest: predict locally (no drops), the host breaks it for real and broadcasts the change
       this.client.applying = true; try { w.setBlock(x, y, z, reg.isWaterlogged(s) ? reg.WATER : 0, SET_UPDATE_NEIGHBORS); } finally { this.client.applying = false; }
+      this.chunks.rebuildNow(x, z, y);
       this.client.send({ t: 'break', x, y, z });
       const tool = player.heldItem();
       if (tool && !player.isCreative && tool.item.tool !== 'none' && b.hardness > 0) player.damageHeld(tool, tool.item.tool === 'sword' ? 2 : 1);
@@ -793,6 +801,7 @@ export class Game {
     // sources with a plant in them (never an air pocket)
     const replace = reg.isWaterlogged(s) ? reg.WATER : 0;
     w.setBlock(x, y, z, replace, SET_UPDATE_NEIGHBORS);
+    if (player === this.player) this.chunks.rebuildNow(x, z, y); // Semi/Fully Blocking chunk builder
     // second halves
     const props = reg.getProps(s);
     if (n.endsWith('_door')) { const oy = props.half === 'lower' ? y + 1 : y - 1; const o = w.getBlock(x, oy, z); if (o && reg.block(o) === b) w.setBlock(x, oy, z, 0, SET_UPDATE_NEIGHBORS); }
