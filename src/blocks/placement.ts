@@ -214,6 +214,8 @@ export function getPlacement(blockName: string, ctx: PlaceContext): Placement | 
   const hf = horizontalFacing(ctx.yaw);
   const hasProp = (p: string) => block.props.some((q) => q.name === p);
   if (hasProp('waterlogged')) props.waterlogged = inWater ? 'true' : 'false';
+  // vanilla KelpBlock/SeagrassBlock.getStateForPlacement: only into a water source; the block then *is* that water
+  if ((n === 'kelp' || n === 'kelp_plant' || n === 'seagrass' || n === 'tall_seagrass') && !inWater) return null;
   const belowName = (() => { const s = world.getBlock(x, y - 1, z); return s ? reg.nameOf(s) : 'air'; })();
 
   // ---- orientation rules ----

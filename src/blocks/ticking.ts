@@ -205,7 +205,9 @@ export class BlockTicker implements WorldListener {
     if (reg.isAir(state)) return true;
     if (reg.isFluid(state)) return true;
     const n = reg.nameOf(state);
-    return isReplaceable(reg, state) && !reg.isWaterlogged(state) || n === 'seagrass' || n === 'kelp' || n === 'kelp_plant' || n === 'sea_pickle' && false;
+    // kelp and seagrass already are water sources: nothing flows "into" them
+    void n;
+    return isReplaceable(reg, state) && !reg.isWaterlogged(state);
   }
   private fluidState(lava: boolean, amount: number, falling: boolean): number {
     const reg = this.reg;
@@ -351,7 +353,7 @@ export class BlockTicker implements WorldListener {
         if (s === 0) continue;
         if (reg.isWater(s)) { world.setBlock(nx, ny, nz, 0); absorbed++; q.push([nx, ny, nz, d + 1]); }
         else if (reg.isWaterlogged(s)) { world.setBlock(nx, ny, nz, reg.withProp(s, 'waterlogged', 'false')); absorbed++; q.push([nx, ny, nz, d + 1]); }
-        else if (reg.nameOf(s) === 'kelp' || reg.nameOf(s) === 'kelp_plant' || reg.nameOf(s) === 'seagrass' || reg.nameOf(s) === 'tall_seagrass') { this.game.breakBlock(nx, ny, nz, null, true, true); absorbed++; q.push([nx, ny, nz, d + 1]); }
+        else if (reg.nameOf(s) === 'kelp' || reg.nameOf(s) === 'kelp_plant' || reg.nameOf(s) === 'seagrass' || reg.nameOf(s) === 'tall_seagrass') { this.game.breakBlock(nx, ny, nz, null, true, true); world.setBlock(nx, ny, nz, 0); absorbed++; q.push([nx, ny, nz, d + 1]); }
       }
     }
     if (absorbed > 0) world.setBlock(x, y, z, reg.defaultState('wet_sponge'));

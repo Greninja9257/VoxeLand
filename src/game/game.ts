@@ -763,7 +763,7 @@ export class Game {
     if (b.hardness < 0 && player && !player.isCreative) return;
     if (this.client && player === this.player) {
       // guest: predict locally (no drops), the host breaks it for real and broadcasts the change
-      this.client.applying = true; try { w.setBlock(x, y, z, reg.isWaterlogged(s) && !reg.implicitWater[reg.stateBlock[s]] ? reg.WATER : 0, SET_UPDATE_NEIGHBORS); } finally { this.client.applying = false; }
+      this.client.applying = true; try { w.setBlock(x, y, z, reg.isWaterlogged(s) ? reg.WATER : 0, SET_UPDATE_NEIGHBORS); } finally { this.client.applying = false; }
       this.client.send({ t: 'break', x, y, z });
       const tool = player.heldItem();
       if (tool && !player.isCreative && tool.item.tool !== 'none' && b.hardness > 0) player.damageHeld(tool, tool.item.tool === 'sword' ? 2 : 1);
@@ -789,8 +789,9 @@ export class Game {
     // sound & particles
     if (!silentPlayer || !player) this.sounds.playAt(`block.${b.soundType}.break`, x + 0.5, y + 0.5, z + 0.5, 1, 0.8);
     if (!silentPlayer) this.particles.spawnBlockBreak(x, y, z, s);
-    // remove (keep water if waterlogged)
-    const replace = reg.isWaterlogged(s) && !reg.implicitWater[reg.stateBlock[s]] ? reg.WATER : 0;
+    // remove: a waterlogged block leaves its water behind, and so do kelp/seagrass, which vanilla treats as water
+    // sources with a plant in them (never an air pocket)
+    const replace = reg.isWaterlogged(s) ? reg.WATER : 0;
     w.setBlock(x, y, z, replace, SET_UPDATE_NEIGHBORS);
     // second halves
     const props = reg.getProps(s);

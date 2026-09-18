@@ -512,7 +512,10 @@ export class Mob extends LivingEntity {
     const aheadUp = this.world.getBlock(fx, fy + 1, fz);
     const solidAhead = ahead !== 0 && reg.collisionBoxes(ahead).length > 0 && !reg.isFluid(ahead);
     const solidAheadUp = aheadUp !== 0 && reg.collisionBoxes(aheadUp).length > 0;
-    if ((this.horizontalCollision || (solidAhead && !solidAheadUp)) && this.onGround) this.jumping = true;
+    // vanilla mobs only jump one block up (WalkNodeEvaluator): a step needs the block above it, and the headroom
+    // for the mob on top of that, to be clear; a two-block wall is simply not climbable
+    const stepClear = solidAhead && !solidAheadUp && (() => { const h = Math.ceil(this.height); for (let i = 2; i <= h; i++) { const s = this.world.getBlock(fx, fy + i, fz); if (s !== 0 && reg.collisionBoxes(s).length > 0) return false; } return true; })();
+    if (stepClear && this.onGround) this.jumping = true;
     if (this.inWater || this.inLava) this.jumping = true;
     if (this.def.ai.climb && this.horizontalCollision) this.vy = 0.2;
     // cliff avoidance when not chasing
