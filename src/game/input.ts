@@ -15,6 +15,8 @@ export const DEFAULT_BINDINGS: KeyBinding[] = [
 export class Input {
   keys = new Set<string>();
   pressed = new Set<string>();   // pressed this frame (GUI)
+  /** OS key-repeat events this frame: screens treat them like presses (holding Delete/arrows in a text field) */
+  repeats: string[] = [];
   released = new Set<string>();
   buttons = new Set<number>();
   buttonsPressed = new Set<number>();
@@ -45,6 +47,7 @@ export class Input {
         if (now - last < 300) { this.doubleTapped.add(e.code); this.tickDoubleTapped.add(e.code); }
         this.lastKeyTime.set(e.code, now);
       }
+      else if (e.repeat) this.repeats.push(e.code);
       this.keys.add(e.code);
       if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) this.typed.push(e.key);
       else if (e.key === 'Backspace') this.typed.push('\b');
@@ -108,6 +111,6 @@ export class Input {
   /** Call at end of frame. */
   endFrame(): void {
     this.pressed.clear(); this.released.clear(); this.buttonsPressed.clear(); this.buttonsReleased.clear();
-    this.mouseDx = 0; this.mouseDy = 0; this.wheel = 0; this.typed.length = 0; this.doubleTapped.clear();
+    this.mouseDx = 0; this.mouseDy = 0; this.wheel = 0; this.typed.length = 0; this.doubleTapped.clear(); this.repeats.length = 0;
   }
 }

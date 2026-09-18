@@ -324,9 +324,11 @@ export class ChatScreen extends Screen {
   pausesGame = false; darkBackground = false;
   field!: TextField;
   histIndex = -1;
-  /** command suggestions (vanilla CommandSuggestions): list + selected index */
+  /** command suggestions (vanilla CommandSuggestions): list, selected index and the first visible row */
   suggestions: string[] = [];
   suggestIndex = 0;
+  suggestOffset = 0;
+  private static readonly SUGGEST_ROWS = 10;
   constructor(private initial = '') { super(); }
   build(): void {
     // vanilla ChatScreen: EditBox(4, height - 12, width - 4, 12) without border over a box at height - 14
@@ -344,16 +346,41 @@ export class ChatScreen extends Screen {
   private updateSuggestions(): void {
     const t = this.field.text;
     this.suggestions = t.startsWith('/') && this.gui.game.options.commandSuggestions ? this.gui.game.commandSuggestions(t) : [];
-    this.suggestIndex = 0;
+    this.suggestIndex = 0; this.suggestOffset = 0;
   }
+  /** Replace the word being typed with the selected suggestion (the leading slash of the command stays). */
   private applySuggestion(): void {
     const sg = this.suggestions[this.suggestIndex]; if (!sg) return;
     const t = this.field.text; const i = t.lastIndexOf(' ');
-    this.field.text = t.slice(0, i + 1) + sg + ' '; this.field.cursor = this.field.text.length;
+    const head = i >= 0 ? t.slice(0, i + 1) : '/';
+    this.field.text = head + sg + ' '; this.field.cursor = this.field.text.length;
     this.updateSuggestions();
   }
+  /** Move the selection and keep it inside the visible rows (vanilla CommandSuggestions.cycle / scroll). */
+  private cycleSuggestion(delta: number): void {
+    const n = this.suggestions.length; if (!n) return;
+    this.suggestIndex = ((this.suggestIndex + delta) % n + n) % n;
+    const rows = ChatScreen.SUGGEST_ROWS;
+    if (this.suggestIndex < this.suggestOffset) this.suggestOffset = this.suggestIndex;
+    else if (this.suggestIndex >= this.suggestOffset + rows) this.suggestOffset = this.suggestIndex - rows + 1;
+  }
+  private scrollSuggestions(delta: number): void {
+    const rows = ChatScreen.SUGGEST_ROWS, max = Math.max(0, this.suggestions.length - rows);
+    this.suggestOffset = Math.max(0, Math.min(max, this.suggestOffset + delta));
+    this.suggestIndex = Math.max(this.suggestOffset, Math.min(this.suggestOffset + rows - 1, this.suggestIndex));
+  }
+  /** Screen rectangle of the suggestion popup, if shown. */
+  private suggestionBox(): { x: number; y: number; w: number; h: number } | null {
+    if (!this.suggestions.length) return null;
+    const rows = this.suggestions.slice(this.suggestOffset, this.suggestOffset + ChatScreen.SUGGEST_ROWS);
+    const prefix = this.field.text.slice(0, this.field.text.lastIndexOf(' ') + 1);
+    const x = 4 + this.gui.font.width(prefix);
+    let w = 0; for (const r of rows) w = Math.max(w, this.gui.font.width(r));
+    const y0 = this.height - 14 - rows.length * 12 - 2;
+    return { x: x - 1, y: y0 - 1, w: w + 4, h: rows.length * 12 + 2 };
+  }
   keyDown(code: string, key: string, mods: any): boolean {
-    if (this.suggestions.length && (code === 'ArrowUp' || code === 'ArrowDown')) { this.suggestIndex = (this.suggestIndex + (code === 'ArrowUp' ? -1 : 1) + this.suggestions.length) % this.suggestions.length; return true; }
+    if (this.suggestions.length && (code === 'ArrowUp' || code === 'ArrowDown')) { this.cycleSuggestion(code === 'ArrowUp' ? -1 : 1); return true; }
     if (code === 'ArrowUp') { if (this.histIndex > 0) { this.histIndex--; this.field.text = this.gui.chatHistory[this.histIndex]; this.field.cursor = this.field.text.length; } return true; }
     if (code === 'ArrowDown') { if (this.histIndex < this.gui.chatHistory.length) { this.histIndex++; this.field.text = this.gui.chatHistory[this.histIndex] ?? ''; this.field.cursor = this.field.text.length; } return true; }
     if (code === 'Tab') { if (this.suggestions.length) this.applySuggestion(); else if (this.field.text.startsWith('/')) { const c = this.gui.game.completeCommand(this.field.text); if (c) { this.field.text = c; this.field.cursor = c.length; this.updateSuggestions(); } } return true; }
@@ -361,20 +388,35 @@ export class ChatScreen extends Screen {
     if (code === 'PageDown') { this.gui.chatScroll = Math.max(0, this.gui.chatScroll - 5); return true; }
     return super.keyDown(code, key, mods);
   }
-  wheel(dy: number): void { this.gui.chatScroll = Math.max(0, this.gui.chatScroll - Math.sign(dy) * (this.gui.game.input.keys.has('ShiftLeft') ? 7 : 1)); }
+  wheel(dy: number, x: number, y: number): void {
+    // over the suggestion popup the wheel scrolls the suggestions (vanilla CommandSuggestions.mouseScrolled)
+    const box = this.suggestionBox();
+    if (box && x >= box.x && x < box.x + box.w && y >= box.y && y < box.y + box.h) { this.scrollSuggestions(Math.sign(dy)); return; }
+    this.gui.chatScroll = Math.max(0, this.gui.chatScroll - Math.sign(dy) * (this.gui.game.input.keys.has('ShiftLeft') ? 7 : 1));
+  }
+  mouseDown(x: number, y: number, button: number): boolean {
+    const box = this.suggestionBox();
+    if (button === 0 && box && x >= box.x && x < box.x + box.w && y >= box.y && y < box.y + box.h) {
+      const row = Math.floor((y - box.y - 1) / 12);
+      if (row >= 0 && this.suggestOffset + row < this.suggestions.length) { this.suggestIndex = this.suggestOffset + row; this.applySuggestion(); }
+      return true;
+    }
+    return super.mouseDown(x, y, button);
+  }
   render(ctx: CanvasRenderingContext2D, mx: number, my: number, partial: number): void {
     this.gui.drawChat(ctx, true);
     ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(2, this.height - 14, this.width - 4, 12);
     super.render(ctx, mx, my, partial);
     // suggestion popup above the input (vanilla: up to 10 rows, highlighted selection, usage hint)
     if (this.suggestions.length) {
-      const rows = this.suggestions.slice(0, 10);
-      const prefix = this.field.text.slice(0, this.field.text.lastIndexOf(' ') + 1);
-      const x = 4 + this.gui.font.width(prefix);
-      let w = 0; for (const r of rows) w = Math.max(w, this.gui.font.width(r));
-      const y0 = this.height - 14 - rows.length * 12 - 2;
-      ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(x - 1, y0 - 1, w + 4, rows.length * 12 + 2);
-      rows.forEach((r, i) => this.gui.font.draw(ctx, r, x + 1, y0 + 2 + i * 12, i === this.suggestIndex ? 0xffff00 : 0xa0a0a0));
+      const box = this.suggestionBox()!;
+      const rows = this.suggestions.slice(this.suggestOffset, this.suggestOffset + ChatScreen.SUGGEST_ROWS);
+      ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(box.x, box.y, box.w, box.h);
+      rows.forEach((r, i) => this.gui.font.draw(ctx, r, box.x + 2, box.y + 3 + i * 12, this.suggestOffset + i === this.suggestIndex ? 0xffff00 : 0xa0a0a0));
+      // vanilla SuggestionsList: a dotted white line along the top/bottom edge when the list continues that way
+      ctx.fillStyle = '#fff';
+      if (this.suggestOffset > 0) for (let px = 0; px < box.w; px += 2) ctx.fillRect(box.x + px, box.y, 1, 1);
+      if (this.suggestOffset + rows.length < this.suggestions.length) for (let px = 0; px < box.w; px += 2) ctx.fillRect(box.x + px, box.y + box.h - 1, 1, 1);
     } else if (this.field.text.startsWith('/')) {
       const usage = this.gui.game.commandUsage(this.field.text);
       if (usage) { const w = this.gui.font.width(usage); ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(3, this.height - 28, w + 4, 12); this.gui.font.draw(ctx, usage, 5, this.height - 26, 0x808080); }

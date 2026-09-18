@@ -263,7 +263,9 @@ export class Gui {
     for (const b of input.buttonsReleased) { s.mouseUp(this.mouseX, this.mouseY, b); this.mouseDownState.delete(b); }
     if (input.wheel) s.wheel(input.wheel, this.mouseX, this.mouseY);
     const mods = { shift: input.keys.has('ShiftLeft') || input.keys.has('ShiftRight'), ctrl: input.keys.has('ControlLeft') || input.keys.has('MetaLeft') };
-    for (const code of input.pressed) {
+    // fresh presses and key repeats alike (vanilla GLFW repeat: holding a key in a text box keeps applying it)
+    for (const code of [...input.pressed, ...input.repeats.filter((c) => !input.pressed.has(c))]) {
+      if (this.screen !== s) break;
       const handled = s.keyDown(code, code, mods);
       if (!handled && this.screen === s) {
         if (code === input.key('inventory') && (s as any).isInventoryLike) this.close();
