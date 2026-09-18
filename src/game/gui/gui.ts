@@ -283,6 +283,12 @@ export class Gui {
     if (g.inWorld && !this.hideHud && !(this.screen && this.screen.hidesHud)) this.drawHud(ctx, partial);
     if (g.inWorld && this.showDebug && !(this.screen && this.screen.hidesHud)) this.drawDebug(ctx);
     if (g.inWorld && (this.showPlayerList || g.input.isDown('playerList')) && !(this.screen && this.screen.hidesHud)) this.drawPlayerList(ctx);
+    // vanilla Screen.renderBackground outside a world: the panorama, blurred under every menu but the title
+    // screen (Menu Background Blurriness), which instead gets the panorama_overlay gradient
+    const blurMenus = !g.inWorld && !!this.screen && this.screen.darkBackground;
+    const filter = blurMenus ? 'blur(5px)' : '';
+    if (g.canvas.style.filter !== filter) g.canvas.style.filter = filter;
+    if (!g.inWorld && this.screen && !this.screen.darkBackground) this.drawSprite(ctx, 'gui/title/background/panorama_overlay', 0, 0, this.width, this.height);
     if (this.screen) { this.screen.drawBackground(ctx); this.screen.render(ctx, this.mouseX, this.mouseY, partial); }
     if (this.screen && this.game.input.pointerLocked && this.game.input.softCursor) this.drawCursor(ctx);
     this.drawTooltip(ctx);

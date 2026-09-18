@@ -168,7 +168,7 @@ export class Game {
     await this.gui.load();
     const [grass, foliage, dry] = await Promise.all([loadImage('colormap/grass'), loadImage('colormap/foliage'), loadImage('colormap/dry_foliage').catch(() => null)]);
     this.biomeColors = computeBiomeColors(this.assets, { grass: imageToData(grass), foliage: imageToData(foliage), dry: dry ? imageToData(dry) : null });
-    this.loadPanorama();
+    await this.loadPanorama(); // the loading overlay stays up until the title screen has its backdrop
     this.gui.openTitle();
     this.running = true;
     this.lastTime = performance.now();
@@ -1534,21 +1534,19 @@ export class Game {
   }
 
   // ---------- title panorama ----------
-  /** Menu panorama: VoxeLand's own scene (public/panorama), falling back to the resource pack's. */
-  /** Menu panorama: VoxeLand's own scene, falling back to the resource pack's if it is missing. */
+  /** Menu panorama: the scenic one the asset fetcher took from an older release, else the current pack's. */
   private async loadPanorama(): Promise<void> {
-    const sources = [`./panorama/panorama_`, `./assets/pack/assets/minecraft/textures/gui/title/background/panorama_`];
-    for (const base of sources) {
-      let ok = true;
-      for (let i = 0; i < 6; i++) {
-        try {
+    for (const base of ['./assets/panorama/panorama_', './assets/pack/assets/minecraft/textures/gui/title/background/panorama_']) {
+      const faces: WebGLTexture[] = [];
+      try {
+        for (let i = 0; i < 6; i++) {
           const r = await fetch(`${base}${i}.png`);
-          if (!r.ok) { ok = false; break; }
-          const bmp = await createImageBitmap(await r.blob());
-          this.panoramaTex[i] = createTexture(this.renderer.gl, bmp, { nearest: false });
-        } catch { ok = false; break; }
-      }
-      if (ok) return;
+          if (!r.ok) throw new Error('missing');
+          faces.push(createTexture(this.renderer.gl, await createImageBitmap(await r.blob()), { nearest: false }));
+        }
+      } catch { continue; }
+      this.panoramaTex = faces;
+      return;
     }
   }
   private renderPanorama(timeSec: number): void {

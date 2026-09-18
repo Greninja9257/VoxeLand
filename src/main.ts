@@ -12,7 +12,10 @@ async function boot(): Promise<void> {
     const game = new Game(assets, document.getElementById('game') as HTMLCanvasElement, document.getElementById('gui') as HTMLCanvasElement);
     (window as any).game = game;
     await game.start();
-    document.getElementById('loading')!.style.display = 'none';
+    // vanilla LoadingOverlay fades out over about a second once the game is ready
+    const loading = document.getElementById('loading')!;
+    loading.classList.add('fade');
+    setTimeout(() => { loading.style.display = 'none'; }, 1000);
   } catch (e: any) {
     console.error(e);
     loadingErr.textContent = String(e?.stack ?? e);

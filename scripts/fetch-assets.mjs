@@ -157,6 +157,34 @@ async function fetchJarData(version) {
   return zip;
 }
 
+// ---------- title panorama ----------
+/** The menu panorama comes from an older release with a scenic one (the current versions show a cave). Its faces
+ *  are asset-index objects of that version (the jar only carries 1x1 placeholders). Skipped quietly on failure. */
+const PANORAMA_VERSION = process.env.PANORAMA_VERSION || '1.20.1';
+async function fetchPanorama() {
+  const dest = path.join(OUT, 'panorama');
+  if (fs.existsSync(path.join(dest, 'panorama_5.png')) && !FORCE) { log('panorama already present'); return; }
+  try {
+    const manifest = JSON.parse(fs.readFileSync(path.join(CACHE, 'version_manifest_v2.json'), 'utf8'));
+    const ver = manifest.versions.find((v) => v.id === PANORAMA_VERSION);
+    if (!ver) { log(`panorama: version ${PANORAMA_VERSION} not in the manifest, using the pack's`); return; }
+    const vpath = path.join(CACHE, `version-${ver.id}.json`);
+    await download(ver.url, vpath);
+    const info = JSON.parse(fs.readFileSync(vpath, 'utf8'));
+    const ipath = path.join(CACHE, `assets-${info.assetIndex.id}-${ver.id}.json`);
+    await download(info.assetIndex.url, ipath);
+    const index = JSON.parse(fs.readFileSync(ipath, 'utf8'));
+    fs.mkdirSync(dest, { recursive: true });
+    log(`Downloading the Minecraft ${ver.id} title panorama …`);
+    for (let i = 0; i < 6; i++) {
+      const obj = index.objects[`minecraft/textures/gui/title/background/panorama_${i}.png`];
+      if (!obj) throw new Error(`panorama_${i} missing from the ${ver.id} asset index`);
+      await download(`https://resources.download.minecraft.net/${obj.hash.slice(0, 2)}/${obj.hash}`, path.join(dest, `panorama_${i}.png`));
+    }
+    log(`panorama: 6 faces from ${ver.id}`);
+  } catch (e) { log(`panorama: ${e?.message ?? e} (using the pack's)`); }
+}
+
 async function loadAssetIndex(version) {
   const idxPath = path.join(CACHE, `assets-index-${version.assetIndex.id}.json`);
   await download(version.assetIndex.url, idxPath);
@@ -407,6 +435,7 @@ Mojang Studios or Microsoft.
   await fetchJarData(version);
   await fetchMcData();
   await fetchIndexExtras(version);
+  await fetchPanorama();
   buildModelBundle();
   buildDataBundle();
   buildAtlas();

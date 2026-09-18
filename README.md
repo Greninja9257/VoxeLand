@@ -58,6 +58,8 @@ npm run fetch-assets -- --no-sounds
 
 Use `--force` to download and rebuild the generated assets again.
 
+The title-screen panorama is taken from an older release with a scenic one (Minecraft 1.20.1's cherry grove by default; set `PANORAMA_VERSION` to pick another), because recent versions ship a cave scene.
+
 ### Production build
 
 ```bash
