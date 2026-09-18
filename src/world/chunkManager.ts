@@ -122,7 +122,7 @@ export class ChunkManager {
       const wanted: [number, number, number][] = [];
       const seen = new Set<number>();
       for (const c of centers) {
-        const r = c === centers[0] ? vd : Math.min(vd, 6);
+        const r = c === centers[0] ? vd : Math.min(vd, 8); // guests get up to 8 chunks around them
         for (let dz = -r; dz <= r; dz++) for (let dx = -r; dx <= r; dx++) {
           const d = dx * dx + dz * dz;
           if (d > r * r) continue;
