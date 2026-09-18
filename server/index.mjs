@@ -42,6 +42,8 @@ const official = {
   motd: process.env.PUBLIC_MOTD || 'Open to everyone · survival',
   gameMode: process.env.PUBLIC_GAMEMODE || 'survival',
   difficulty: +(process.env.PUBLIC_DIFFICULTY ?? 2),
+  /** every player is an operator, like a LAN world with Allow Cheats on (it is a test server) */
+  cheats: (process.env.PUBLIC_CHEATS ?? 'true') !== 'false',
   meta: null,            // { time, dayTime, weather, rules, worldSpawn, dragonKills }
   playerData: {},        // by player name
   chunks: new Map(),     // "dim:cx,cz" -> binary chunk frame
@@ -123,7 +125,7 @@ const sendBin = (ws, buf) => { if (ws && ws.readyState === 1) ws.send(buf); };
 
 /** Hand an automatically selected client the live-simulation coordinator snapshot. */
 function assignOfficialCoordinator(ws) {
-  send(ws, { t: 'becomeCoordinator', id: OFFICIAL_ID, world: { seed: official.seed, name: official.name, motd: official.motd, gameMode: official.gameMode, difficulty: official.difficulty, meta: official.meta, playerData: official.playerData, maxPlayers: OFFICIAL_MAX }, chunkCount: official.chunks.size });
+  send(ws, { t: 'becomeCoordinator', id: OFFICIAL_ID, world: { seed: official.seed, name: official.name, motd: official.motd, gameMode: official.gameMode, difficulty: official.difficulty, cheats: official.cheats, meta: official.meta, playerData: official.playerData, maxPlayers: OFFICIAL_MAX }, chunkCount: official.chunks.size });
   for (const buf of official.chunks.values()) sendBin(ws, buf);
   send(ws, { t: 'worldReady' });
 }

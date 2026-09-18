@@ -137,6 +137,7 @@ Shared worlds follow vanilla's integrated-server model. The host is the server: 
 | `PUBLIC_MOTD` | Public-world message | `Open to everyone · survival` |
 | `PUBLIC_GAMEMODE` | Public-world game mode | `survival` |
 | `PUBLIC_DIFFICULTY` | Public-world difficulty | `2` |
+| `PUBLIC_CHEATS` | Every public-world player may use commands (LAN "Allow Cheats") | `true` |
 | `PUBLIC_MAX_PLAYERS` | Public-world player limit | `16` |
 | `PUBLIC_MAX_CHUNKS` | Maximum persisted public-world chunks | `2048` |
 

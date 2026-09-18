@@ -1044,7 +1044,8 @@ export class Game {
         data.push({ ...d, decorated: true });
       } catch (e) { console.error('snapshot chunk', e); }
     }
-    const meta: WorldMeta = { id: sessionId, name: world.name ?? 'Public world', seed: world.seed, created: Date.now(), lastPlayed: Date.now(), gameMode: (world.gameMode ?? 'survival') as any, difficulty: world.difficulty ?? 2, cheats: false, version: this.version };
+    const cheats = world.cheats === true;
+    const meta: WorldMeta = { id: sessionId, name: world.name ?? 'Public world', seed: world.seed, created: Date.now(), lastPlayed: Date.now(), gameMode: (world.gameMode ?? 'survival') as any, difficulty: world.difficulty ?? 2, cheats, version: this.version };
     // World-level state and chunks remain in memory; the backend is the only persistent owner.
     const state = {
       player: world.playerData?.[this.options.playerId] ?? world.playerData?.[this.options.playerName || 'Player'] ?? undefined,
@@ -1052,9 +1053,9 @@ export class Game {
       rules: world.meta?.rules, worldSpawn: world.meta?.worldSpawn, playerData: world.playerData ?? {}, dragonKills: world.meta?.dragonKills ?? 0,
     };
     await this.loadWorld(meta, { state, chunks: data });
-    const h = await this.openToLan({ name: world.name ?? 'Public world', motd: world.motd ?? '', gameMode: world.gameMode ?? 'survival', cheats: false, maxPlayers: world.maxPlayers ?? 16, relayUrl, official: true });
-    // the coordinator is just another player of the backend's world: never an operator
-    this.cheats = false; this.player.cheats = false;
+    // the backend decides whether its world allows commands (PUBLIC_CHEATS); the coordinator is a player like any other
+    const h = await this.openToLan({ name: world.name ?? 'Public world', motd: world.motd ?? '', gameMode: world.gameMode ?? 'survival', cheats, maxPlayers: world.maxPlayers ?? 16, relayUrl, official: true });
+    this.cheats = cheats; this.player.cheats = cheats;
     this.lastServer = { relayUrl, serverId: 'official', password: '' };
     this.gui.addChat('§eJoined VoxeLand Public Server');
     void h;
