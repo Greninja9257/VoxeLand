@@ -904,7 +904,12 @@ export class Game {
 
   // ---------- chat ----------
   handleChat(text: string): void {
-    if (this.client) { this.client.send({ t: 'chat', text }); if (!text.startsWith('/')) this.gui.addChat(`<${this.player.name}> ${text}`); return; }
+    if (this.client) {
+      this.client.send({ t: 'chat', text });
+      // a Java server broadcasts our message back to us (vanilla clients never echo); the VoxeLand host does not
+      if (!text.startsWith('/') && this.client instanceof NetClient) this.gui.addChat(`<${this.player.name}> ${text}`);
+      return;
+    }
     if (text.startsWith('/')) runCommand(this, text);
     else { const line = `<${this.player.name}> ${text}`; this.gui.addChat(line); this.host?.broadcast({ t: 'chat', text: line }); }
   }
