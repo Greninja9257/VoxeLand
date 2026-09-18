@@ -1,6 +1,7 @@
 // The player: input-driven movement, hunger/XP, inventory, block interaction, item use.
 import { LivingEntity, ItemEntity, type EntityDamage, type DamageSource } from './entity';
-import { ArrowEntity, ThrownProjectile } from './misc';
+import { ArrowEntity, EyeOfEnderEntity, ThrownProjectile } from './misc';
+import { nearestStronghold } from '../world/gen/structures';
 import { Inventory, ItemStack } from '../items/stack';
 import { TIER_SPEED, TIER_LEVEL, type Item } from '../items/registry';
 import { getPlacement, horizontalFacing, updateConnections, isReplaceable, canSurvive, facingOffset, oppositeFacing } from '../blocks/placement';
@@ -766,6 +767,18 @@ export class Player extends LivingEntity {
     if (n === 'crossbow') { if (stack.extra.charged) { this.shootArrow(stack, 3.15, false); stack.extra.charged = false; this.inventory.onChange?.(); return true; } if (this.isCreative || this.findArrow()) { this.startUsing(stack, 25); return true; } return false; }
     if (n === 'trident') { this.startUsing(stack, 72000); return true; }
     if (n === 'shield') { this.startUsing(stack, 72000); return true; }
+    if (n === 'ender_eye') {
+      // vanilla EnderEyeItem.use: only where a stronghold exists (the Overworld); the eye targets the nearest one
+      if (g.world.dimension !== 'overworld') return false;
+      const [sx, sz] = nearestStronghold(g.world.seed, this.x, this.z);
+      const eye = new EyeOfEnderEntity(this, stack.clone());
+      eye.setPos(this.x, this.y + this.height * 0.5, this.z);
+      eye.signalTo(sx, this.y, sz);
+      g.addEntity(eye);
+      g.sounds.playAt('entity.ender_eye.launch', this.x, this.y, this.z, 0.5, 0.4 / (Math.random() * 0.4 + 0.8));
+      consume(); this.swing();
+      return true;
+    }
     if (n === 'snowball' || n === 'egg' || n === 'ender_pearl' || n === 'splash_potion' || n === 'lingering_potion' || n === 'experience_bottle' || n === 'fire_charge' || n === 'wind_charge') {
       const d = lookDir(this.yaw, this.pitch);
       const p = new ThrownProjectile(n === 'fire_charge' ? 'fire_charge' : n, this, stack.clone());

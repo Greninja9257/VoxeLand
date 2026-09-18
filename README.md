@@ -21,6 +21,7 @@ VoxeLand is a browser-based recreation of Minecraft: Java Edition built without 
 The game is data-driven from Minecraft 26.x resources:
 
 - Block models, blockstates, item definitions, textures, fonts, and interface sprites come from the vanilla resource pack.
+- Village structure templates and jigsaw pools come from the Minecraft client data.
 - Recipes, loot tables, tags, and sound events come from the Minecraft client data.
 - Block, item, biome, entity, collision, and tool metadata come from [PrismarineJS `minecraft-data`](https://github.com/PrismarineJS/minecraft-data).
 - Sounds are fetched from Mojang's asset servers.
@@ -74,6 +75,7 @@ The static build is written to `dist/`. Single-player worlds use IndexedDB, and 
 ### Worlds and dimensions
 
 - Infinite, seed-based worlds spanning Y -64 through 319
+- Villages assembled from the vanilla jigsaw templates, strongholds with End portal rooms, Nether fortresses with blaze spawners, and dungeons
 - More than 50 Overworld biomes, climate-driven terrain, caves, ravines, ores, vegetation, and environmental features
 - The Nether and the End, including functional portals and 1:8 Nether coordinate scaling
 - Day and night, moon phases, weather, lightning, biome tinting, fog, clouds, smooth lighting, and ambient occlusion
@@ -91,11 +93,12 @@ The static build is written to `dist/`. Single-player worlds use IndexedDB, and 
 ### Entities and presentation
 
 - More than 90 mob definitions with spawning, pathing, combat, breeding, taming, and species-specific behaviour
+- Villagers with biome outfits, professions claimed from job-site blocks, levelled vanilla trades and restocking, zombie infection and curing
 - Item entities, projectiles, experience orbs, falling blocks, boats, and chest boats
 - Ender Dragon and Wither boss encounters
 - Vanilla-style HUD, menus, inventory screens, fonts, particles, positional audio, music, subtitles, and overlays
 - Rebindable controls and extensive video, audio, chat, accessibility, language, and skin settings
-- Commands with suggestions and completion, including `/gamemode`, `/give`, `/tp`, `/weather`, `/summon`, and `/fill`
+- Commands with suggestions and completion, including `/gamemode`, `/give`, `/tp`, `/weather`, `/summon`, `/locate`, and `/fill`
 
 <details>
 <summary><strong>Technical highlights</strong></summary>
@@ -181,8 +184,8 @@ Controls can be rebound under **Options → Controls**.
 
 VoxeLand is ambitious, but it is not a complete replacement for Minecraft. The following areas are not yet implemented or remain incomplete:
 
-- Generated structures such as villages, strongholds, fortresses, temples, and ancient cities
-- Villager professions and complete trading behaviour
+- Generated structures beyond villages, strongholds, Nether fortresses, and dungeons (no temples, mineshafts, outposts, bastions, ancient cities, or End cities yet)
+- Villager breeding, schedules, gossip, and demand-based pricing
 - Maps, books, banner patterns, minecarts, elytra flight, and fishing
 - Advancements and statistics
 - Runtime resource-pack switching

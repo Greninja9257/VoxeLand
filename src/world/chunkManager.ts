@@ -50,7 +50,7 @@ export class ChunkManager {
     this.target = headless ? NULL_TARGET : target;
     const hw = Math.max(2, Math.min(8, (navigator.hardwareConcurrency || 4)));
     const genCount = Math.max(1, Math.floor(hw / 2));
-    this.genPool = this.remote ? new WorkerPool(() => new Worker(new URL('../workers/gen.worker.ts', import.meta.url), { type: 'module' }), 0, null) : new WorkerPool(() => new Worker(new URL('../workers/gen.worker.ts', import.meta.url), { type: 'module' }), genCount, { type: 'init', mcdata: assets.mcdata, seed: world.seed, dimension: world.dimension });
+    this.genPool = this.remote ? new WorkerPool(() => new Worker(new URL('../workers/gen.worker.ts', import.meta.url), { type: 'module' }), 0, null) : new WorkerPool(() => new Worker(new URL('../workers/gen.worker.ts', import.meta.url), { type: 'module' }), genCount, { type: 'init', mcdata: assets.mcdata, structures: assets.structures, seed: world.seed, dimension: world.dimension });
     this.meshPool = this.makeMeshPool(headless ? 0 : Math.max(1, hw - genCount - 1));
   }
   public target: SectionMeshTarget;
@@ -80,6 +80,8 @@ export class ChunkManager {
   biomeBlend = 2;
 
   ready(): Promise<void> { return Promise.all([this.genPool.ready(), this.meshPool.ready()]).then(() => {}); }
+  /** /locate structure: asks a generator worker for the nearest start (null on guests, who have no generator) */
+  async locate(structure: string, x: number, z: number): Promise<[number, number] | null> { if (this.remote || !this.genPool.size) return null; const r = await this.genPool.request({ type: 'locate', structure, x, z }); return r.pos ?? null; }
 
   disposed = false;
   dispose(): void { this.disposed = true; this.genPool.terminate(); this.meshPool.terminate(); }

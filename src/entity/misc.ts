@@ -1,8 +1,7 @@
 // Falling blocks, primed TNT, arrows and thrown projectiles.
 import { AreaEffectCloud } from './boss';
 import { Entity, LivingEntity, type EntityDamage } from './entity';
-import type { ItemStack } from '../items/stack';
-import { ItemStack as Stack } from '../items/stack';
+import { ItemStack } from '../items/stack';
 import { AABB } from '../math';
 
 export class FallingBlockEntity extends Entity {
@@ -36,7 +35,7 @@ export class FallingBlockEntity extends Entity {
   }
   private dropAsItem(): void {
     const item = this.game.items.itemForBlock(this.world.registry.nameOf(this.blockState));
-    if (item) this.game.dropItem(this.x, this.y, this.z, new Stack(item, 1));
+    if (item) this.game.dropItem(this.x, this.y, this.z, new ItemStack(item, 1));
   }
   serialize(): any { return { ...super.serialize(), blockState: this.blockState }; }
   deserialize(d: any): void { super.deserialize(d); this.blockState = d.blockState ?? this.blockState; }
@@ -184,3 +183,39 @@ export class ThrownProjectile extends Entity {
 }
 
 export type { EntityDamage };
+
+/** vanilla EyeOfEnder: floats towards the nearest stronghold for 80 ticks, then drops (80%) or shatters. */
+export class EyeOfEnderEntity extends ThrownProjectile {
+  tx = 0; ty = 0; tz = 0; life = 0; surviveAfterDeath = true;
+  constructor(owner: Entity | null, stack: ItemStack | null = null) { super('ender_eye', owner, stack); this.noGravity = true; }
+  /** EyeOfEnder.signalTo */
+  signalTo(x: number, y: number, z: number): void {
+    const dx = x - this.x, dz = z - this.z, d = Math.sqrt(dx * dx + dz * dz);
+    if (d > 12) { this.tx = this.x + dx / d * 12; this.tz = this.z + dz / d * 12; this.ty = this.y + 8; }
+    else { this.tx = x; this.ty = y; this.tz = z; }
+    this.life = 0; this.surviveAfterDeath = Math.floor(Math.random() * 5) > 0;
+  }
+  tick(): void {
+    this.age++;
+    this.prevX = this.x; this.prevY = this.y; this.prevZ = this.z;
+    const g = this.game;
+    const nx = this.x + this.vx, ny = this.y + this.vy, nz = this.z + this.vz;
+    const horiz = Math.hypot(this.vx, this.vz);
+    const dx = this.tx - nx, dz = this.tz - nz;
+    const f = Math.sqrt(dx * dx + dz * dz), angle = Math.atan2(dz, dx);
+    let speed = horiz + (f - horiz) * 0.0025, vy = this.vy;
+    if (f < 1) { speed *= 0.8; vy *= 0.8; }
+    const j = this.y < this.ty ? 1 : -1;
+    this.vx = Math.cos(angle) * speed; this.vy = vy + (j - vy) * 0.015; this.vz = Math.sin(angle) * speed;
+    this.x = nx; this.y = ny; this.z = nz; this.updateBB();
+    this.yaw = Math.atan2(this.vx, this.vz) * 180 / Math.PI;
+    if (this.age % 2 === 0) g.particles.spawnPortal(this.x - this.vx * 0.25, this.y - this.vy * 0.25 - 0.5, this.z - this.vz * 0.25, 1);
+    if (this.remote) return;
+    if (++this.life > 80) {
+      g.sounds.playAt('entity.ender_eye.death', this.x, this.y, this.z, 1, 1);
+      this.remove();
+      if (this.surviveAfterDeath) { const it = g.items.get('ender_eye'); if (it) g.dropItem(this.x, this.y, this.z, new ItemStack(it, 1)); }
+      else g.particles.spawnItemBreak(this.x, this.y, this.z, 'ender_eye', 8);
+    }
+  }
+}

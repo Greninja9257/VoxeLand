@@ -3,6 +3,9 @@ import type { Assets } from '../assets';
 import { loadImage } from '../assets';
 import { BlockRegistry } from '../blocks/registry';
 import { ModelBaker } from '../render/models';
+import { villagerTypeFor } from '../entity/villagerTrades';
+import type { ListingContext } from '../entity/villagerTrades';
+import { pickEnchants, ENCH_POOL, maxLevel } from '../items/enchanting';
 import { Mesher } from '../render/mesher';
 import { Renderer } from '../render/renderer';
 import { computeSky, type SkyState } from '../render/sky';
@@ -288,7 +291,7 @@ export class Game {
       inst.chunks.viewDistance = this.options.renderDistance; this.renderer.viewDistance = this.options.renderDistance;
       inst.chunks.syncMesher = this.syncMesher; inst.chunks.chunkBuilder = this.options.chunkBuilder;
       this.syncMesher.options = { smoothLighting: this.options.smoothLighting, fancy: this.options.graphics !== 'fast' };
-      inst.chunks.onChunkLoaded = (c) => this.withDimension(inst, () => { this.blockEntities.loadChunk(c); if ((c as any).fresh) this.spawner.populateChunk(c); });
+      inst.chunks.onChunkLoaded = (c) => this.withDimension(inst, () => { this.blockEntities.loadChunk(c); if ((c as any).fresh) this.spawner.populateChunk(c); else if (c.spawns.length) this.spawner.spawnStructureEntities(c); });
       inst.chunks.onChunkUnloaded = (c) => this.withDimension(inst, () => { this.blockEntities.unloadChunk(c); this.unloadEntitiesIn(c); this.host?.onChunkUnloaded(c, dim); });
       if (this.client) inst.chunks.simulationDistance = 0;
       this.bind(inst);
@@ -598,9 +601,17 @@ export class Game {
     const m = name === 'ender_dragon' ? new EnderDragonEntity() : name === 'wither' ? new WitherEntity() : new Mob(def);
     m.setPos(x, y, z); m.yaw = Math.random() * 360; m.bodyYaw = m.yaw;
     if (baby) m.setBaby(true);
-    if (name === 'sheep' && Math.random() < 0.0 ) m.woolColor = 'pink';
+    if (name === 'villager' || name === 'zombie_villager') m.villagerType = villagerTypeFor(BIOMES[this.world.getBiome(Math.floor(x), Math.floor(z))]?.name ?? 'plains');
     this.addEntity(m);
     return m;
+  }
+  /** Enchantment rolls for villager trade listings. */
+  tradeContext(villagerType: string): ListingContext {
+    return {
+      villagerType,
+      enchant: (item, level) => { const it = this.items.get(item); return it ? pickEnchants(new ItemStack(it, 1), level) : []; },
+      bookEnchant: () => { const ids = ENCH_POOL.book; const id = ids[Math.floor(Math.random() * ids.length)]; return { id, level: 1 + Math.floor(Math.random() * maxLevel(id)) }; },
+    };
   }
   dropItem(x: number, y: number, z: number, stack: ItemStack, vel?: [number, number, number]): ItemEntity | null {
     if (stack.count <= 0 || !this.rules.doTileDrops && false) return null;
@@ -1099,7 +1110,7 @@ export class Game {
     this.sounds.muteLocal = true;
     try {
       this.withDimension(inst, () => {
-        const centers = this.host!.extraCenters(inst.dim);
+        const centers = this.host?.extraCenters(inst.dim) ?? [];
         this.chunks.extraCenters = centers.slice(1);
         if (centers.length) this.chunks.update(centers[0].x, centers[0].z, 0.05);
         this.simulateDimension();

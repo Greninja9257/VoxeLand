@@ -1,10 +1,12 @@
 // Container screens with vanilla slot interaction (click, shift-click, drag, number keys, drop).
 import { Screen, TextField } from './widgets';
+import { LEVEL_XP, type Trade } from '../../entity/villagerTrades';
 import { Inventory, ItemStack } from '../../items/stack';
 import type { BlockEntity } from '../blockEntities';
 import type { CraftingRecipe } from '../../items/recipes';
 import { potionColor } from '../blockEntities';
 import { RecipeBookPanel } from './recipeBook';
+import { pickEnchants, maxLevel } from '../../items/enchanting';
 
 export interface Slot {
   inv: Inventory; index: number; x: number; y: number;
@@ -37,9 +39,10 @@ export abstract class ContainerScreenBase extends Screen {
   get player() { return this.gui.game.player; }
 
   build(): void {
-    this.left = Math.floor((this.width - this.bgW) / 2); this.top = Math.floor((this.height - this.bgH) / 2);
     this.slots = [];
     this.buildSlots();
+    // centred after buildSlots(): screens pick their texture and size there (hoppers, chests, the trading window…)
+    this.left = Math.floor((this.width - this.bgW) / 2); this.top = Math.floor((this.height - this.bgH) / 2);
     if (this.book) { this.book.layout(); this.book.refresh(); }
   }
   abstract buildSlots(): void;
@@ -378,6 +381,7 @@ export class CreativeScreen extends ContainerScreenBase {
   static lastTab = 0;
   buildSlots(): void {
     this.texture = 'gui/container/creative_inventory/tab_items'; this.bgW = 195; this.bgH = 136;
+    this.left = Math.floor((this.width - this.bgW) / 2); this.top = Math.floor((this.height - this.bgH) / 2);
     this.tab = CreativeScreen.lastTab;
     this.search = new TextField(this.left + 82, this.top + 6, 80, 9, ''); // vanilla EditBox(82, 6, 80, 9), unbordered
     this.search.bordered = false; // the tab texture already draws the field
@@ -580,10 +584,8 @@ export class AnvilScreen extends ContainerScreenBase {
   }
   onClose(): void { super.onClose(); for (let i = 0; i < 2; i++) { const s = this.inputs.get(i); if (s && this.player.inventory.add(s) > 0) this.player.throwItem(s); } }
 }
-function maxLevel(id: string): number { return { sharpness: 5, smite: 5, bane_of_arthropods: 5, efficiency: 5, power: 5, protection: 4, fire_protection: 4, blast_protection: 4, projectile_protection: 4, unbreaking: 3, fortune: 3, looting: 3, respiration: 3, depth_strider: 3, thorns: 3, knockback: 2, fire_aspect: 2, punch: 2, sweeping_edge: 3, feather_falling: 4, aqua_affinity: 1, silk_touch: 1, infinity: 1, mending: 1, flame: 1, loyalty: 3, riptide: 3, impaling: 5, channeling: 1, quick_charge: 3, multishot: 1, piercing: 4, soul_speed: 3, swift_sneak: 3, lure: 3, luck_of_the_sea: 3, frost_walker: 2, wind_burst: 3, density: 5, breach: 4 }[id] ?? 1; }
 
 // ---------- enchanting ----------
-const ENCH_POOL: Record<string, string[]> = { mining: ['efficiency', 'unbreaking', 'fortune', 'silk_touch', 'mending'], weapon: ['sharpness', 'smite', 'bane_of_arthropods', 'knockback', 'fire_aspect', 'looting', 'sweeping_edge', 'unbreaking', 'mending'], armor: ['protection', 'fire_protection', 'blast_protection', 'projectile_protection', 'thorns', 'unbreaking', 'mending'], armor_feet: ['feather_falling', 'depth_strider', 'frost_walker', 'soul_speed'], armor_head: ['respiration', 'aqua_affinity'], bow: ['power', 'punch', 'flame', 'infinity', 'unbreaking', 'mending'], crossbow: ['quick_charge', 'multishot', 'piercing', 'unbreaking', 'mending'], trident: ['loyalty', 'impaling', 'riptide', 'channeling', 'unbreaking', 'mending'], fishing: ['lure', 'luck_of_the_sea', 'unbreaking', 'mending'], durability: ['unbreaking', 'mending'], book: ['sharpness', 'efficiency', 'protection', 'unbreaking', 'fortune', 'power', 'looting', 'silk_touch', 'mending', 'feather_falling', 'thorns', 'respiration', 'depth_strider', 'infinity', 'fire_aspect', 'knockback'] };
 
 export class EnchantingScreen extends ContainerScreenBase {
   item = new Inventory(2);
@@ -616,26 +618,7 @@ export class EnchantingScreen extends ContainerScreenBase {
       this.options.push({ level, ench: level > 0 ? this.pickEnchants(s, level) : [], seed: Math.random() });
     }
   }
-  private pickEnchants(s: ItemStack, level: number): { id: string; level: number }[] {
-    const cats = s.item.name === 'book' ? ['book'] : s.item.enchantCategories.concat(s.item.armorSlot === 'feet' ? ['armor_feet'] : [], s.item.armorSlot === 'head' ? ['armor_head'] : []);
-    const pool = new Set<string>();
-    for (const c of cats) for (const e of ENCH_POOL[c] ?? []) pool.add(e);
-    const list = [...pool];
-    if (!list.length) return [];
-    const out: { id: string; level: number }[] = [];
-    let l = level;
-    const conflicts: Record<string, string[]> = { sharpness: ['smite', 'bane_of_arthropods'], smite: ['sharpness', 'bane_of_arthropods'], bane_of_arthropods: ['sharpness', 'smite'], protection: ['fire_protection', 'blast_protection', 'projectile_protection'], fire_protection: ['protection', 'blast_protection', 'projectile_protection'], blast_protection: ['protection', 'fire_protection', 'projectile_protection'], projectile_protection: ['protection', 'fire_protection', 'blast_protection'], fortune: ['silk_touch'], silk_touch: ['fortune'], infinity: ['mending'], mending: ['infinity'], depth_strider: ['frost_walker'], frost_walker: ['depth_strider'], riptide: ['loyalty', 'channeling'], loyalty: ['riptide'], channeling: ['riptide'], multishot: ['piercing'], piercing: ['multishot'] };
-    while (list.length && (out.length === 0 || Math.random() < (l + 1) / 50)) {
-      const id = list[Math.floor(Math.random() * list.length)];
-      if (out.some((o) => o.id === id || conflicts[o.id]?.includes(id))) { list.splice(list.indexOf(id), 1); continue; }
-      const max = maxLevel(id);
-      const lvl = Math.max(1, Math.min(max, Math.round(l / (50 / max))));
-      out.push({ id, level: lvl });
-      list.splice(list.indexOf(id), 1);
-      l = Math.floor(l / 2);
-    }
-    return out;
-  }
+  private pickEnchants(s: ItemStack, level: number): { id: string; level: number }[] { return pickEnchants(s, level); }
   mouseDown(x: number, y: number, b: number): boolean {
     const lx = x - this.left, ly = y - this.top;
     for (let i = 0; i < 3; i++) {
@@ -745,60 +728,120 @@ export class BrewingScreen extends ContainerScreenBase {
 }
 
 // ---------- trading ----------
+/** What the trading screen needs from a merchant: the host's Mob, or a guest-side proxy fed by the host. */
+export interface Merchant { id: number; type: string; profession: string; villagerLevel: number; villagerXp: number; trades: Trade[] | null; remote?: boolean; ensureTrades(): Trade[]; onTraded(t: Trade): void }
+
+/** vanilla MerchantScreen */
 export class TradingScreen extends ContainerScreenBase {
+  // set as fields: build() centres the window from bgW/bgH before buildSlots() runs
+  texture = 'gui/container/villager'; bgW = 276; bgH = 166;
   inputs = new Inventory(2); output = new Inventory(1);
-  trades: { a: string; ac: number; b?: string; bc?: number; r: string; rc: number }[] = [];
-  selected = -1;
-  constructor(public mob: any) { super(); }
+  trades: Trade[] = [];
+  selected = -1; scroll = 0; private scrollDrag = false;
+  constructor(public mob: Merchant) { super(); }
   buildSlots(): void {
-    this.texture = 'gui/container/villager'; this.bgW = 276; this.bgH = 166;
-    this.title = this.gui.game.assets.lang['entity.minecraft.villager'] ?? 'Villager';
-    if (!this.mob.trades) this.mob.trades = this.generateTrades();
-    this.trades = this.mob.trades;
+    const lang = this.gui.game.assets.lang;
+    this.title = this.mob.type === 'wandering_trader' ? lang['entity.minecraft.wandering_trader'] ?? 'Wandering Trader' : lang['entity.minecraft.villager.' + this.mob.profession] ?? lang['entity.minecraft.villager'] ?? 'Villager';
+    this.trades = this.mob.ensureTrades();
     this.slots.push({ inv: this.inputs, index: 0, x: 136, y: 37 }, { inv: this.inputs, index: 1, x: 162, y: 37 });
-    this.slots.push({ inv: this.output, index: 0, x: 220, y: 37, output: true, onTake: () => { const t = this.trades[this.selected]; if (!t) return; this.inputs.remove(t.a, t.ac); if (t.b) this.inputs.remove(t.b, t.bc!); this.gui.game.sounds.play('entity.villager.yes', 1, 1); this.gui.game.player.addXp(3); this.update(); } });
+    this.slots.push({ inv: this.output, index: 0, x: 220, y: 37, output: true, onTake: () => this.completeTrade() });
     this.inputs.onChange = () => this.update();
-    this.addPlayerSlots(84 + 0);
+    this.addPlayerSlots(84);
     for (const s of this.slots) if (s.inv === this.player.inventory) s.x += 100;
   }
-  private generateTrades() {
-    const pools = [
-      { a: 'wheat', ac: 20, r: 'emerald', rc: 1 }, { a: 'emerald', ac: 1, r: 'bread', rc: 6 }, { a: 'potato', ac: 26, r: 'emerald', rc: 1 }, { a: 'emerald', ac: 3, r: 'apple', rc: 4 },
-      { a: 'emerald', ac: 1, r: 'arrow', rc: 16 }, { a: 'stick', ac: 32, r: 'emerald', rc: 1 }, { a: 'emerald', ac: 2, r: 'bow', rc: 1 }, { a: 'paper', ac: 24, r: 'emerald', rc: 1 },
-      { a: 'emerald', ac: 5, r: 'iron_pickaxe', rc: 1 }, { a: 'coal', ac: 15, r: 'emerald', rc: 1 }, { a: 'emerald', ac: 4, r: 'iron_helmet', rc: 1 }, { a: 'emerald', ac: 7, r: 'iron_chestplate', rc: 1 }, { a: 'emerald', ac: 1, r: 'cooked_beef', rc: 5 }, { a: 'string', ac: 20, r: 'emerald', rc: 1 }, { a: 'emerald', ac: 6, r: 'enchanted_book', rc: 1 },
-    ];
-    const n = 3 + Math.floor(Math.random() * 4);
-    const out = [] as typeof pools;
-    while (out.length < n) { const t = pools[Math.floor(Math.random() * pools.length)]; if (!out.includes(t)) out.push(t); }
-    return out;
+  private get showProgress(): boolean { return this.mob.type === 'villager'; }
+  private completeTrade(): void {
+    const t = this.trades[this.selected];
+    if (!t) return;
+    const g = this.gui.game;
+    if (this.mob.remote) { g.client?.send({ t: 'trade', id: this.mob.id, i: this.selected }); this.output.slots[0] = null; return; }
+    this.inputs.remove(t.a, t.ac); if (t.b) this.inputs.remove(t.b, t.bc!);
+    this.mob.onTraded(t);
+    g.sounds.play('entity.villager.yes', 1, 1);
+    // vanilla Villager.rewardTradeXp: an orb of 3–6 xp
+    g.spawnXp(this.player.x, this.player.y + 0.5, this.player.z, 3 + Math.floor(Math.random() * 4));
+    this.update();
+  }
+  /** result stack for a trade (enchanted gear, dyed leather, enchanted books) */
+  resultStack(t: Trade): ItemStack | null {
+    const r = this.gui.game.items.get(t.r);
+    if (!r) return null;
+    return new ItemStack(r, t.rc, 0, t.ench ? t.ench.map((e) => ({ ...e })) : [], null, t.extra ? { ...t.extra } : {});
   }
   update(): void {
     const t = this.trades[this.selected];
-    if (!t) { this.output.slots[0] = null; return; }
+    if (!t || t.uses >= t.maxUses) { this.output.slots[0] = null; return; }
     const ok = this.inputs.count(t.a) >= t.ac && (!t.b || this.inputs.count(t.b) >= t.bc!);
-    const r = this.gui.game.items.get(t.r);
-    this.output.slots[0] = ok && r ? new ItemStack(r, t.rc, 0, t.r === 'enchanted_book' ? [] : [], null, t.r === 'enchanted_book' ? { enchantments: [{ id: 'unbreaking', level: 2 }] } : {}) : null;
+    this.output.slots[0] = ok ? this.resultStack(t) : null;
   }
+  /** vanilla MerchantMenu.tryMoveItems: clicking an offer moves its costs from the inventory into the cost slots */
+  private select(i: number): void {
+    this.selected = i;
+    const t = this.trades[i];
+    const inv = this.player.inventory;
+    for (let k = 0; k < 2; k++) { const s = this.inputs.get(k); if (s) { inv.add(s); if (s.count > 0 && !this.mob.remote) this.player.throwItem(s); this.inputs.slots[k] = null; } }
+    if (t && !this.mob.remote) {
+      const pull = (name: string, count: number, slot: number) => { const item = this.gui.game.items.get(name); if (!item) return; let need = Math.min(count, item.stackSize); const got = inv.remove(name, need); if (got > 0) this.inputs.slots[slot] = new ItemStack(item, got); };
+      pull(t.a, t.ac, 0); if (t.b) pull(t.b, t.bc!, 1);
+      inv.onChange?.();
+    }
+    this.update();
+  }
+  private get maxScroll(): number { return Math.max(0, this.trades.length - 7); }
   mouseDown(x: number, y: number, b: number): boolean {
     const lx = x - this.left, ly = y - this.top;
-    if (lx >= 5 && lx < 93 && ly >= 18) { const i = Math.floor((ly - 18) / 20); if (this.trades[i]) { this.selected = i; this.update(); return true; } }
+    if (this.maxScroll > 0 && lx >= 94 && lx < 100 && ly >= 18 && ly < 158) { this.scrollDrag = true; this.scrollTo(ly); return true; }
+    if (lx >= 5 && lx < 93 && ly >= 18 && ly < 158) { const i = Math.floor((ly - 18) / 20) + this.scroll; if (this.trades[i]) { this.select(i); return true; } }
     return super.mouseDown(x, y, b);
   }
+  mouseUp(x: number, y: number, b: number): void { this.scrollDrag = false; super.mouseUp(x, y, b); }
+  mouseMove(x: number, y: number): void { if (this.scrollDrag) this.scrollTo(y - this.top); super.mouseMove(x, y); }
+  private scrollTo(ly: number): void { this.scroll = Math.round(Math.max(0, Math.min(1, (ly - 18 - 13.5) / (139 - 27))) * this.maxScroll); }
+  wheel(dy: number): void { if (this.maxScroll > 0) this.scroll = Math.max(0, Math.min(this.maxScroll, this.scroll + (dy > 0 ? 1 : -1))); }
   drawForeground(ctx: CanvasRenderingContext2D, mx: number, my: number): void {
-    this.gui.font.draw(ctx, this.title, 100, 6, 0x404040, false);
-    this.gui.font.draw(ctx, this.gui.game.assets.lang['container.inventory'] ?? 'Inventory', 108, 72, 0x404040, false);
-    this.gui.font.draw(ctx, this.gui.game.assets.lang['merchant.trades'] ?? 'Trades', 5, 6, 0x404040, false);
-    const g = this.gui.game;
-    this.trades.forEach((t, i) => {
-      const y = 18 + i * 20;
+    const g = this.gui.game, lang = g.assets.lang, font = this.gui.font;
+    const lvl = this.mob.villagerLevel;
+    const title = this.showProgress && lvl >= 1 && lvl <= 5 ? (lang['merchant.title'] ?? '%s - %s').replace('%s', this.title).replace('%s', lang['merchant.level.' + lvl] ?? '') : this.title;
+    font.draw(ctx, title, 49 + this.bgW / 2 - font.width(title) / 2, 6, 0x404040, false);
+    font.draw(ctx, lang['container.inventory'] ?? 'Inventory', 107, 72, 0x404040, false);
+    const tl = lang['merchant.trades'] ?? 'Trades';
+    font.draw(ctx, tl, 5 - font.width(tl) / 2 + 48, 6, 0x404040, false);
+    // experience bar (vanilla renderProgressBar)
+    if (this.showProgress && lvl < 5) {
+      this.gui.drawSprite(ctx, 'gui/sprites/container/villager/experience_bar_background', 136, 16, 102, 5);
+      const k = LEVEL_XP[lvl - 1], next = LEVEL_XP[lvl], xp = this.mob.villagerXp;
+      if (xp >= k) {
+        const f = 102 / (next - k); const cur = Math.min(Math.floor(f * (xp - k)), 102);
+        if (cur > 0) this.gui.drawSprite(ctx, 'gui/sprites/container/villager/experience_bar_current', 136, 16, cur, 5, 0, 0, cur, 5);
+        const t = this.trades[this.selected];
+        if (t && t.uses < t.maxUses && this.output.get(0)) { const add = Math.min(Math.floor(t.xp * f), 102 - cur); if (add > 0) this.gui.drawSprite(ctx, 'gui/sprites/container/villager/experience_bar_result', 136 + cur, 16, add, 5, cur, 0, add, 5); }
+      }
+    }
+    // scroller
+    if (this.maxScroll > 0) { const sy = 18 + Math.round((139 - 27) * this.scroll / this.maxScroll); this.gui.drawSprite(ctx, 'gui/sprites/container/villager/scroller', 94, sy, 6, 27); }
+    else this.gui.drawSprite(ctx, 'gui/sprites/container/villager/scroller_disabled', 94, 18, 6, 27);
+    // offers (vanilla TradeOfferButton rows: 88×20 at x 5, from y 18)
+    for (let row = 0; row < 7; row++) {
+      const i = row + this.scroll, t = this.trades[i];
+      if (!t) break;
+      const y = 18 + row * 20;
+      const out = t.uses >= t.maxUses;
       if (i === this.selected) { ctx.fillStyle = 'rgba(255,255,255,0.3)'; ctx.fillRect(5, y, 88, 20); }
-      this.gui.drawItem(ctx, new ItemStack(g.items.get(t.a)!, t.ac), 7, y + 1);
-      if (t.b) this.gui.drawItem(ctx, new ItemStack(g.items.get(t.b)!, t.bc), 25, y + 1);
-      this.gui.drawSprite(ctx, 'gui/sprites/container/villager/trade_arrow', 45, y + 5, 10, 9);
-      this.gui.drawItem(ctx, new ItemStack(g.items.get(t.r)!, t.rc), 65, y + 1);
+      const costA = new ItemStack(g.items.get(t.a)!, t.ac);
+      this.gui.drawItem(ctx, costA, 10, y + 2);
+      if (t.b) this.gui.drawItem(ctx, new ItemStack(g.items.get(t.b)!, t.bc), 35, y + 2);
+      this.gui.drawSprite(ctx, out ? 'gui/sprites/container/villager/trade_arrow_out_of_stock' : 'gui/sprites/container/villager/trade_arrow', 60, y + 5, 10, 9);
+      const res = this.resultStack(t);
+      if (res) this.gui.drawItem(ctx, res, 73, y + 2);
+      if (out) { ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(5, y, 88, 20); }
       const hov = mx >= 5 && mx < 93 && my >= y && my < y + 20;
-      if (hov && !this.carried) this.gui.queueTooltip([`${t.ac} ${g.items.displayName(t.a)}${t.b ? ' + ' + t.bc + ' ' + g.items.displayName(t.b) : ''} → ${t.rc} ${g.items.displayName(t.r)}`], mx + this.left, my + this.top);
-    });
+      if (hov && !this.carried) {
+        const lines = out ? [lang['merchant.deprecated'] ?? 'Villagers restock up to two times per day.'] : mx < 30 ? [`${t.ac} ${g.items.displayName(t.a)}`] : t.b && mx < 55 ? [`${t.bc} ${g.items.displayName(t.b)}`] : res ? this.gui.itemTooltipLines(res) : [];
+        if (lines.length) this.gui.queueTooltip(lines, mx + this.left, my + this.top);
+      }
+    }
   }
-  onClose(): void { super.onClose(); for (let i = 0; i < 2; i++) { const s = this.inputs.get(i); if (s && this.player.inventory.add(s) > 0) this.player.throwItem(s); } }
+  /** host pushed fresh offers (guest) */
+  refresh(trades: Trade[], level: number, xp: number): void { this.mob.trades = trades; this.trades = trades; this.mob.villagerLevel = level; this.mob.villagerXp = xp; this.update(); }
+  onClose(): void { super.onClose(); for (let i = 0; i < 2; i++) { const s = this.inputs.get(i); if (s && this.player.inventory.add(s) > 0) this.player.throwItem(s); } if (this.mob.remote) this.gui.game.client?.send({ t: 'close' }); }
 }

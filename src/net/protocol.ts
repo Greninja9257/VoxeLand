@@ -21,7 +21,7 @@ export function serializedStackIdentity(stack: Record<string, any>): { key: stri
   return { key: JSON.stringify(identity), count };
 }
 
-const GUEST_MESSAGE_TYPES = new Set(['ready', 'move', 'inv', 'invTxn', 'contTxn', 'chunk', 'set', 'break', 'use', 'attack', 'snd', 'interact', 'throw', 'release', 'chat', 'cont', 'craft', 'close', 'respawn', 'sleep', 'xp', 'spawn', 'boatInput', 'dismount', 'ping', 'dimready']);
+const GUEST_MESSAGE_TYPES = new Set(['ready', 'move', 'inv', 'invTxn', 'contTxn', 'chunk', 'set', 'break', 'use', 'attack', 'snd', 'interact', 'throw', 'release', 'chat', 'cont', 'craft', 'close', 'respawn', 'sleep', 'xp', 'spawn', 'boatInput', 'dismount', 'ping', 'dimready', 'trade', 'chunkAck']);
 
 /** Cheap boundary validation before an untrusted guest message reaches world logic. */
 export function isGuestMessage(m: unknown): m is Record<string, any> {

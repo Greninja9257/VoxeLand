@@ -5,7 +5,9 @@ import { EndCrystalEntity } from '../entity/boss';
 import { BIOMES } from '../world/gen/biomes';
 import type { Chunk } from '../world/chunk';
 import { SEA_LEVEL } from '../world/chunk';
+import { FORTRESS_MOBS } from '../world/gen/fortress';
 
+export const CAT_VARIANTS = ['tabby', 'black', 'red', 'siamese', 'british_shorthair', 'calico', 'persian', 'ragdoll', 'white', 'jellie', 'all_black'];
 const CAPS = { hostile: 70, passive: 10, water: 5, ambient: 15 };
 
 export class Spawner {
@@ -56,7 +58,9 @@ export class Spawner {
     else if (kind === 'passive') y = h;
     else y = -60 + Math.floor(Math.random() * (h + 61));
     const biome = BIOMES[c.biomes[(lz << 4) | lx]];
-    const list = kind === 'hostile' ? biome.hostile : kind === 'ambient' ? (world.dimension === 'overworld' ? ['bat'] : []) : kind === 'water' ? biome.passive.filter((m) => MOB_DEFS[m]?.category === 'water' || MOB_DEFS[m]?.ai.water) : biome.passive.filter((m) => MOB_DEFS[m] && !MOB_DEFS[m].ai.water && MOB_DEFS[m].category !== 'water');
+    // vanilla structure spawn overrides: inside a fortress piece the biome's monsters are replaced by the fortress list
+    const fortress = kind === 'hostile' && c.structures.some((s) => s.type === 'fortress' && (s.pieces ?? []).some((b) => x >= b[0] && x <= b[3] && y >= b[1] && y <= b[4] && z >= b[2] && z <= b[5]));
+    const list = fortress ? FORTRESS_MOBS.flatMap(([m, w]) => Array(w).fill(m) as string[]) : kind === 'hostile' ? biome.hostile : kind === 'ambient' ? (world.dimension === 'overworld' ? ['bat'] : []) : kind === 'water' ? biome.passive.filter((m) => MOB_DEFS[m]?.category === 'water' || MOB_DEFS[m]?.ai.water) : biome.passive.filter((m) => MOB_DEFS[m] && !MOB_DEFS[m].ai.water && MOB_DEFS[m].category !== 'water');
     if (!list.length) return;
     const name = list[Math.floor(Math.random() * list.length)];
     const def = MOB_DEFS[name];
@@ -111,6 +115,22 @@ export class Spawner {
     return ((h ^ (h >>> 16)) >>> 0) % 10 === 0;
   }
 
+  /** Entities embedded in generated structures (village villagers, animals, golems, cats) — spawned once. */
+  spawnStructureEntities(c: Chunk): void {
+    const g = this.game;
+    const DYES = ['white', 'orange', 'magenta', 'light_blue', 'yellow', 'lime', 'pink', 'gray', 'light_gray', 'cyan', 'purple', 'blue', 'brown', 'green', 'red', 'black'];
+    for (const e of c.spawns) {
+      const ex = e.extra ?? {};
+      const m = g.spawnMob(e.type, e.x, e.y, e.z, !!ex.baby);
+      if (!m) continue;
+      if (ex.profession !== undefined) m.setVillagerData(ex.profession, ex.villagerType ?? 'plains', ex.level ?? 1);
+      if (ex.color !== undefined && m.def.ai.sheep) m.woolColor = DYES[ex.color] ?? 'white';
+      if (ex.variant !== undefined && e.type === 'cat') m.variant = Math.max(0, CAT_VARIANTS.indexOf(String(ex.variant)));
+      if (ex.persistent) m.persistent = true;
+    }
+    c.spawns = []; c.modified = true;
+  }
+
   /** Animals spawned when a chunk is first generated. */
   /** End crystals sit on the obsidian pillars (positions mirror EndGen) until the dragon is slain. */
   private populateEndCrystals(c: Chunk): void {
@@ -128,6 +148,7 @@ export class Spawner {
   populateChunk(c: Chunk): void {
     const g = this.game;
     if (g.world.dimension === 'the_end' && g.dragonKills === 0) this.populateEndCrystals(c);
+    if (c.spawns.length) this.spawnStructureEntities(c);
     if (g.world.dimension !== 'overworld') { if (g.world.dimension === 'the_nether' && Math.random() < 0.15) { const b = BIOMES[c.biomes[0]]; const list = b.hostile.concat(b.passive); if (list.length) { const name = list[Math.floor(Math.random() * list.length)]; for (let i = 0; i < 2; i++) { const x = c.cx * 16 + Math.random() * 16, z = c.cz * 16 + Math.random() * 16; let y = 100; while (y > 32 && g.world.getBlock(Math.floor(x), y - 1, Math.floor(z)) === 0) y--; if (MOB_DEFS[name] && this.canSpawnAt(MOB_DEFS[name], x, y, z, 'hostile')) g.spawnMob(name, x, y, z); } } } return; }
     if (Math.random() > 0.1) return;
     const biome = BIOMES[c.biomes[136]];

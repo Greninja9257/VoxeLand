@@ -6,6 +6,10 @@ import { biomeId } from './biomes';
 import { FBM, Perlin, hashSeed } from './noise';
 import { FeatureStates, TreeGen, placeOreBlob, type BlockSink } from './features';
 import type { Generator } from './overworld';
+import { StructureManager, type StructureGenContext } from './structures';
+import { FORTRESS } from './fortress';
+import type { StructureBundle } from './jigsaw';
+import { BIOMES } from './biomes';
 
 const NETHER_TOP = 128;
 const LAVA_SEA = 31;
@@ -14,12 +18,36 @@ export class NetherGen implements Generator {
   private density: FBM; private biomeA: Perlin; private biomeB: Perlin; private detail: Perlin;
   private st: FeatureStates; private trees: TreeGen;
   private S: Record<string, number> = {};
-  constructor(public seed: number, public reg: BlockRegistry) {
+  structures: StructureManager;
+  private probeCache = new Map<number, Uint8Array>();
+  constructor(public seed: number, public reg: BlockRegistry, bundle: StructureBundle | null = null) {
     this.density = new FBM(seed + 501, 3, 2, 0.5);
     this.biomeA = new Perlin(seed + 502); this.biomeB = new Perlin(seed + 503); this.detail = new Perlin(seed + 504);
     this.st = new FeatureStates(reg); this.trees = new TreeGen(reg, this.st);
+    const sctx: StructureGenContext = { seed, reg, st: this.st, trees: this.trees, dimension: 'the_nether', bundle, probe: (x, y, z) => this.probeBlock(x, y, z), surfaceY: (x, z) => { let y = NETHER_TOP - 1; while (y > 0 && this.probeBlock(x, y - 1, z) === 0) y--; return y; }, biomeAt: (x, z) => BIOMES[this.biomeAt(x, z)] };
+    this.structures = new StructureManager(sctx, [FORTRESS]);
     for (const n of ['netherrack', 'lava', 'bedrock', 'soul_sand', 'soul_soil', 'crimson_nylium', 'warped_nylium', 'basalt', 'blackstone', 'glowstone', 'nether_quartz_ore', 'nether_gold_ore', 'ancient_debris', 'magma_block', 'gravel', 'crimson_roots', 'warped_roots', 'nether_sprouts', 'crimson_fungus', 'warped_fungus', 'nether_wart', 'fire', 'soul_fire', 'bone_block', 'shroomlight', 'weeping_vines', 'weeping_vines_plant', 'twisting_vines', 'twisting_vines_plant', 'brown_mushroom', 'red_mushroom']) this.S[n] = reg.defaultState(n);
   }
+
+  /** density-only terrain column (netherrack / air / lava) for structure supports and /locate */
+  probeBlock(x: number, y: number, z: number): number {
+    if (y < 0 || y >= NETHER_TOP) return 0;
+    const key = ((x + 0x800000) * 0x1000000) + (z + 0x800000);
+    let col = this.probeCache.get(key);
+    if (!col) {
+      col = new Uint8Array(NETHER_TOP);
+      for (let yy = 0; yy < NETHER_TOP; yy++) {
+        const n = this.density.noise3(x / 60, yy / 40, z / 60, 1) + this.detail.noise3(x / 14, yy / 14, z / 14) * 0.25;
+        const edge = yy < 20 ? (20 - yy) / 20 : yy > 108 ? (yy - 108) / 20 : 0;
+        col[yy] = n + edge * 0.8 > 0.05 || yy <= 4 || yy >= NETHER_TOP - 5 ? 1 : yy <= LAVA_SEA ? 2 : 0;
+      }
+      if (this.probeCache.size > 4096) this.probeCache.clear();
+      this.probeCache.set(key, col);
+    }
+    const v = col[y];
+    return v === 1 ? this.S.netherrack : v === 2 ? this.S.lava : 0;
+  }
+  locate(type: string, x: number, z: number): [number, number] | null { return this.structures.locate(type, x, z); }
 
   private biomeAt(x: number, z: number): number {
     const a = this.biomeA.noise2(x / 220, z / 220), b = this.biomeB.noise2(x / 220 + 77, z / 220 - 33);
@@ -61,6 +89,7 @@ export class NetherGen implements Generator {
       }
     }
     const sink = new NetherSink(chunk);
+    chunk.structures = this.structures.apply(chunk, sink);
     // ores
     const target = (s: number): 0 | 1 | 2 => (s === S.netherrack ? 1 : 0);
     for (let i = 0; i < 16; i++) placeOreBlob(sink, rnd, x0 + rnd.nextInt(16), 10 + rnd.nextInt(108), z0 + rnd.nextInt(16), 14, S.nether_quartz_ore, S.nether_quartz_ore, target);

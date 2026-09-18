@@ -34,6 +34,10 @@ export class Chunk {
   /** Set once all 8 neighbors were generated and this chunk was decorated with cross-chunk features. */
   decorated = false;
   inhabitedTime = 0;
+  /** entities the generator asks to be spawned when the chunk is first loaded (village villagers, animals…) */
+  spawns: { type: string; x: number; y: number; z: number; extra?: Record<string, any> }[] = [];
+  /** generated structures whose bounds touch this chunk (fortress mob spawns, /locate) */
+  structures: { type: string; box: [number, number, number, number, number, number]; pieces?: [number, number, number, number, number, number][] }[] = [];
 
   constructor(public cx: number, public cz: number) {}
 
@@ -100,7 +104,7 @@ export class Chunk {
   /** Serialize to compact transferable form. */
   serialize(): ChunkData {
     const sec: (Uint16Array | null)[] = this.sections.map((s) => (s && s.some((v) => v !== 0) ? s : null));
-    return { cx: this.cx, cz: this.cz, sections: sec, light: this.light, heightmap: this.heightmap, skyHeight: this.skyHeight, biomes: this.biomes, blockEntities: [...this.blockEntities.values()], decorated: this.decorated, inhabitedTime: this.inhabitedTime };
+    return { cx: this.cx, cz: this.cz, sections: sec, light: this.light, heightmap: this.heightmap, skyHeight: this.skyHeight, biomes: this.biomes, blockEntities: [...this.blockEntities.values()], decorated: this.decorated, inhabitedTime: this.inhabitedTime, spawns: this.spawns.length ? this.spawns : undefined, structures: this.structures.length ? this.structures : undefined };
   }
 
   static deserialize(d: ChunkData): Chunk {
@@ -113,6 +117,8 @@ export class Chunk {
     for (const be of d.blockEntities ?? []) c.blockEntities.set(Chunk.localBEKey(be.x & 15, be.y, be.z & 15), be);
     c.decorated = d.decorated ?? true;
     c.inhabitedTime = d.inhabitedTime ?? 0;
+    c.spawns = d.spawns ?? [];
+    c.structures = d.structures ?? [];
     c.stage = ChunkStage.GENERATED;
     return c;
   }
@@ -128,4 +134,6 @@ export interface ChunkData {
   blockEntities?: BlockEntity[];
   decorated?: boolean;
   inhabitedTime?: number;
+  spawns?: { type: string; x: number; y: number; z: number; extra?: Record<string, any> }[];
+  structures?: { type: string; box: [number, number, number, number, number, number]; pieces?: [number, number, number, number, number, number][] }[];
 }

@@ -11,7 +11,7 @@ self.onmessage = (e: MessageEvent) => {
     reg = new BlockRegistry(m.mcdata);
     world = new World(reg, m.dimension as Dimension);
     world.isolated = true;
-    gen = createGenerator(m.dimension, m.seed, reg);
+    gen = createGenerator(m.dimension, m.seed, reg, m.structures ?? null);
     (self as any).postMessage({ type: 'ready' });
   } else if (m.type === 'gen') {
     const t0 = performance.now();
@@ -26,6 +26,8 @@ self.onmessage = (e: MessageEvent) => {
     transfer.push(data.heightmap.buffer as ArrayBuffer, data.biomes.buffer as ArrayBuffer);
     if (data.skyHeight) transfer.push(data.skyHeight.buffer as ArrayBuffer);
     (self as any).postMessage({ type: 'chunk', id: m.id, data, time: performance.now() - t0 }, transfer);
+  } else if (m.type === 'locate') {
+    (self as any).postMessage({ type: 'locate', id: m.id, pos: gen.locate?.(m.structure, m.x, m.z) ?? null });
   } else if (m.type === 'spawn') {
     // find a decent spawn near the origin: land above sea level
     let best: [number, number, number] | null = null;

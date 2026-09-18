@@ -8,6 +8,7 @@ import { BoatEntity } from '../entity/boat';
 import { EndCrystalEntity, EnderDragonEntity, WitherEntity } from '../entity/boss';
 import { Mob } from '../entity/mobs';
 import { FallingBlockEntity, PrimedTnt, ArrowEntity, ThrownProjectile } from '../entity/misc';
+import { CAT_VARIANTS } from '../game/spawning';
 import { Player } from '../entity/player';
 import type { ItemRenderer } from './itemRenderer';
 import type { Game } from '../game/game';
@@ -45,6 +46,9 @@ export class EntityRenderer {
     }).catch(() => {});
     return this.white;
   }
+
+  /** The texture only once it has loaded (overlays must not flash the white placeholder). */
+  private loadedTexture(path: string): WebGLTexture | null { const t = this.texture(path); return t === this.white ? null : t; }
 
   private model(name: string): ModelGpu {
     let m = this.models.get(name);
@@ -174,13 +178,13 @@ export class EntityRenderer {
     return out;
   }
 
-  private drawParts(m: ModelGpu, base: Mat4, pose: Record<string, { rx?: number; ry?: number; rz?: number; tx?: number; ty?: number; tz?: number; scale?: number; hidden?: boolean }>, gl: WebGL2RenderingContext): void {
+  private drawParts(m: ModelGpu, base: Mat4, pose: Record<string, { rx?: number; ry?: number; rz?: number; tx?: number; ty?: number; tz?: number; scale?: number; hidden?: boolean }>, gl: WebGL2RenderingContext, skipPart?: string): void {
     const p = this.renderer.entityProg;
     gl.bindVertexArray(m.vao);
     const stack: Float32Array[] = [];
     const draw = (part: PartGpu, parent: Mat4) => {
       const po = pose[part.def.name] ?? {};
-      if (po.hidden || part.def.visible === false) return;
+      if (po.hidden || part.def.visible === false || part.def.name === skipPart) return;
       const mm = stack.pop() ?? new Float32Array(16);
       mm.set(parent);
       const pv = part.def.pivot;
@@ -209,6 +213,8 @@ export class EntityRenderer {
     // vanilla rabbit variants (the "Toast" skin is the rare named one)
     if (e.type === 'rabbit') tex = 'entity/rabbit/rabbit_' + (['brown', 'white', 'black', 'white_splotched', 'gold', 'salt'][e.variant % 6] ?? 'brown');
     if (e.isBaby && (e.type === 'zombie' || e.type === 'husk' || e.type === 'drowned' || e.type === 'rabbit')) tex = tex + '_baby';
+    if (e.isBaby && (e.isVillager || e.isZombieVillager)) tex = tex + '_baby';
+    if (e.type === 'cat') tex = 'entity/cat/' + (CAT_VARIANTS[e.variant] ?? 'tabby');
     // 26.1 baby rabbits are a separate full-size model on their own texture rather than a scaled-down adult
     if (e.type === 'rabbit' && e.isBaby) modelName = 'rabbit_baby';
     const m = this.model(modelName);
@@ -251,6 +257,7 @@ export class EntityRenderer {
     }
     if (e.type === 'drowned') { this.beginEntityProgram(sky, this.texture('entity/zombie/drowned_outer_layer'), light, color); this.drawParts(m, base, pose, gl); }
     if (e.type === 'stray' || e.type === 'bogged') { this.beginEntityProgram(sky, this.texture(`entity/skeleton/${e.type}_overlay`), light, color); this.drawParts(m, base, pose, gl); }
+    if (e.isVillager || e.isZombieVillager) this.drawVillagerLayers(e, m, base, pose, sky, light, color);
     // held items (skeleton bow, zombie held items)
     if (def.ai.ranged === 'arrow' && (modelName === 'skeleton' || modelName === 'villager')) this.drawMobHeldItem(e, base, pose, new ItemStack(this.game.items.get(e.type === 'pillager' ? 'crossbow' : 'bow')!, 1), sky, light, modelName);
     if (e.type === 'wither_skeleton') this.drawMobHeldItem(e, base, pose, new ItemStack(this.game.items.get('stone_sword')!, 1), sky, light, modelName);
@@ -278,6 +285,25 @@ export class EntityRenderer {
     ra.ry += by * 2;
     ra.rz = (ra.rz ?? 0) + Math.sin(attackTime * Math.PI) * -0.4;
     pose.rightArm = ra; pose.leftArm = la;
+  }
+
+  /** vanilla VillagerProfessionLayer: biome type layer, profession layer and level badge, with the hat rules from the textures' mcmeta. */
+  private static VILLAGER_HATS: Record<string, string> = { 'type/desert': 'full', 'type/snow': 'full', 'profession/butcher': 'partial', 'profession/farmer': 'full', 'profession/fisherman': 'full', 'profession/fletcher': 'full', 'profession/librarian': 'full', 'profession/shepherd': 'full' };
+  private drawVillagerLayers(e: Mob, m: ModelGpu, base: Mat4, pose: Record<string, any>, sky: SkyState, light: [number, number], color: [number, number, number, number]): void {
+    const gl = this.renderer.gl;
+    const folder = e.isZombieVillager ? 'entity/zombie_villager/' : 'entity/villager/';
+    const typeHat = EntityRenderer.VILLAGER_HATS['type/' + e.villagerType] ?? 'none', profHat = EntityRenderer.VILLAGER_HATS['profession/' + e.profession] ?? 'none';
+    const draw = (tex: string, hatVisible: boolean) => {
+      const t = this.loadedTexture(tex); if (!t) return;
+      this.beginEntityProgram(sky, t, light, color);
+      this.drawParts(m, base, pose, gl, hatVisible ? undefined : 'hat');
+    };
+    if (e.isBaby) { draw(folder + 'baby/' + e.villagerType, true); return; }
+    draw(folder + 'type/' + e.villagerType, profHat === 'none' || (profHat === 'partial' && typeHat !== 'full'));
+    if (e.profession !== 'none') {
+      draw(folder + 'profession/' + e.profession, typeHat === 'none' || (typeHat === 'partial' && profHat !== 'full'));
+      if (e.profession !== 'nitwit') draw(folder + 'profession_level/' + (['stone', 'iron', 'gold', 'emerald', 'diamond'][e.villagerLevel - 1] ?? 'stone'), true);
+    }
   }
 
   private poseFor(e: LivingEntity, model: string, limb: number, amt: number, headYawRel: number, pitch: number, partial: number): Record<string, any> {
@@ -348,7 +374,7 @@ export class EntityRenderer {
       case 'ghast': { for (let i = 0; i < 9; i++) pose[`t${i}`] = { rx: Math.sin(t * 3 + i) * 0.2 }; break; }
       case 'blaze': { for (let i = 0; i < 12; i++) { const ring = Math.floor(i / 4), a = (i % 4) * Math.PI / 2 + t * (ring === 1 ? -3 : 3) + ring; const r = ring === 1 ? 7 : 9; pose[`rod${i}`] = { tx: Math.cos(a) * r, ty: 2 + ring * 6 + Math.sin(t * 2 + i) * 2, tz: Math.sin(a) * r }; } pose.head = { ry: hy, rx: hp }; break; }
       case 'bat': { pose.wingR = { ry: Math.sin(t * 40) * 0.8 + 0.4 }; pose.wingL = { ry: -Math.sin(t * 40) * 0.8 - 0.4 }; pose.head = { ry: hy, rx: hp + 0.5 }; break; }
-      case 'villager': { pose.head = { ry: hy, rx: hp }; pose.rightLeg = { rx: swing * 0.5 }; pose.leftLeg = { rx: swing2 * 0.5 }; break; }
+      case 'villager': { pose.head = { ry: hy, rx: hp, rz: e instanceof Mob && e.headShake > 0 ? 0.3 * Math.sin(0.45 * (e.age + partial)) : 0 }; pose.rightLeg = { rx: swing * 0.5 }; pose.leftLeg = { rx: swing2 * 0.5 }; break; }
       case 'iron_golem': { pose.head = { ry: hy, rx: hp }; pose.rightLeg = { rx: swing * 0.7 }; pose.leftLeg = { rx: swing2 * 0.7 }; pose.rightArm = { rx: attack > 0 ? -2 + attack * 2 : swing2 * 0.5 }; pose.leftArm = { rx: attack > 0 ? -2 + attack * 2 : swing * 0.5 }; break; }
       case 'snow_golem': { pose.head = { ry: hy, rx: hp }; break; }
       case 'phantom': { const f = Math.sin(t * 6); pose.wingL = { rz: 0.1 + f * 0.6 }; pose.wingR = { rz: -0.1 - f * 0.6 }; pose.tipL = { rz: f * 0.4 }; pose.tipR = { rz: -f * 0.4 }; pose.head = { ry: hy, rx: hp * 0.3 }; break; }

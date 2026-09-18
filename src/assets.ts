@@ -40,6 +40,8 @@ export interface McData {
   entityLoot: { entity: string; drops: { item: string; dropChance: number; stackSizeRange: number[] }[] }[];
 }
 
+import type { StructureBundle } from './world/gen/jigsaw';
+
 export interface DataBundle {
   recipes: Record<string, any>;
   lootTables: Record<string, any>;
@@ -56,6 +58,8 @@ export interface Assets {
   data: DataBundle;
   lang: Record<string, string>;
   splashes: string[];
+  /** vanilla structure templates + jigsaw pools (villages); null when the bundle is missing */
+  structures: StructureBundle | null;
   manifest: { mcVersion: string; music: boolean; sounds: boolean };
 }
 
@@ -85,6 +89,7 @@ export async function loadAssets(onProgress?: (msg: string, frac: number) => voi
     ['recipes & loot', () => fetchJson('bundle/data.json')],
     ['language', () => fetchJson('bundle/lang.json')],
     ['splashes', () => fetchJson('bundle/splashes.json')],
+    ['structures', () => fetchJson('bundle/structures.json').catch(() => null)],
   ];
   const results: any[] = [];
   let i = 0;
@@ -93,8 +98,8 @@ export async function loadAssets(onProgress?: (msg: string, frac: number) => voi
     results.push(await fn());
     i++;
   }
-  const [manifest, atlas, atlasImage, animImage, models, mcdata, data, lang, splashes] = results;
-  return { manifest, atlas, atlasImage, animImage, models, mcdata, data, lang, splashes };
+  const [manifest, atlas, atlasImage, animImage, models, mcdata, data, lang, splashes, structures] = results;
+  return { manifest, atlas, atlasImage, animImage, models, mcdata, data, lang, splashes, structures };
 }
 
 /** Texture path helper: "block/stone" -> "pack/assets/minecraft/textures/block/stone.png" */

@@ -50,6 +50,8 @@ export class NetClient implements WorldListener {
   private lastHeld = '';
   private lastArmor = '';
   ping = 0;
+  /** last position correction id from the host, echoed on every move (vanilla AcceptTeleportationPacket) */
+  private teleportId = 0;
   container: { x: number; y: number; z: number; inv: Inventory; be?: any } | null = null;
   disconnectReason = '';
   private wanted = new Set<number>();
@@ -142,14 +144,17 @@ export class NetClient implements WorldListener {
     // every block we predicted this tick, in one message; the host answers with the authoritative states
     if (this.predicted.length) { this.send({ t: 'set', b: this.predicted }); this.predicted = []; }
     // chunks
-    const frames = this.chunkFrames; this.chunkFrames = [];
-    if (this.switching) frames.length = 0;
+    // a few chunk frames per tick (decoding a burst of dozens in one tick is a visible hitch); each one is
+    // acknowledged so the host keeps only a small window of chunks in the pipe
+    if (this.switching) this.chunkFrames.length = 0;
+    const frames = this.chunkFrames.splice(0, 8);
     for (const f of frames) {
       try {
         const { kind, json, body } = unpackFrame(f);
         if (kind === FRAME_CHUNK) { const d = decodeChunk(json, body); const c = Chunk.deserialize({ ...d, decorated: true } as any); c.modified = false; this.applying = true; try { g.chunks.addRemoteChunk(c); } finally { this.applying = false; } }
       } catch (e) { console.error('chunk decode', e); }
     }
+    if (frames.length) this.send({ t: 'chunkAck', n: frames.length });
     const q = this.queue; this.queue = [];
     for (const m of q) { try { this.handle(m); } catch (e) { console.error('client message error', e); } }
     // our snapshot (not while the host is moving us to another dimension: our position is meaningless there)
@@ -157,7 +162,7 @@ export class NetClient implements WorldListener {
     if (this.switching) return;
     const face = p.breaking && g.targetBlock && p.breaking.x === g.targetBlock.x && p.breaking.y === g.targetBlock.y && p.breaking.z === g.targetBlock.z ? g.targetBlock.face : 1;
     // vanilla ServerboundMovePlayerPacket: position, look, onGround plus the pose/animation flags others render
-    const snap: any = { t: 'move', x: r3(p.x), y: r3(p.y), z: r3(p.z), yaw: r1(p.yaw), pitch: r1(p.pitch), og: p.onGround, sneak: p.isSneaking, sprint: p.isSprinting, swim: p.swimmingPose, sleep: p.sleeping, fly: p.flying, slot: p.selectedSlot, swing: p.swinging && p.swingTime <= 1, use: !!p.usingItem, br: p.breaking ? { x: p.breaking.x, y: p.breaking.y, z: p.breaking.z, face, stage: p.breakStage, state: p.breaking.state } : null };
+    const snap: any = { t: 'move', tp: this.teleportId, x: r3(p.x), y: r3(p.y), z: r3(p.z), yaw: r1(p.yaw), pitch: r1(p.pitch), og: p.onGround, sneak: p.isSneaking, sprint: p.isSprinting, swim: p.swimmingPose, sleep: p.sleeping, fly: p.flying, slot: p.selectedSlot, swing: p.swinging && p.swingTime <= 1, use: !!p.usingItem, br: p.breaking ? { x: p.breaking.x, y: p.breaking.y, z: p.breaking.z, face, stage: p.breakStage, state: p.breaking.state } : null };
     this.send(snap);
     // creative players pick items out of thin air, so the host has to be told what is in the hand
     if (p.isCreative) {
@@ -247,6 +252,9 @@ export class NetClient implements WorldListener {
         if ([m.x, m.y, m.z, m.yaw, m.pitch].every(Number.isFinite)) {
           p.setPos(m.x, m.y, m.z); p.yaw = m.yaw; p.pitch = m.pitch;
           p.vx = 0; p.vy = 0; p.vz = 0;
+          if (Number.isInteger(m.id)) this.teleportId = m.id;
+          // acknowledge at once so the host resumes accepting moves without waiting for the next tick
+          this.send({ t: 'move', tp: this.teleportId, x: r3(p.x), y: r3(p.y), z: r3(p.z), yaw: r1(p.yaw), pitch: r1(p.pitch), og: p.onGround });
         }
         break;
       }
@@ -257,6 +265,7 @@ export class NetClient implements WorldListener {
       case 'givexp': p.addXp(m.v); g.sounds.playAt('entity.experience_orb.pickup', p.x, p.y, p.z, 0.1, 1 + Math.random() * 0.5); break;
       case 'consumed': { p.inventory.slots[p.selectedSlot] = m.held ? ItemStack.deserialize(m.held, g.items) : null; p.inventory.onChange?.(); break; }
       case 'open': this.openRemote(m); break;
+      case 'tradeUpd': { const sc = g.gui.screen as any; if (sc && sc.mob?.id === m.id && typeof sc.refresh === 'function') sc.refresh(m.trades, m.level, m.xp); break; }
       case 'contUpd': { if (this.container && this.container.x === m.x && this.container.y === m.y && this.container.z === m.z && !this.containerDirty) { this.container.inv.deserialize(m.slots, g.items); if (m.be && this.container.be) Object.assign(this.container.be, m.be); } break; }
       case 'wake': { if (p.sleeping) { p.wakeUp(); g.gui.sleepFade = 0; } break; }
       case 'dim': {
@@ -298,6 +307,11 @@ export class NetClient implements WorldListener {
   private openRemote(m: any): void {
     const g = this.game;
     const closeMsg = () => { this.send({ t: 'close' }); this.container = null; };
+    if (m.kind === 'trading') {
+      const proxy = { id: m.id, type: m.mtype, profession: m.prof, villagerLevel: m.level, villagerXp: m.xp, trades: m.trades, remote: true, ensureTrades() { return this.trades ?? []; }, onTraded() {} };
+      g.gui.openTrading(proxy);
+      return;
+    }
     if (m.kind === 'container') {
       const inv = new Inventory(m.slots.length); inv.deserialize(m.slots, g.items);
       this.container = { x: m.x, y: m.y, z: m.z, inv };

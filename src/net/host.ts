@@ -8,7 +8,8 @@ import { RemotePlayer } from '../entity/remotePlayer';
 import { Entity, LivingEntity, ItemEntity, ExperienceOrb } from '../entity/entity';
 import { Mob } from '../entity/mobs';
 import { BoatEntity } from '../entity/boat';
-import { ArrowEntity, FallingBlockEntity, PrimedTnt, ThrownProjectile } from '../entity/misc';
+import { ArrowEntity, EyeOfEnderEntity, FallingBlockEntity, PrimedTnt, ThrownProjectile } from '../entity/misc';
+import { nearestStronghold } from '../world/gen/structures';
 import { Inventory, ItemStack } from '../items/stack';
 import { encodeChunk, packFrame, FRAME_CHUNK, PROTOCOL_VERSION, TARGET_SERVER, defaultRelayUrl, isGuestMessage, serializedStackIdentity, type PlayerListEntry } from './protocol';
 import type { Chunk } from '../world/chunk';
@@ -17,6 +18,8 @@ import { runCommand } from '../game/commands';
 
 interface Guest {
   id: number; playerId: string; name: string; player: RemotePlayer;
+  /** entity id of the merchant this guest is trading with */
+  trading?: number | null;
   /** the dimension this guest's copy lives in (its world instance on the host) */
   dim: Dimension;
   known: Set<number>;            // entity ids the guest has full info for
@@ -28,6 +31,12 @@ interface Guest {
   rideId: number | null;
   lastMoveTick: number;
   movementViolations: number;
+  /** move packets received during the current host tick (vanilla receivedMovePacketCount - knownMovePacketCount) */
+  movesThisTick: number;
+  /** chunk frames sent and not yet acknowledged by the guest (flow control through the relay) */
+  chunksInFlight: number;
+  /** id of the last position correction sent; moves not stamped with it are stale (vanilla awaitingTeleport) */
+  teleportId: number;
   craftingSize: 2 | 3;
   inventoryRevision: number;
   crafting: Inventory;
@@ -44,6 +53,11 @@ export interface HostOptions {
   /** true when coordinating live simulation for the backend-owned public world */
   official?: boolean;
 }
+
+export /** unacknowledged chunk frames allowed per guest (vanilla's chunk sender keeps a similar small window) */
+const MAX_CHUNKS_IN_FLIGHT = 10;
+/** bytes our WebSocket may have queued before chunk streaming pauses */
+const MAX_SOCKET_BACKLOG = 256 * 1024;
 
 export class NetHost {
   ws: WebSocket | null = null;
@@ -173,6 +187,7 @@ export class NetHost {
     for (const [dim, batch] of this.blockBatches) if (batch.length) this.broadcastIn(dim, { t: 'blk', b: batch });
     this.blockBatches.clear();
     for (const gu of this.guests.values()) {
+      gu.movesThisTick = 0;
       if (!gu.ready || !g.dims.has(gu.dim)) continue;
       const p = gu.player;
       g.withDimension(gu.dim, () => {
@@ -183,7 +198,7 @@ export class NetHost {
         this.streamChunks(gu);
         this.pickups(gu);
       });
-      if (p.needsCorrection) { p.needsCorrection = false; this.send(gu.id, { t: 'correct', x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch }); }
+      if (p.needsCorrection) { p.needsCorrection = false; this.correct(gu, p.x, p.y, p.z, p.yaw, p.pitch); }
       const stats = this.stats(p), key = JSON.stringify(stats);
       if (key !== gu.statsKey) { gu.statsKey = key; this.send(gu.id, { t: 'stats', ...stats }); }
       if (gu.container && this.ticks % 5 === 0) this.sendContainer(gu, false);
@@ -238,7 +253,7 @@ export class NetHost {
     });
     p.setPos(saved?.x ?? spawn[0] + 0.5, saved?.y ?? spawn[1], saved?.z ?? spawn[2] + 0.5); p.needsCorrection = false;
     p.setGameMode(this.opts.gameMode as any);
-    const gu: Guest = { id, playerId, name, player: p, dim: inst.dim, known: new Set(), chunks: new Set(), wantChunks: new Set(), container: null, ready: false, lastMoveTick: this.ticks, movementViolations: 0, craftingSize: 2, inventoryRevision: 0, crafting: new Inventory(4), cursor: new Inventory(1), statsKey: '', inventoryDirty: false, rideId: null };
+    const gu: Guest = { id, playerId, name, player: p, dim: inst.dim, known: new Set(), chunks: new Set(), wantChunks: new Set(), container: null, ready: false, lastMoveTick: this.ticks, movementViolations: 0, craftingSize: 2, inventoryRevision: 0, crafting: new Inventory(4), cursor: new Inventory(1), statsKey: '', inventoryDirty: false, rideId: null, movesThisTick: 0, chunksInFlight: 0, teleportId: 0 };
     this.guests.set(id, gu);
     this.send(id, { t: 'welcome', name, selfId: p.id, hostName: this.official ? this.opts.name : this.hostName, dimension: inst.dim, seed: inst.world.seed, time: inst.world.time, dayTime: inst.world.dayTime, spawn, saved: saved ?? null, gameMode: this.opts.gameMode, cheats: this.opts.cheats, difficulty: g.difficulty, rules: g.rules, weather: g.weather.serialize(), version: g.version, protocol: PROTOCOL_VERSION, players: this.playerList(), music: g.sounds.currentMusic() });
     g.gui.addChat(`§e${name} joined the game`);
@@ -279,6 +294,15 @@ export class NetHost {
   onRideChanged(_rider: Entity): void {}
   /** Push a guest's complete inventory now (after a command or host-side change touched it). */
   syncInventory(p: Player): void { for (const gu of this.guests.values()) if (gu.player === p) gu.inventoryDirty = true; }
+  /** vanilla ClientboundPlayerPositionPacket: move the guest and stamp the correction so its stale moves are ignored */
+  private correct(gu: Guest, x: number, y: number, z: number, yaw: number, pitch: number): void {
+    gu.teleportId = (gu.teleportId + 1) & 0xffff;
+    this.send(gu.id, { t: 'correct', id: gu.teleportId, x, y, z, yaw, pitch });
+  }
+  /** A guest right-clicked a merchant: open the trading screen on their side. */
+  openTrading(p: Player, mob: Mob): void {
+    for (const gu of this.guests.values()) if (gu.player === p) { gu.trading = mob.id; this.send(gu.id, { t: 'open', kind: 'trading', id: mob.id, mtype: mob.type, prof: mob.profession, level: mob.villagerLevel, xp: mob.villagerXp, trades: mob.ensureTrades() }); }
+  }
   private stats(p: RemotePlayer): any {
     return { health: p.health, absorption: p.absorption, foodLevel: p.foodLevel, saturation: p.saturation, air: p.air, xpLevel: p.xpLevel, xpProgress: p.xpProgress, totalXp: p.totalXp, mode: p.gameMode, effects: p.effects, fire: p.fireTicks > 0 };
   }
@@ -295,15 +319,20 @@ export class NetHost {
       case 'move': {
         const values = [m.x, m.y, m.z, m.yaw, m.pitch];
         if (!values.every(Number.isFinite)) { gu.movementViolations++; break; }
-        const elapsed = Math.max(1, this.ticks - gu.lastMoveTick);
+        // vanilla ServerGamePacketListenerImpl.awaitingPositionFromClient: after a teleport, moves the guest sent
+        // before it saw the new position are dropped instead of being "corrected" again and again
+        if ((m.tp | 0) !== gu.teleportId) break;
         gu.lastMoveTick = this.ticks;
-        const dx = m.x - p.x, dy = m.y - p.y, dz = m.z - p.z;
-        // Vanilla also corrects impossible movement. Keep a generous allowance for latency, knockback and elytra;
-        // repeated outliers are ignored and the authoritative position is returned to the guest.
-        const max = p.isCreative || p.isSpectator ? 2.5 * elapsed : 1.25 * elapsed;
-        if (!p.vehicle && (Math.abs(dy) > max * 2 || dx * dx + dz * dz > max * max)) {
+        gu.movesThisTick++;
+        // vanilla ServerGamePacketListenerImpl.handleMovePlayer ("moved too quickly!"): the squared distance from the
+        // last accepted position may be at most 100 (300 when gliding) per packet received this tick. Packets bunch
+        // up over a real link, so the budget scales with the burst instead of snapping the player back.
+        const last = p.networkSnapshot();
+        const dx = m.x - last.x, dy = m.y - last.y, dz = m.z - last.z;
+        const limit = (p.isCreative || p.isSpectator || p.fallFlying ? 300 : 100) * gu.movesThisTick;
+        if (!p.vehicle && dx * dx + dy * dy + dz * dz > limit) {
           gu.movementViolations++;
-          this.send(gu.id, { t: 'correct', x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch });
+          this.correct(gu, last.x, last.y, last.z, last.yaw, last.pitch);
           break;
         }
         gu.movementViolations = Math.max(0, gu.movementViolations - 1);
@@ -335,7 +364,8 @@ export class NetHost {
         break;
       case 'invTxn': this.inventoryTransaction(gu, m); break;
       case 'contTxn': this.containerTransaction(gu, m); break;
-      case 'chunk': for (const k of m.keys as number[]) gu.wantChunks.add(k); break;
+      case 'chunk': for (const k of m.keys as number[]) { if (Number.isInteger(k)) { gu.chunks.delete(k); gu.wantChunks.add(k); } } break;
+      case 'chunkAck': gu.chunksInFlight = Math.max(0, gu.chunksInFlight - Math.min(64, Math.max(0, m.n | 0))); break;
       case 'set': { // Never accept a guest-selected final state or block-entity payload: answer with the truth.
         const b: number[] = Array.isArray(m.b) ? m.b : [];
         const out: number[] = [];
@@ -393,7 +423,25 @@ export class NetHost {
         break;
       }
       case 'craft': this.remoteCraft(gu, m.id, m.all); break;
+      case 'trade': {
+        const mob = g.entities.find((x) => x.id === m.id);
+        if (!(mob instanceof Mob) || gu.trading !== mob.id || mob.removed || mob.distSq(p.x, p.y, p.z) > 64) break;
+        const t = mob.ensureTrades()[m.i | 0];
+        if (!t || t.uses >= t.maxUses) break;
+        const inv = p.inventory;
+        if (inv.count(t.a) < t.ac || (t.b && inv.count(t.b) < t.bc!)) break;
+        const item = g.items.get(t.r); if (!item) break;
+        inv.remove(t.a, t.ac); if (t.b) inv.remove(t.b, t.bc!);
+        p.give(new ItemStack(item, t.rc, 0, t.ench ? t.ench.map((e) => ({ ...e })) : [], null, t.extra ? { ...t.extra } : {}));
+        mob.onTraded(t);
+        g.sounds.playAt('entity.villager.yes', mob.x, mob.y, mob.z, 1, 1);
+        g.spawnXp(p.x, p.y + 0.5, p.z, 3 + Math.floor(Math.random() * 4));
+        gu.inventoryDirty = true;
+        this.send(gu.id, { t: 'tradeUpd', id: mob.id, trades: mob.trades, level: mob.villagerLevel, xp: mob.villagerXp });
+        break;
+      }
       case 'close': {
+        gu.trading = null;
         if (gu.container) { gu.container.onClose?.(); gu.container = null; }
         for (const stack of [...gu.crafting.slots, ...gu.cursor.slots]) if (stack) { const copy = stack.clone(); if (p.inventory.add(copy) > 0) g.dropItem(p.x, p.y + 0.5, p.z, copy); }
         gu.craftingSize = 2; gu.crafting = new Inventory(4); gu.cursor = new Inventory(1); gu.inventoryRevision++;
@@ -421,7 +469,7 @@ export class NetHost {
       case 'spawn': this.remoteSpawn(gu, m); break;
       case 'boatInput': { const b = p.vehicle; if (b instanceof BoatEntity && b.passengerIndex(p) === 0) { b.inputUp = !!m.up; b.inputDown = !!m.down; b.inputLeft = !!m.left; b.inputRight = !!m.right; } break; }
       case 'dismount': { const b = p.vehicle; if (b instanceof BoatEntity) b.ejectPassenger(p); else if (b) p.stopRiding(); break; }
-      case 'dimready': { gu.known.clear(); gu.chunks.clear(); gu.wantChunks.clear(); gu.inventoryDirty = true; break; }
+      case 'dimready': { gu.known.clear(); gu.chunks.clear(); gu.wantChunks.clear(); gu.chunksInFlight = 0; gu.inventoryDirty = true; break; }
       case 'ping': { if (Number.isFinite(m.ping)) p.ping = Math.max(0, Math.min(9999, Math.round(m.ping))); this.send(gu.id, { t: 'pong', time: m.time }); break; }
     }
   }
@@ -473,10 +521,11 @@ export class NetHost {
     }
     else if (m.kind === 'thrown') {
       const kind = String(m.extra?.tkind ?? '');
-      const allowed = new Set(['snowball', 'egg', 'ender_pearl', 'experience_bottle', 'splash_potion', 'lingering_potion']);
+      const allowed = new Set(['snowball', 'egg', 'ender_pearl', 'experience_bottle', 'splash_potion', 'lingering_potion', 'ender_eye']);
       if (!allowed.has(kind) || heldName !== kind || !held) return;
       const stack = held.clone(); stack.count = 1;
-      e = new ThrownProjectile(kind, p, stack);
+      if (kind === 'ender_eye') { if (g.world.dimension !== 'overworld') return; const eye = new EyeOfEnderEntity(p, stack); eye.setPos(p.x, p.y + p.height * 0.5, p.z); const [sx, sz] = nearestStronghold(g.world.seed, p.x, p.z); eye.signalTo(sx, p.y, sz); e = eye; }
+      else e = new ThrownProjectile(kind, p, stack);
       if (!p.isCreative && --held.count <= 0) p.inventory.slots[p.selectedSlot] = null;
     }
     else if (m.kind === 'mob') return; // spawn eggs are handled by authoritative useBlock; never accept a mob description
@@ -491,6 +540,7 @@ export class NetHost {
     if (!e) return;
     const v = Array.isArray(m.v) && m.v.length === 3 && m.v.every(Number.isFinite) ? m.v : [0, 0, 0];
     const speed = Math.hypot(v[0], v[1], v[2]), scale = speed > 3.2 ? 3.2 / speed : 1;
+    if (e instanceof EyeOfEnderEntity) { g.addEntity(e); return; }
     e.setPos(p.x, p.eyeY - 0.1, p.z); e.vx = v[0] * scale; e.vy = v[1] * scale; e.vz = v[2] * scale; e.yaw = p.yaw; e.pitch = p.pitch;
     g.addEntity(e);
     this.send(gu.id, { t: 'self', mode: p.gameMode, state: this.playerState(p) });
@@ -667,16 +717,22 @@ export class NetHost {
   }
 
   // ---- chunk streaming ----
+  /** Stream requested chunks with end-to-end flow control: at most MAX_CHUNKS_IN_FLIGHT unacknowledged chunk frames
+   *  per guest, and none while our own socket is backed up — otherwise a slow link queues megabytes of chunk data in
+   *  front of movement and entity updates and the guest sees everything seconds late (vanilla paces chunk sending too). */
   private streamChunks(gu: Guest): void {
     const g = this.game;
     const world = g.dims.get(gu.dim)?.world; if (!world) return;
+    if (!this.ws || this.ws.bufferedAmount > MAX_SOCKET_BACKLOG) return;
     let sent = 0;
     for (const key of gu.wantChunks) {
+      if (gu.chunksInFlight >= MAX_CHUNKS_IN_FLIGHT || this.ws.bufferedAmount > MAX_SOCKET_BACKLOG) break;
       const c = world.chunks.get(key);
       if (!c) continue;
       gu.wantChunks.delete(key);
       if (gu.chunks.has(key)) continue;
       this.sendChunk(gu, c);
+      gu.chunksInFlight++;
       if (++sent >= 6) break;
     }
   }
@@ -762,7 +818,7 @@ export class NetHost {
       if (this.ticks % 10 === 0 || first) { s.held = e.heldItem()?.serialize() ?? null; s.armor = e.armor.serialize(); }
     } else if (e instanceof Mob) {
       s.t = e.type; s.hy = r1(e.headYaw); s.by = r1(e.bodyYaw); s.h = r1(e.health); s.hurt = e.hurtTime > 0; s.dt = e.deathTime; s.swing = e.swinging && e.swingTime <= 1; s.og = e.onGround; s.vid = e.vehicle ? this.netId(e.vehicle) : null;
-      s.ex = { baby: e.isBaby, sheared: e.sheared, wool: e.woolColor, tamed: e.tamed, sit: e.sitting, swell: e.swell, anger: e.angerTicks > 0, size: e.slimeSize, variant: e.variant, charged: e.charged, name: (e as any).customName, eat: e.eatTimer, scream: e.screaming, carried: e.carriedBlock, attack: e.attackAnim, saddled: e.saddled };
+      s.ex = { baby: e.isBaby, sheared: e.sheared, wool: e.woolColor, tamed: e.tamed, sit: e.sitting, swell: e.swell, anger: e.angerTicks > 0, size: e.slimeSize, variant: e.variant, charged: e.charged, name: (e as any).customName, eat: e.eatTimer, scream: e.screaming, carried: e.carriedBlock, attack: e.attackAnim, saddled: e.saddled, prof: e.isVillager || e.isZombieVillager ? e.profession : undefined, vtype: e.villagerType, vlevel: e.villagerLevel, curing: e.conversionTime > 0 || undefined };
       if (first) s.full = { type: e.type };
     } else if (e instanceof ItemEntity) { s.t = 'item'; if (first) s.full = { stack: e.stack.serialize() }; else if (this.ticks % 20 === 0) s.stack = e.stack.serialize(); }
     else if (e instanceof ExperienceOrb) { s.t = 'xp'; if (first) s.full = { value: e.value }; }

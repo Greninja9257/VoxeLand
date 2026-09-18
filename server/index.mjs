@@ -110,7 +110,9 @@ const http_ = http.createServer((req, res) => {
   fs.createReadStream(file).pipe(res);
 });
 
-const wss = new WebSocketServer({ server: http_, path: '/ws', maxPayload: 64 * 1024 * 1024 });
+// permessage-deflate: chunk frames and the JSON entity/block traffic shrink several times over the wire, in both
+// directions (browsers compress what they send once the extension is negotiated)
+const wss = new WebSocketServer({ server: http_, path: '/ws', maxPayload: 64 * 1024 * 1024, perMessageDeflate: { threshold: 512, zlibDeflateOptions: { level: 4, memLevel: 7 }, concurrencyLimit: 8 } });
 
 /** Player-hosted servers plus the backend-owned official server. */
 const servers = new Map();

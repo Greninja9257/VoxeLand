@@ -149,7 +149,7 @@ async function fetchJarData(version) {
   const dest = path.join(OUT, 'data');
   const n = extractZip(
     zip,
-    (name) => /^data\/minecraft\/(recipe|loot_table|tags|worldgen\/biome|worldgen\/configured_feature)\//.test(name) || name === 'assets/minecraft/sounds.json' || name === 'assets/minecraft/regional_compliancies.json',
+    (name) => /^data\/minecraft\/(recipe|loot_table|tags|worldgen\/biome|worldgen\/configured_feature|worldgen\/template_pool|worldgen\/structure|worldgen\/structure_set|worldgen\/processor_list|structure\/village)\//.test(name) || name === 'assets/minecraft/sounds.json' || name === 'assets/minecraft/regional_compliancies.json',
     dest,
     (name) => name.replace(/^data\/minecraft\//, '').replace(/^assets\/minecraft\//, ''),
   );
@@ -288,6 +288,41 @@ function buildDataBundle() {
   for (const f of [...MCDATA_FILES, ...MCDATA_FILES_120]) mc[f] = JSON.parse(fs.readFileSync(path.join(OUT, 'mcdata', f + '.json'), 'utf8'));
   fs.writeFileSync(path.join(OUT, 'bundle', 'mcdata.json'), JSON.stringify(mc));
   log(`mcdata bundle: ${mc.blocks.length} blocks, ${mc.items.length} items, ${mc.entities.length} entities`);
+}
+
+/** Jigsaw structure bundle: the vanilla village NBT templates (client jar data/minecraft/structure/village/**) flattened
+ *  to JSON, plus the template pools, processor lists, structure and structure-set definitions that drive them. */
+async function buildStructureBundle() {
+  const nbt = await import('prismarine-nbt');
+  const dataRoot = path.join(OUT, 'data');
+  const templates = {};
+  const walk = (dir, prefix) => {
+    if (!fs.existsSync(dir)) return;
+    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (ent.isDirectory()) { walk(path.join(dir, ent.name), prefix + ent.name + '/'); continue; }
+      if (!ent.name.endsWith('.nbt')) continue;
+      const t = nbt.simplify(nbt.parseUncompressed(zlib.gunzipSync(fs.readFileSync(path.join(dir, ent.name)))));
+      const palette = (t.palettes ? t.palettes[0] : t.palette).map((p) => ({ name: p.Name.replace(/^minecraft:/, ''), props: p.Properties ?? {} }));
+      const blocks = [], nbts = {};
+      for (const b of t.blocks ?? []) {
+        if (b.nbt) nbts[blocks.length / 4] = b.nbt;
+        blocks.push(b.state, b.pos[0], b.pos[1], b.pos[2]);
+      }
+      const entities = (t.entities ?? []).map((e) => ({ pos: e.pos, nbt: e.nbt }));
+      templates[prefix + ent.name.replace(/\.nbt$/, '')] = { size: t.size, palette, blocks, nbts, entities };
+    }
+  };
+  walk(path.join(dataRoot, 'structure'), '');
+  const bundle = {
+    templates,
+    pools: readJsonDir(path.join(dataRoot, 'worldgen', 'template_pool')),
+    processors: readJsonDir(path.join(dataRoot, 'worldgen', 'processor_list')),
+    structures: readJsonDir(path.join(dataRoot, 'worldgen', 'structure')),
+    structureSets: readJsonDir(path.join(dataRoot, 'worldgen', 'structure_set')),
+    blockTags: readJsonDir(path.join(dataRoot, 'tags', 'block')),
+  };
+  fs.writeFileSync(path.join(OUT, 'bundle', 'structures.json'), JSON.stringify(bundle));
+  log(`structure bundle: ${Object.keys(templates).length} templates, ${Object.keys(bundle.pools).length} template pools, ${Object.keys(bundle.processors).length} processor lists`);
 }
 
 function readPng(file) {
@@ -438,6 +473,7 @@ Mojang Studios or Microsoft.
   await fetchPanorama();
   buildModelBundle();
   buildDataBundle();
+  await buildStructureBundle();
   buildAtlas();
   writeCredits(version);
   await fetchSounds(version);

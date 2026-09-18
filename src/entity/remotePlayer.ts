@@ -28,7 +28,8 @@ export class RemotePlayer extends Player {
 
   setPos(x: number, y: number, z: number): void {
     super.setPos(x, y, z);
-    if (!this.remote) { this.tx = x; this.ty = y; this.tz = z; this.lerpSteps = 0; this.needsCorrection = true; }
+    // a vehicle repositioning its rider every tick is not a teleport: the guest follows the vehicle itself
+    if (!this.remote) { this.tx = x; this.ty = y; this.tz = z; this.lerpSteps = 0; if (!this.vehicle) this.needsCorrection = true; }
   }
 
   applySnapshot(s: any): void {

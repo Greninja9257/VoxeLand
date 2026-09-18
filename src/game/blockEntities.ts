@@ -22,13 +22,24 @@ export class BlockEntityManager {
 
   getOrCreate(x: number, y: number, z: number, type: string, init: () => { items?: number; [k: string]: any }): BlockEntity {
     let be = this.map.get(this.key(x, y, z));
-    if (be) return be;
+    if (be) { if (be.lootTable) this.unpackLoot(be); return be; }
     const i = init();
     be = { type, x, y, z, inventory: new Inventory(i.items ?? 0), ...i };
     delete (be as any).items;
     this.map.set(this.key(x, y, z), be);
     const c = this.game.world.chunkAt(x, z); if (c) c.modified = true;
     return be;
+  }
+  /** Generated containers carry a loot table that is rolled the first time they are opened (vanilla RandomizableContainer). */
+  private unpackLoot(be: BlockEntity): void {
+    const table = be.lootTable; delete be.lootTable;
+    const g = this.game;
+    const items = g.loot.evaluate(g.assets.data.lootTables[table], { luck: 0 });
+    const inv: Inventory = be.inventory;
+    const free: number[] = []; for (let i = 0; i < inv.size; i++) if (!inv.get(i)) free.push(i);
+    for (let i = free.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); const t = free[i]; free[i] = free[j]; free[j] = t; }
+    for (const s of items) { const slot = free.pop(); if (slot === undefined) break; inv.slots[slot] = s; }
+    const c = g.world.chunkAt(be.x, be.z); if (c) c.modified = true;
   }
   put(x: number, y: number, z: number, data: any): void {
     if (!data) return;

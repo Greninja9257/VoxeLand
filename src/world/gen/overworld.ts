@@ -6,12 +6,17 @@ import { Chunk, MIN_Y, MAX_Y, SEA_LEVEL, WORLD_HEIGHT } from '../chunk';
 import { BIOMES, selectOverworldBiome, biomeId, type BiomeDef } from './biomes';
 import { FBM, Perlin, spline, hashSeed } from './noise';
 import { FeatureStates, TreeGen, placeOreBlob, type BlockSink } from './features';
+import { StructureManager, VILLAGE, type StructureGenContext } from './structures';
+import { STRONGHOLD } from './stronghold';
+import type { StructureBundle } from './jigsaw';
 
 export interface Climate { T: number; H: number; C: number; E: number; W: number; PV: number }
 
 export interface Generator {
   generate(cx: number, cz: number): Chunk;
   spawnHeight(x: number, z: number): number;
+  /** nearest structure start of a type (block coords) for /locate */
+  locate?(type: string, x: number, z: number): [number, number] | null;
 }
 
 const LAVA_LEVEL = -54;
@@ -21,6 +26,7 @@ export class OverworldGen implements Generator {
   private detailN: FBM; private terrain3: FBM; private cheese: FBM; private spag1: Perlin; private spag2: Perlin; private surfN: Perlin; private ravineN: Perlin; private caveBiomeN: Perlin;
   private st: FeatureStates;
   private trees: TreeGen;
+  structures: StructureManager;
   private gridCache = new Map<number, Float32Array>();
   private columnCache = new Map<number, { blocks: Uint16Array; biome: number; h: number }>();
   private climateCache = new Map<number, { c: Climate; h: number; biome: number }>();
@@ -28,7 +34,7 @@ export class OverworldGen implements Generator {
   // states
   private S: Record<string, number> = {};
 
-  constructor(public seed: number, public reg: BlockRegistry) {
+  constructor(public seed: number, public reg: BlockRegistry, bundle: StructureBundle | null = null) {
     this.tempN = new FBM(seed + 11, 3, 2, 0.5);
     this.humN = new FBM(seed + 22, 3, 2, 0.5);
     this.contN = new FBM(seed + 33, 6, 2, 0.55);
@@ -44,7 +50,9 @@ export class OverworldGen implements Generator {
     this.caveBiomeN = new Perlin(seed + 144);
     this.st = new FeatureStates(reg);
     this.trees = new TreeGen(reg, this.st);
-    const names = ['stone', 'deepslate', 'dirt', 'grass_block', 'water', 'lava', 'bedrock', 'sand', 'sandstone', 'red_sand', 'red_sandstone', 'gravel', 'snow_block', 'ice', 'packed_ice', 'podzol', 'mycelium', 'coarse_dirt', 'terracotta', 'mud', 'clay', 'calcite', 'tuff', 'granite', 'diorite', 'andesite', 'coal_ore', 'deepslate_coal_ore', 'iron_ore', 'deepslate_iron_ore', 'copper_ore', 'deepslate_copper_ore', 'gold_ore', 'deepslate_gold_ore', 'redstone_ore', 'deepslate_redstone_ore', 'lapis_ore', 'deepslate_lapis_ore', 'diamond_ore', 'deepslate_diamond_ore', 'emerald_ore', 'deepslate_emerald_ore', 'short_grass', 'fern', 'dead_bush', 'dandelion', 'poppy', 'blue_orchid', 'allium', 'azure_bluet', 'red_tulip', 'orange_tulip', 'white_tulip', 'pink_tulip', 'oxeye_daisy', 'cornflower', 'lily_of_the_valley', 'brown_mushroom', 'red_mushroom', 'lily_pad', 'seagrass', 'kelp', 'kelp_plant', 'pumpkin', 'melon', 'cactus', 'sugar_cane', 'bamboo', 'sweet_berry_bush', 'moss_block', 'moss_carpet', 'glow_lichen', 'dripstone_block', 'pointed_dripstone', 'spore_blossom', 'sculk', 'pink_petals', 'wildflowers', 'bush', 'leaf_litter', 'firefly_bush', 'cave_air', 'pale_moss_block', 'pale_moss_carpet', 'stone_button'];
+    const sctx: StructureGenContext = { seed, reg, st: this.st, trees: this.trees, dimension: 'overworld', bundle, probe: (x, y, z) => this.probeBlock(x, y, z), surfaceY: (x, z) => this.surfaceY(x, z), biomeAt: (x, z) => BIOMES[this.columnInfo(x, z).biome] };
+    this.structures = new StructureManager(sctx, bundle ? [VILLAGE, STRONGHOLD] : [STRONGHOLD]);
+    const names = ['stone', 'deepslate', 'dirt', 'grass_block', 'water', 'lava', 'bedrock', 'sand', 'sandstone', 'red_sand', 'red_sandstone', 'gravel', 'snow_block', 'ice', 'packed_ice', 'podzol', 'mycelium', 'coarse_dirt', 'terracotta', 'mud', 'clay', 'calcite', 'tuff', 'granite', 'diorite', 'andesite', 'coal_ore', 'deepslate_coal_ore', 'iron_ore', 'deepslate_iron_ore', 'copper_ore', 'deepslate_copper_ore', 'gold_ore', 'deepslate_gold_ore', 'redstone_ore', 'deepslate_redstone_ore', 'lapis_ore', 'deepslate_lapis_ore', 'diamond_ore', 'deepslate_diamond_ore', 'emerald_ore', 'deepslate_emerald_ore', 'short_grass', 'fern', 'dead_bush', 'dandelion', 'poppy', 'blue_orchid', 'allium', 'azure_bluet', 'red_tulip', 'orange_tulip', 'white_tulip', 'pink_tulip', 'oxeye_daisy', 'cornflower', 'lily_of_the_valley', 'brown_mushroom', 'red_mushroom', 'lily_pad', 'seagrass', 'kelp', 'kelp_plant', 'pumpkin', 'melon', 'cactus', 'sugar_cane', 'bamboo', 'sweet_berry_bush', 'moss_block', 'moss_carpet', 'glow_lichen', 'dripstone_block', 'pointed_dripstone', 'spore_blossom', 'sculk', 'pink_petals', 'wildflowers', 'bush', 'leaf_litter', 'firefly_bush', 'cave_air', 'pale_moss_block', 'pale_moss_carpet', 'stone_button', 'mossy_cobblestone', 'cobblestone'];
     for (const n of names) this.S[n] = reg.defaultState(n);
     const brnd = new Random(seed ^ 0x5bd1e995);
     const colors = ['terracotta', 'orange_terracotta', 'yellow_terracotta', 'white_terracotta', 'red_terracotta', 'brown_terracotta', 'light_gray_terracotta'];
@@ -280,19 +288,24 @@ export class OverworldGen implements Generator {
       }
     }
     const sink = new ChunkSink(this, chunk);
-    // tree placement checks always read the pristine terrain so both sides of a chunk border agree
-    this.trees.checkSink = { get: (x, y, z) => this.probeBlock(x, y, z), set: () => {} };
+    // structures go in before features so trees avoid them (vanilla: structure starts precede features)
+    chunk.structures = this.structures.apply(chunk, sink);
+    // tree placement checks always read the pristine terrain (+ structures) so both sides of a chunk border agree
+    this.trees.checkSink = { get: (x, y, z) => { const st = this.structures.blockAt(x, y, z); return st >= 0 ? st : this.probeBlock(x, y, z); }, set: () => {} };
     // ores + features from this chunk and its neighbours (clipped)
     for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
       this.placeOres(sink, cx + dx, cz + dz);
       this.placeTrees(sink, cx + dx, cz + dz, dx === 0 && dz === 0);
     }
     this.trees.checkSink = null;
+    this.placeDungeons(sink, chunk);
     this.placePlants(sink, cx, cz);
     this.computeHeightmap(chunk);
     chunk.decorated = true;
     return chunk;
   }
+
+  locate(type: string, x: number, z: number): [number, number] | null { return this.structures.locate(type, x, z); }
 
   computeHeightmap(chunk: Chunk): void {
     const reg = this.reg;
@@ -401,6 +414,48 @@ export class OverworldGen implements Generator {
 
   private surfaceYVia(_sink: ProbeSinkLike, x: number, z: number): number {
     return this.surfaceY(x, z);
+  }
+
+  // ---------- dungeons (vanilla MonsterRoomFeature: monster_room ×10 at y 0..top, monster_room_deep ×4 at y -58..10) ----------
+  private placeDungeons(sink: BlockSink, chunk: Chunk): void {
+    const rnd = new Random(hashSeed(this.seed, chunk.cx, chunk.cz, 0xd0e));
+    const reg = this.reg, S = this.S;
+    const x0 = chunk.cx * 16, z0 = chunk.cz * 16;
+    const solid = (x: number, y: number, z: number) => { const st = sink.get(x, y, z); return st > 0 && !reg.isFluid(st) && reg.fullCube[st] === 1; };
+    const empty = (x: number, y: number, z: number) => { const st = sink.get(x, y, z); return st === 0 || reg.isAir(st); };
+    // twice the vanilla attempt counts: our caves are sparser and rooms can't straddle the chunk border here
+    for (let attempt = 0; attempt < 28; attempt++) {
+      const deep = attempt >= 20;
+      const ox = x0 + 4 + rnd.nextInt(8), oz = z0 + 4 + rnd.nextInt(8);
+      const oy = deep ? -58 + rnd.nextInt(69) : rnd.nextInt(256);
+      if (oy < MIN_Y + 6) continue;
+      const rx = rnd.nextInt(2) + 2, rz = rnd.nextInt(2) + 2;
+      let openings = 0, ok = true;
+      for (let x = ox - rx - 1; x <= ox + rx + 1 && ok; x++) for (let y = oy - 1; y <= oy + 4 && ok; y++) for (let z = oz - rz - 1; z <= oz + rz + 1; z++) {
+        const isSolid = solid(x, y, z);
+        if ((y === oy - 1 || y === oy + 4) && !isSolid) { ok = false; break; }
+        if ((x === ox - rx - 1 || x === ox + rx + 1 || z === oz - rz - 1 || z === oz + rz + 1) && y === oy && empty(x, y, z) && empty(x, y + 1, z)) openings++;
+      }
+      if (!ok || openings < 1 || openings > 5) continue;
+      for (let x = ox - rx - 1; x <= ox + rx + 1; x++) for (let y = oy + 3; y >= oy - 1; y--) for (let z = oz - rz - 1; z <= oz + rz + 1; z++) {
+        const wall = x === ox - rx - 1 || x === ox + rx + 1 || y === oy - 1 || y === oy + 4 || z === oz - rz - 1 || z === oz + rz + 1;
+        if (!wall) { sink.set(x, y, z, 0); continue; }
+        if (y >= oy && !solid(x, y - 1, z)) sink.set(x, y, z, 0);
+        else if (solid(x, y, z)) sink.set(x, y, z, y === oy - 1 && rnd.nextInt(4) !== 0 ? S.mossy_cobblestone : S.cobblestone);
+      }
+      // up to two chests against a single wall (vanilla: 3 tries each)
+      for (let k = 0; k < 2; k++) for (let t = 0; t < 3; t++) {
+        const x = ox + rnd.nextInt(rx * 2 + 1) - rx, z = oz + rnd.nextInt(rz * 2 + 1) - rz;
+        if (!empty(x, oy, z)) continue;
+        let walls = 0; if (solid(x - 1, oy, z)) walls++; if (solid(x + 1, oy, z)) walls++; if (solid(x, oy, z - 1)) walls++; if (solid(x, oy, z + 1)) walls++;
+        if (walls !== 1) continue;
+        sink.set(x, oy, z, this.st.withProps('chest', { facing: ['north', 'south', 'west', 'east'][rnd.nextInt(4)] }));
+        chunk.setBlockEntity(x & 15, oy, z & 15, { type: 'chest', x, y: oy, z, lootTable: 'chests/simple_dungeon', invSize: 27 } as any);
+        break;
+      }
+      sink.set(ox, oy, oz, this.st.id('spawner'));
+      chunk.setBlockEntity(ox & 15, oy, oz & 15, { type: 'spawner', x: ox, y: oy, z: oz, mob: ['skeleton', 'zombie', 'zombie', 'spider'][rnd.nextInt(4)], invSize: 0 } as any);
+    }
   }
 
   // ---------- plants & small features (within chunk) ----------

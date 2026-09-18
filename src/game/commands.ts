@@ -45,7 +45,7 @@ export const COMMAND_USAGE: Record<string, string> = {
   teammsg: '/teammsg <message>',
   tellraw: '/tellraw <targets> <text>',
   title: '/title <targets> <title|subtitle|actionbar|clear> [text]',
-  locate: '/locate biome <biome>',
+  locate: '/locate structure <village|stronghold|fortress> | /locate biome <biome>',
   enchant: '/enchant <targets> <enchantment> [level]',
   playsound: '/playsound <sound> [source] [targets] [x y z] [volume] [pitch]',
   particle: '/particle <name> [x y z] [count]',
@@ -85,7 +85,7 @@ export function suggestCommand(g: Game, text: string): string[] {
     case 'fill': return parts.length <= 7 ? pick(['~']) : parts.length === 8 ? pick(blockNames()) : pick(['replace', 'keep', 'hollow', 'outline', 'destroy']);
     case 'clone': return pick(['~']);
     case 'gamerule': return parts.length === 2 ? pick(Object.keys(g.rules)) : pick(['true', 'false']);
-    case 'locate': return parts.length === 2 ? pick(['biome', 'structure']) : parts.length === 3 ? pick(BIOMES.map((b) => b.name)) : [];
+    case 'locate': return parts.length === 2 ? pick(['biome', 'structure']) : parts.length === 3 ? pick(parts[1] === 'structure' ? ['village', 'stronghold', 'fortress'] : BIOMES.map((b) => b.name)) : [];
     case 'xp': case 'experience': return parts.length === 2 ? pick(['add', 'set', 'query']) : parts.length === 3 ? pick(targets) : parts.length === 5 ? pick(['points', 'levels']) : [];
     case 'title': return parts.length === 2 ? pick(targets) : parts.length === 3 ? pick(['title', 'subtitle', 'actionbar', 'clear']) : [];
     case 'enchant': return parts.length === 2 ? pick(targets) : parts.length === 3 ? pick((g.assets.mcdata.enchantments ?? []).map((e: any) => e.name)) : [];
@@ -116,7 +116,7 @@ export function completeCommand(g: Game, text: string): string | null {
     case 'setblock': if (parts.length === 5) return complete(g.registry.blocks.map((b) => b.name)); break;
     case 'fill': if (parts.length === 8) return complete(g.registry.blocks.map((b) => b.name)); break;
     case 'gamerule': if (parts.length === 2) return complete(Object.keys(g.rules)); break;
-    case 'locate': if (parts.length === 2) return complete(['biome']); if (parts.length === 3) return complete(BIOMES.map((b) => b.name)); break;
+    case 'locate': if (parts.length === 2) return complete(['biome', 'structure']); if (parts.length === 3) return complete(parts[1] === 'structure' ? ['village', 'stronghold', 'fortress'] : BIOMES.map((b) => b.name)); break;
     case 'xp': case 'experience': if (parts.length === 2) return complete(['add', 'set', 'query']); break;
     case 'title': if (parts.length === 3) return complete(['title', 'subtitle', 'actionbar', 'clear']); break;
     case 'enchant': if (parts.length === 3) return complete(g.assets.mcdata.enchantments?.map((e: any) => e.name) ?? []); break;
@@ -373,7 +373,17 @@ export function runCommand(g: Game, text: string, executor?: Player, feedback?: 
       }
       case 'locate': {
         const name = (parts[2] ?? parts[1] ?? '').replace('minecraft:', '');
-        if (parts[1] === 'structure') throw new CommandError('Structures are not generated in VoxeLand yet');
+        if (parts[1] === 'structure') {
+          const kind = name.replace(/^village_.*/, 'village').replace(/^nether_fortress$|^fortress$/, 'fortress');
+          if (!['village', 'stronghold', 'fortress'].includes(kind)) throw new CommandError((g.assets.lang['commands.locate.structure.invalid'] ?? 'There is no structure with type "%s"').replace('%s', name));
+          const label = g.assets.lang[`structure.minecraft.${kind === 'fortress' ? 'fortress' : kind}`] ?? kind;
+          g.chunks.locate(kind, p.x, p.z).then((pos) => {
+            if (!pos) { say((g.assets.lang['commands.locate.structure.not_found'] ?? 'Could not find a structure of type "%s" nearby').replace('%s', name)); return; }
+            const d = Math.round(Math.hypot(pos[0] - p.x, pos[1] - p.z));
+            say((g.assets.lang['commands.locate.structure.success'] ?? 'The nearest %s is at %s (%s blocks away)').replace('%s', label).replace('%s', `[${pos[0]}, ~, ${pos[1]}]`).replace('%s', String(d)));
+          });
+          break;
+        }
         const bi = BIOMES.findIndex((b) => b.name === name);
         if (bi < 0) throw new CommandError(`Unknown biome '${name}'`);
         let found: [number, number] | null = null;

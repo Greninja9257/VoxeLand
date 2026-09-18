@@ -4,6 +4,7 @@ import { ArrowEntity, ThrownProjectile } from './misc';
 import { ItemStack } from '../items/stack';
 import { lookDir, wrapDegrees, clamp } from '../math';
 import type { Player } from './player';
+import { JOB_SITES, LEVEL_XP, MAX_LEVEL, offersForLevel, wanderingTraderOffers, type Trade } from './villagerTrades';
 
 export interface MobDef {
   name: string;
@@ -151,6 +152,15 @@ export class Mob extends LivingEntity {
   charged = false;
   attackAnim = 0;
   head = { yaw: 0, pitch: 0 };
+  // villagers / zombie villagers (vanilla VillagerData)
+  profession = 'none'; villagerType = 'plains'; villagerLevel = 1; villagerXp = 0;
+  trades: Trade[] | null = null;
+  jobSite: [number, number, number] | null = null;
+  lastRestockDay = -1;
+  /** vanilla "unhappy" head shake ticks */
+  headShake = 0;
+  /** zombie villager being cured: ticks left */
+  conversionTime = -1;
 
   constructor(def: MobDef) {
     super();
@@ -192,9 +202,91 @@ export class Mob extends LivingEntity {
   /** Nearest player (host or remote) — mobs target and follow whoever is closest. */
   private get player(): Player | null { return this.game.nearestPlayer(this.x, this.y, this.z); }
 
+  get isVillager(): boolean { return this.type === 'villager'; }
+  get isZombieVillager(): boolean { return this.type === 'zombie_villager'; }
+  setVillagerData(profession: string, villagerType: string, level = 1): void {
+    if (this.profession !== profession || this.villagerLevel !== level) this.trades = null;
+    this.profession = profession; this.villagerType = villagerType; this.villagerLevel = Math.max(1, Math.min(MAX_LEVEL, level));
+  }
+  /** Offers, generated on first use (two per level, vanilla VillagerTrades). */
+  ensureTrades(): Trade[] {
+    if (this.trades) return this.trades;
+    const g = this.game, items = g.items;
+    const rnd = Math.random;
+    if (this.type === 'wandering_trader') return (this.trades = wanderingTraderOffers(rnd, items));
+    const out: Trade[] = [];
+    if (this.profession !== 'none' && this.profession !== 'nitwit') for (let lv = 1; lv <= this.villagerLevel; lv++) out.push(...offersForLevel(this.profession, lv, rnd, items, g.tradeContext(this.villagerType)));
+    return (this.trades = out);
+  }
+  /** Called by the trading screen after a successful trade. */
+  onTraded(t: Trade): void {
+    t.uses++;
+    this.villagerXp += t.xp;
+    const g = this.game;
+    if (this.isVillager && this.villagerLevel < MAX_LEVEL && this.villagerXp >= LEVEL_XP[this.villagerLevel]) {
+      this.villagerLevel++;
+      this.trades!.push(...offersForLevel(this.profession, this.villagerLevel, Math.random, g.items, g.tradeContext(this.villagerType)));
+      g.sounds.playAt('entity.villager.yes', this.x, this.y, this.z, 1, 1);
+      g.particles.spawnHappyVillager(this.x, this.y + this.height, this.z, 5);
+    }
+  }
+  /** Villager job hunting (claims a free job-site block nearby), losing a job whose block is gone, and daily restocks. */
+  private villagerTick(): void {
+    const g = this.game, world = this.world, reg = world.registry;
+    if (this.age % 100 !== 0 || this.isBaby) return;
+    const bx = Math.floor(this.x), by = Math.floor(this.y), bz = Math.floor(this.z);
+    if (this.jobSite) {
+      const [jx, jy, jz] = this.jobSite;
+      const st = world.getBlock(jx, jy, jz);
+      const prof = st ? JOB_SITES[reg.nameOf(st)] : undefined;
+      if (prof !== this.profession) { this.jobSite = null; if (this.villagerXp === 0) { this.profession = 'none'; this.trades = null; } }
+    }
+    if (!this.jobSite && this.profession !== 'nitwit') {
+      // vanilla AcquirePoi: the nearest unclaimed job site; an employed villager only re-claims its own kind of block
+      let best: [number, number, number] | null = null, bd = Infinity;
+      for (let dy = -2; dy <= 2; dy++) for (let dz = -10; dz <= 10; dz++) for (let dx = -10; dx <= 10; dx++) {
+        const st = world.getBlock(bx + dx, by + dy, bz + dz);
+        if (!st) continue;
+        const prof = JOB_SITES[reg.nameOf(st)];
+        if (!prof || (this.profession !== 'none' && prof !== this.profession)) continue;
+        const d = dx * dx + dy * dy + dz * dz;
+        if (d >= bd) continue;
+        const x = bx + dx, y = by + dy, z = bz + dz;
+        if (g.entities.some((e) => e !== this && e instanceof Mob && e.jobSite && e.jobSite[0] === x && e.jobSite[1] === y && e.jobSite[2] === z)) continue;
+        best = [x, y, z]; bd = d;
+      }
+      if (best) {
+        this.jobSite = best;
+        const prof = JOB_SITES[reg.nameOf(world.getBlock(best[0], best[1], best[2]))];
+        if (this.profession === 'none') { this.profession = prof; this.trades = null; g.sounds.playAt(`entity.villager.work_${prof}`, this.x, this.y, this.z, 1, 1); }
+      }
+    }
+    // restock (vanilla: up to twice a day while at the job site; once a day here)
+    const day = Math.floor(world.dayTime / 24000);
+    if (this.jobSite && this.trades && day !== this.lastRestockDay && this.distSq(this.jobSite[0] + 0.5, this.jobSite[1], this.jobSite[2] + 0.5) < 16 * 16) {
+      this.lastRestockDay = day;
+      if (this.trades.some((t) => t.uses > 0)) { for (const t of this.trades) t.uses = 0; g.sounds.playAt(`entity.villager.work_${this.profession}`, this.x, this.y, this.z, 1, 1); }
+    }
+  }
+  /** Zombie villager → villager once the curing timer runs out (vanilla ZombieVillager.finishConversion). */
+  private tickConversion(): void {
+    if (this.conversionTime < 0) return;
+    const g = this.game;
+    if (this.age % 10 === 0) for (let i = 0; i < 2; i++) g.particles.spawnPoof(this.x + (Math.random() - 0.5) * this.width, this.y + Math.random() * this.height, this.z + (Math.random() - 0.5) * this.width, 1);
+    if (--this.conversionTime > 0) return;
+    const v = g.spawnMob('villager', this.x, this.y, this.z, this.isBaby);
+    if (v) { v.setVillagerData(this.profession, this.villagerType, this.villagerLevel); v.villagerXp = this.villagerXp; v.trades = this.trades; v.persistent = this.persistent; if ((this as any).customName) (v as any).customName = (this as any).customName; v.addEffect({ id: 'nausea', amplifier: 0, duration: 200 }); }
+    g.sounds.playAt('entity.zombie_villager.converted', this.x, this.y, this.z, 1, 1);
+    this.remove();
+  }
+  private isZombieLike(): boolean { return this.hostile && this.def.model === 'zombie' && this.type !== 'zombified_piglin'; }
+  private isIllager(): boolean { return this.type === 'pillager' || this.type === 'vindicator' || this.type === 'evoker' || this.type === 'illusioner' || this.type === 'ravager' || this.type === 'vex'; }
+
   applySnapshot(s: any): void {
     super.applySnapshot(s);
     const ex = s.ex; if (!ex) return;
+    if (ex.prof !== undefined) { this.profession = ex.prof; this.villagerType = ex.vtype ?? this.villagerType; this.villagerLevel = ex.vlevel ?? this.villagerLevel; }
+    this.conversionTime = ex.curing ? 1 : -1;
     if (ex.baby !== undefined && ex.baby !== this.isBaby) this.setBaby(!!ex.baby);
     this.sheared = !!ex.sheared; if (ex.wool) this.woolColor = ex.wool; this.tamed = !!ex.tamed; this.sitting = !!ex.sit;
     this.prevSwell = this.swell; this.swell = ex.swell ?? 0; this.angerTicks = ex.anger ? 100 : 0; if (ex.size) this.slimeSize = ex.size; this.variant = ex.variant ?? this.variant;
@@ -221,8 +313,15 @@ export class Mob extends LivingEntity {
   }
 
   die(d: EntityDamage): void {
-    super.die(d);
     const g = this.game;
+    if (this.isVillager && d.attacker instanceof Mob && d.attacker.isZombieLike() && g.difficulty >= 2 && (g.difficulty === 3 || Math.random() < 0.5)) {
+      const z = g.spawnMob('zombie_villager', this.x, this.y, this.z, this.isBaby);
+      if (z) { z.setVillagerData(this.profession, this.villagerType, this.villagerLevel); z.villagerXp = this.villagerXp; z.trades = this.trades; z.persistent = true; if ((this as any).customName) (z as any).customName = (this as any).customName; }
+      g.sounds.playAt('entity.zombie.infect', this.x, this.y, this.z, 1, 1);
+      this.remove();
+      return;
+    }
+    super.die(d);
     const killer = d.attacker && (d.attacker as any).isPlayer ? (d.attacker as Player) : null;
     const killedByPlayer = !!killer;
     const looting = killer ? (killer.heldItem()?.enchantLevel('looting') ?? 0) : 0;
@@ -254,6 +353,9 @@ export class Mob extends LivingEntity {
     if (this.angerTicks > 0) { this.angerTicks--; if (this.angerTicks === 0 && this.def.ai.neutral) this.target = null; }
     if (this.panicTicks > 0) this.panicTicks--;
     if (this.attackAnim > 0) this.attackAnim--;
+    if (this.headShake > 0) this.headShake--;
+    if (this.isVillager) this.villagerTick();
+    if (this.isZombieVillager) this.tickConversion();
     // ambient sounds
     if (--this.ambientTimer <= 0) { this.ambientTimer = 80 + Math.floor(Math.random() * 200); if (Math.random() < 0.6) this.sound('ambient', 1); }
     // daylight burning
@@ -304,7 +406,19 @@ export class Mob extends LivingEntity {
     }
     if (this.type === 'pig' && n === 'saddle' && !this.saddled) { this.saddled = true; if (!player.isCreative) held!.count--; return true; }
     if (n === 'name_tag' && held?.customName) { (this as any).customName = held.customName; this.persistent = true; if (!player.isCreative) held.count--; return true; }
-    if (this.type === 'villager' || this.type === 'wandering_trader') { g.gui.openTrading(this); return true; }
+    if (this.isZombieVillager && n === 'golden_apple' && this.hasEffect('weakness') && this.conversionTime < 0) {
+      // vanilla ZombieVillager.startConverting: 3600–6000 ticks
+      if (!player.isCreative) held!.count--; player.inventory.onChange?.();
+      this.conversionTime = 3600 + Math.floor(Math.random() * 2401); this.removeEffect('weakness'); this.addEffect({ id: 'strength', amplifier: 0, duration: this.conversionTime });
+      g.sounds.playAt('entity.zombie_villager.cure', this.x, this.y, this.z, 1, 1); this.persistent = true;
+      return true;
+    }
+    if (this.type === 'villager' || this.type === 'wandering_trader') {
+      if (this.isBaby || this.health <= 0) return false;
+      if (this.isVillager && (this.profession === 'none' || this.profession === 'nitwit')) { this.lookAt(player.x, player.eyeY, player.z, 30, 30); g.sounds.playAt('entity.villager.no', this.x, this.y, this.z, 1, 1); this.headShake = 40; return true; }
+      if (player !== g.player) { g.host?.openTrading(player, this); return true; }
+      g.gui.openTrading(this); return true;
+    }
     return false;
   }
 
@@ -322,6 +436,18 @@ export class Mob extends LivingEntity {
       const d = Math.sqrt(this.distSq(p.x, p.y, p.z));
       if (this.hostile && !ai.neutral && d < (ai.followRange ?? 16) && (!ai.lightSensitive || this.world.getLightLevel(Math.floor(this.x), Math.floor(this.y), Math.floor(this.z), g.skyDarken()) < 12 || this.angerTicks > 0) && this.canSee(p) && g.difficulty > 0) this.target = p;
       if (ai.enderman && d < 64 && this.playerLooking(p) && g.difficulty > 0) { this.target = p; this.angerTicks = 600; this.screaming = true; g.sounds.playAt('entity.enderman.stare', this.x, this.y, this.z, 2.5, 1); }
+    }
+    // zombies and illagers hunt villagers; iron golems defend against hostiles (vanilla NearestAttackableTargetGoal)
+    if (!this.target && g.difficulty > 0 && this.age % 10 === 0 && (this.isZombieLike() || this.isIllager() || this.type === 'iron_golem' || this.type === 'snow_golem')) {
+      const golem = this.def.ai.golem;
+      let best: LivingEntity | null = null, bd = (ai.followRange ?? 16) ** 2;
+      for (const e of g.entities) {
+        if (e === this || !(e instanceof Mob) || e.removed || e.health <= 0) continue;
+        if (golem ? !(e.hostile && e.type !== 'creeper') : !(e.isVillager || (this.type !== 'vex' && e.type === 'wandering_trader') || (this.isIllager() && e.type === 'iron_golem'))) continue;
+        const d = this.distSq(e.x, e.y, e.z);
+        if (d < bd && this.canSee(e)) { bd = d; best = e; }
+      }
+      if (best) this.target = best;
     }
     if (this.tamed && this.target && (this.target as any).isPlayer) this.target = null;
     if (this.tamed && this.ownerUuid === p?.uuid && p) { if (p.lastAttacker instanceof LivingEntity && p.lastAttacker !== this && p.lastAttacker.health > 0 && !p.lastAttacker.removed) this.target = p.lastAttacker; }
@@ -351,6 +477,12 @@ export class Mob extends LivingEntity {
       this.wanderTimer--;
       this.moveTowards(this.wanderTarget[0], this.wanderTarget[2], ai.speeds?.panic ?? 1.25);
       return;
+    }
+    // villagers run from zombies and illagers (vanilla AvoidEntityGoal, 8 blocks, 0.5/0.5 speed modifiers)
+    if (this.isVillager || this.type === 'wandering_trader') {
+      let threat: LivingEntity | null = null, bd = 64;
+      for (const e of g.entities) { if (e instanceof Mob && !e.removed && e.health > 0 && (e.isZombieLike() || e.isIllager() || e.type === 'zoglin')) { const d = this.distSq(e.x, e.y, e.z); if (d < bd) { bd = d; threat = e; } } }
+      if (threat) { this.wanderTarget = null; this.moveTowards(this.x * 2 - threat.x, this.z * 2 - threat.z, 0.5); return; }
     }
     // attack target
     if (this.target && !this.tamed || (this.target && this.tamed && !(this.target as any).isPlayer)) {
@@ -613,13 +745,14 @@ export class Mob extends LivingEntity {
     } else super.travel();
   }
 
-  serialize(): any { return { ...super.serialize(), woolColor: this.woolColor, sheared: this.sheared, slimeSize: this.slimeSize, tamed: this.tamed, owner: this.ownerUuid, sitting: this.sitting, growAge: this.growAge, persistent: this.persistent, saddled: this.saddled, variant: this.variant, customName: (this as any).customName }; }
+  serialize(): any { return { ...super.serialize(), woolColor: this.woolColor, sheared: this.sheared, slimeSize: this.slimeSize, tamed: this.tamed, owner: this.ownerUuid, sitting: this.sitting, growAge: this.growAge, persistent: this.persistent, saddled: this.saddled, variant: this.variant, customName: (this as any).customName, profession: this.profession, villagerType: this.villagerType, villagerLevel: this.villagerLevel, villagerXp: this.villagerXp, trades: this.trades, jobSite: this.jobSite, conversionTime: this.conversionTime }; }
   deserialize(d: any): void {
     super.deserialize(d);
     this.woolColor = d.woolColor ?? this.woolColor; this.sheared = !!d.sheared; if (d.slimeSize && this.def.ai.slime) this.setSlimeSize(d.slimeSize);
     this.tamed = !!d.tamed; this.ownerUuid = d.owner ?? null; this.sitting = !!d.sitting; this.persistent = !!d.persistent; this.saddled = !!d.saddled; this.variant = d.variant ?? 0;
     if (d.growAge < 0) this.setBaby(true), this.growAge = d.growAge;
     if (d.customName) (this as any).customName = d.customName;
+    if (d.profession) { this.profession = d.profession; this.villagerType = d.villagerType ?? 'plains'; this.villagerLevel = d.villagerLevel ?? 1; this.villagerXp = d.villagerXp ?? 0; this.trades = d.trades ?? null; this.jobSite = d.jobSite ?? null; this.conversionTime = d.conversionTime ?? -1; }
   }
 }
 
