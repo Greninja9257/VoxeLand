@@ -19,7 +19,7 @@ const MAX_QUADS = 1 << 18;
 export class Renderer implements SectionMeshTarget {
   gl: WebGL2RenderingContext;
   chunkProg: Program; entityProg: Program; skyProg: Program; lineProg: Program; quadProg: Program; cloudProg: Program;
-  atlasTex: WebGLTexture; lightmapTex: WebGLTexture;
+  atlasTex: WebGLTexture; lightmapTex: WebGLTexture; flatLightmapTex!: WebGLTexture;
   private lightmapData = new Uint8Array(16 * 16 * 4);
   private quadIbo: WebGLBuffer;
   sections = new Map<number, SectionGpu>();
@@ -98,6 +98,8 @@ export class Renderer implements SectionMeshTarget {
       this.animState.push({ a, frame: 0, tick: 0, seq, times });
     }
     this.lightmapTex = createTexture(gl, null, { width: 16, height: 16, nearest: false });
+    // constant full-bright lightmap for GUI item icons (vanilla Lighting.setupFor3DItems ignores the world lightmap)
+    this.flatLightmapTex = createTexture(gl, null, { width: 1, height: 1, data: new Uint8Array([255, 255, 255, 255]) });
     // shared quad index buffer
     const idx = new Uint32Array(MAX_QUADS * 6);
     for (let i = 0, v = 0; i < MAX_QUADS; i++, v += 4) { const o = i * 6; idx[o] = v; idx[o + 1] = v + 1; idx[o + 2] = v + 2; idx[o + 3] = v; idx[o + 4] = v + 2; idx[o + 5] = v + 3; }
@@ -467,10 +469,13 @@ export class Renderer implements SectionMeshTarget {
   }
 
   /** Draw a batch of chunk-format vertices (items, particles, held item) with a model matrix (camera-relative). */
-  drawChunkFormatBuffer(data: ArrayBuffer, quads: number, model: Mat4, sky: SkyState, opts: { light?: number; alphaCut?: number; blend?: boolean; blendFunc?: [number, number]; colorMul?: [number, number, number, number]; noCull?: boolean; noDepth?: boolean; noFog?: boolean } = {}): void {
+  drawChunkFormatBuffer(data: ArrayBuffer, quads: number, model: Mat4, sky: SkyState, opts: { light?: number; alphaCut?: number; blend?: boolean; blendFunc?: [number, number]; colorMul?: [number, number, number, number]; noCull?: boolean; noDepth?: boolean; noFog?: boolean; flatLight?: boolean } = {}): void {
     const gl = this.gl;
     if (quads === 0) return;
     this.useChunkProgram(sky);
+    // GUI icons must not inherit the world's day/night, underwater or night-vision lightmap (a crafting table cached
+    // while underwater at night stayed black for the rest of the session)
+    if (opts.flatLight) { gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.flatLightmapTex); gl.activeTexture(gl.TEXTURE0); }
     gl.uniformMatrix4fv(this.chunkProg.u('uModel'), false, model);
     gl.uniform3f(this.chunkProg.u('uOffset'), 0, 0, 0);
     gl.uniform1f(this.chunkProg.u('uLightOverride'), opts.light ?? -1);
@@ -488,6 +493,7 @@ export class Renderer implements SectionMeshTarget {
     if (opts.blend) gl.disable(gl.BLEND);
     if (opts.noCull) gl.enable(gl.CULL_FACE);
     if (opts.noDepth) gl.enable(gl.DEPTH_TEST);
+    if (opts.flatLight) { gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.lightmapTex); gl.activeTexture(gl.TEXTURE0); }
     gl.uniformMatrix4fv(this.chunkProg.u('uModel'), false, IDENTITY);
   }
 

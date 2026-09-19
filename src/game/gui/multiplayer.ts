@@ -1,6 +1,7 @@
 // Multiplayer screens: server list (the backend's public world + everything hosted on the relays you use),
 // direct connection by IP, the password prompt, "Share World" (public / private with a password) and the
 // disconnect notice.
+import type { NetHost } from '../../net/host';
 import { Screen, Button, ListWidget, TextField, CycleButton } from './widgets';
 import { TitleScreen } from './screens';
 import { listServers, PasswordRequired } from '../../net/client';
@@ -247,6 +248,7 @@ export class ShareWorldScreen extends Screen {
   build(): void {
     const g = this.gui.game;
     const cx = this.width / 2;
+    if (g.host) { this.buildSettings(g.host); return; }
     this.gameMode = g.worldMeta?.gameMode ?? 'survival'; this.cheats = g.cheats;
     this.add(new CycleButton(cx - 155, 90, 150, 20, (g.assets.lang['selectWorld.gameMode'] ?? 'Game Mode') + ': ', [{ value: 'survival', label: 'Survival' }, { value: 'creative', label: 'Creative' }, { value: 'adventure', label: 'Adventure' }, { value: 'spectator', label: 'Spectator' }], this.gameMode, (v) => { this.gameMode = v; }));
     this.add(new CycleButton(cx + 5, 90, 150, 20, (g.assets.lang['selectWorld.allowCommands'] ?? 'Allow Cheats') + ': ', [{ value: false, label: 'OFF' }, { value: true, label: 'ON' }], this.cheats, (v) => { this.cheats = v; }));
@@ -271,9 +273,36 @@ export class ShareWorldScreen extends Screen {
     }));
     this.add(new Button(cx + 5, this.height - 28, 150, 20, 'Cancel', () => this.gui.open(this.parent)));
   }
+  /** Already hosting: change the rules for other players (game mode for newcomers, cheats) and op/deop guests. */
+  private buildSettings(host: NetHost): void {
+    const g = this.gui.game, lang = g.assets.lang;
+    const cx = this.width / 2;
+    this.gameMode = host.opts.gameMode; this.cheats = host.opts.cheats;
+    this.add(new CycleButton(cx - 155, 90, 150, 20, (lang['selectWorld.gameMode'] ?? 'Game Mode') + ': ', [{ value: 'survival', label: 'Survival' }, { value: 'creative', label: 'Creative' }, { value: 'adventure', label: 'Adventure' }, { value: 'spectator', label: 'Spectator' }], this.gameMode, (v) => { this.gameMode = v; host.setRules({ gameMode: v }); }));
+    this.add(new CycleButton(cx + 5, 90, 150, 20, (lang['selectWorld.allowCommands'] ?? 'Allow Cheats') + ': ', [{ value: false, label: 'OFF' }, { value: true, label: 'ON' }], this.cheats, (v) => { this.cheats = v; host.setRules({ cheats: v }); }));
+    // connected players with an operator toggle (vanilla /op, /deop)
+    let y = 132;
+    for (const gu of [...host.guests.values()].slice(0, 8)) {
+      const p = gu.player;
+      const btn = this.add(new Button(cx + 55, y, 100, 20, host.isOp(p) ? 'Deop' : 'Op', () => { host.setOp(p, !host.isOp(p)); btn.label = host.isOp(p) ? 'Deop' : 'Op'; }));
+      (btn as any).playerName = p.name;
+      y += 24;
+    }
+    this.add(new Button(cx - 100, this.height - 28, 200, 20, lang['gui.done'] ?? 'Done', () => this.gui.open(this.parent)));
+  }
   render(ctx: CanvasRenderingContext2D, mx: number, my: number, partial: number): void {
     const f = this.gui.font;
     const lang = this.gui.game.assets.lang;
+    if (this.gui.game.host) {
+      f.drawCentered(ctx, lang['lanServer.title'] ?? 'LAN World', this.width / 2, 40, 0xffffff);
+      f.drawCentered(ctx, lang['lanServer.otherPlayers'] ?? 'Settings for Other Players', this.width / 2, 72, 0xa0a0a0);
+      f.draw(ctx, 'Players', this.width / 2 - 155, 120, 0xa0a0a0);
+      let y = 132;
+      for (const gu of [...this.gui.game.host.guests.values()].slice(0, 8)) { f.draw(ctx, `${gu.name}${this.gui.game.host.isOp(gu.player) ? ' §7(operator)' : ''}`, this.width / 2 - 155, y + 6, 0xffffff); y += 24; }
+      if (!this.gui.game.host.guests.size) f.draw(ctx, '§8Nobody has joined yet', this.width / 2 - 155, 138, 0xffffff);
+      super.render(ctx, mx, my, partial);
+      return;
+    }
     f.drawCentered(ctx, lang['lanServer.title'] ?? 'LAN World', this.width / 2, 40, 0xffffff);
     f.drawCentered(ctx, lang['lanServer.otherPlayers'] ?? 'Settings for Other Players', this.width / 2, 72, 0xa0a0a0);
     f.draw(ctx, 'Server address (leave as-is to use this game\'s server):', this.width / 2 - 155, 140, 0x808080);

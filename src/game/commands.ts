@@ -1,5 +1,6 @@
 // Chat commands with vanilla syntax: target selectors (@s @p @a @e @r, names, [type=,distance=,limit=,sort=]),
 // relative coordinates (~), the usual argument order and vanilla-style feedback.
+import { captureSchematic, pasteSchematic, schematicStore, exportSchematic, importSchematic, validSchematicName } from './schematics';
 import type { Game } from './game';
 import { ItemStack } from '../items/stack';
 import { MOB_DEFS, Mob } from '../entity/mobs';
@@ -27,6 +28,9 @@ export const COMMAND_USAGE: Record<string, string> = {
   kill: '/kill [targets]',
   damage: '/damage <target> <amount>',
   seed: '/seed',
+  schem: '/schem pos1|pos2 [x y z] | /schem save <name> | /schem paste <name> [0|90|180|270] | /schem list | /schem delete <name> | /schem export <name> | /schem import',
+  op: '/op <player>',
+  deop: '/deop <player>',
   effect: '/effect give <targets> <effect> [seconds] [amplifier] [hideParticles] | /effect clear [targets] [effect]',
   xp: '/xp <add|set|query> <targets> <amount> [points|levels]',
   experience: '/experience (alias of /xp)',
@@ -74,6 +78,7 @@ export function suggestCommand(g: Game, text: string): string[] {
   switch (cmd) {
     case 'gamemode': return parts.length === 2 ? pick(['survival', 'creative', 'adventure', 'spectator']) : pick(targets);
     case 'defaultgamemode': return pick(['survival', 'creative', 'adventure', 'spectator']);
+    case 'schem': return parts.length === 2 ? pick(['pos1', 'pos2', 'save', 'paste', 'list', 'delete', 'export', 'import']) : parts.length === 4 && parts[1] === 'paste' ? pick(['0', '90', '180', '270']) : [];
     case 'time': return parts.length === 2 ? pick(['set', 'add', 'query']) : parts[1] === 'set' ? pick(['day', 'noon', 'night', 'midnight']) : parts[1] === 'query' ? pick(['daytime', 'gametime', 'day']) : [];
     case 'weather': return parts.length === 2 ? pick(['clear', 'rain', 'thunder']) : [];
     case 'difficulty': return pick(DIFF);
@@ -106,6 +111,7 @@ export function completeCommand(g: Game, text: string): string | null {
   const complete = (opts: string[]) => { const m = opts.find((o) => o.startsWith(last)); return m ? '/' + [...parts.slice(0, -1), m].join(' ') + ' ' : null; };
   if (last.startsWith('@')) return complete(['@s', '@p', '@a', '@e', '@r']);
   switch (cmd) {
+    case 'schem': if (parts.length === 2) return complete(['pos1', 'pos2', 'save', 'paste', 'list', 'delete', 'export', 'import']); break;
     case 'gamemode': case 'defaultgamemode': if (parts.length === 2) return complete(['survival', 'creative', 'adventure', 'spectator']); break;
     case 'time': if (parts.length === 2) return complete(['set', 'add', 'query']); if (parts.length === 3) return complete(['day', 'noon', 'night', 'midnight', 'daytime', 'gametime']); break;
     case 'weather': if (parts.length === 2) return complete(['clear', 'rain', 'thunder']); break;
@@ -201,7 +207,7 @@ export function runCommand(g: Game, text: string, executor?: Player, feedback?: 
       }
       case 'gamemode': case 'defaultgamemode': {
         const m = GAMEMODES[parts[1] ?? '']; if (!m) usage(cmd);
-        if (cmd === 'defaultgamemode') { if (g.worldMeta) g.worldMeta.gameMode = m; say(`The default game mode is now ${g.assets.lang['gameMode.' + m] ?? m}`); break; }
+        if (cmd === 'defaultgamemode') { if (g.worldMeta) g.worldMeta.gameMode = m; g.host?.setRules({ gameMode: m }); say(`The default game mode is now ${g.assets.lang['gameMode.' + m] ?? m}`); break; }
         for (const e of targets(parts[2], [self], true)) { const pl = e as Player; pl.setGameMode(m); say(pl === self ? `Set own game mode to ${g.assets.lang['gameMode.' + m] ?? m}` : `Set ${pl.name}'s game mode to ${g.assets.lang['gameMode.' + m] ?? m}`); }
         break;
       }
@@ -260,6 +266,50 @@ export function runCommand(g: Game, text: string, executor?: Player, feedback?: 
       case 'kill': { const list = targets(parts[1]); for (const e of list) { if (e instanceof LivingEntity) e.hurt({ amount: 1e9, source: 'void', bypassArmor: true }); else e.remove(); } say(list.length === 1 ? `Killed ${nameOf(list[0])}` : `Killed ${list.length} entities`); break; }
       case 'damage': { const amount = parseFloat(parts[2]); if (Number.isNaN(amount)) usage(cmd); for (const e of targets(parts[1])) { if (e instanceof LivingEntity) { e.hurt({ amount, source: 'generic' as any }); say(`Applied ${amount} damage to ${nameOf(e)}`); } } break; }
       case 'seed': say(`Seed: [${g.world.seed}]`); break;
+      case 'schem': {
+        const sub = (parts[1] ?? '').toLowerCase();
+        const sel: { a?: [number, number, number]; b?: [number, number, number] } = ((p as any).schemSelection ??= {});
+        const here = (): [number, number, number] => [Math.floor(p.x), Math.floor(p.y), Math.floor(p.z)];
+        if (sub === 'pos1' || sub === 'pos2') {
+          const pos: [number, number, number] = parts[2] !== undefined ? [blockCoord(parts[2], p.x), blockCoord(parts[3], p.y), blockCoord(parts[4], p.z)] : here();
+          if (sub === 'pos1') sel.a = pos; else sel.b = pos;
+          const other = sub === 'pos1' ? sel.b : sel.a;
+          say(`${sub === 'pos1' ? 'First' : 'Second'} position set to (${pos.join(', ')})${other ? ` (${(Math.abs(pos[0] - other[0]) + 1) * (Math.abs(pos[1] - other[1]) + 1) * (Math.abs(pos[2] - other[2]) + 1)} blocks)` : ''}`);
+          break;
+        }
+        if (sub === 'save') {
+          const name = parts[2]; if (!name || !validSchematicName(name)) throw new CommandError('Name: letters, digits, "_", "-" or "." (up to 32)');
+          if (!sel.a || !sel.b) throw new CommandError('Set both corners first with /schem pos1 and /schem pos2');
+          const schem = captureSchematic(g, name, sel.a, sel.b, here());
+          const n = schem.size[0] * schem.size[1] * schem.size[2];
+          if (p !== g.player && g.host) { g.host.sendSchematic(p, schem); break; } // stored in the guest's own browser
+          schematicStore.save(schem).then(() => say(`Saved "${name}" (${n.toLocaleString()} blocks, ${schem.size.join('×')})`), (e) => err(String(e?.message ?? e)));
+          break;
+        }
+        if (sub === 'paste') {
+          const name = parts[2]; if (!name) usage(cmd);
+          const rot = parseInt(parts[3] ?? '0') || 0;
+          schematicStore.load(name).then((schem) => { if (!schem) { err(`No schematic named "${name}"`); return; } const n = pasteSchematic(g, schem, here(), rot); say(`Pasted "${schem.name}" (${n.toLocaleString()} blocks)`); }, (e) => err(String(e?.message ?? e)));
+          break;
+        }
+        if (sub === 'list') { schematicStore.list().then((names) => say(names.length ? `Schematics: ${names.join(', ')}` : 'No schematics saved yet')); break; }
+        if (sub === 'delete') { const name = parts[2]; if (!name) usage(cmd); schematicStore.delete(name).then((ok) => (ok ? say(`Deleted "${name}"`) : err(`No schematic named "${name}"`))); break; }
+        if (sub === 'export') { const name = parts[2]; if (!name) usage(cmd); schematicStore.load(name).then((schem) => { if (!schem) { err(`No schematic named "${name}"`); return; } exportSchematic(schem); say(`Exported "${schem.name}"`); }); break; }
+        if (sub === 'import') { importSchematic().then(async (schem) => { if (!schem) { err('No schematic imported'); return; } await schematicStore.save(schem); say(`Imported "${schem.name}" (${schem.size.join('×')})`); }); break; }
+        usage(cmd);
+        break;
+      }
+      case 'op': case 'deop': {
+        if (!g.host) throw new CommandError('Only the host of a shared world can grant operator status');
+        const list = targets(parts[1], [], true).filter((e) => e instanceof Player && e !== g.player) as Player[];
+        if (!list.length) throw new CommandError('No player was found');
+        for (const pl of list) {
+          const changed = g.host.setOp(pl, cmd === 'op');
+          if (!changed) throw new CommandError(cmd === 'op' ? 'Nothing changed. The player already is an operator' : 'Nothing changed. The player is not an operator');
+          say(cmd === 'op' ? `Made ${pl.name} a server operator` : `Made ${pl.name} no longer a server operator`);
+        }
+        break;
+      }
       case 'effect': {
         const sub = parts[1];
         if (sub === 'clear') { const id = parts[3]?.replace('minecraft:', ''); for (const e of targets(parts[2])) { if (!(e instanceof LivingEntity)) continue; if (id) e.effects = e.effects.filter((x) => x.id !== id); else { e.effects = []; e.absorption = 0; } say(id ? `Removed effect ${id} from ${nameOf(e)}` : `Removed every effect from ${nameOf(e)}`); } break; }

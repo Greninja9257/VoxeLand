@@ -10,6 +10,7 @@ import { Mob } from '../entity/mobs';
 import { BoatEntity } from '../entity/boat';
 import { ArrowEntity, EyeOfEnderEntity, FallingBlockEntity, PrimedTnt, ThrownProjectile } from '../entity/misc';
 import { nearestStronghold } from '../world/gen/structures';
+import { isSchematic, pasteSchematic, type Schematic } from '../game/schematics';
 import { Inventory, ItemStack } from '../items/stack';
 import { encodeChunk, packFrame, FRAME_CHUNK, PROTOCOL_VERSION, TARGET_SERVER, defaultRelayUrl, isGuestMessage, serializedStackIdentity, type PlayerListEntry } from './protocol';
 import type { Chunk } from '../world/chunk';
@@ -37,6 +38,8 @@ interface Guest {
   chunksInFlight: number;
   /** id of the last position correction sent; moves not stamped with it are stale (vanilla awaitingTeleport) */
   teleportId: number;
+  /** latest creative inventory edit applied from this guest (echoed so the guest can ignore older pushes) */
+  creativeRev: number;
   craftingSize: 2 | 3;
   inventoryRevision: number;
   crafting: Inventory;
@@ -72,6 +75,8 @@ export class NetHost {
   /** the world listener registered on each simulated dimension */
   private listeners = new Map<DimensionInstance, WorldListener>();
   private queue: any[] = [];
+  /** guest whose forwarded sound or predicted block use is being handled: the sounds it causes are tagged so that
+   *  guest, which already played them locally, does not hear them a second time */
   private soundOrigin = 0;
   private ticks = 0;
   private sleepAnnounced = '';
@@ -202,7 +207,7 @@ export class NetHost {
       const stats = this.stats(p), key = JSON.stringify(stats);
       if (key !== gu.statsKey) { gu.statsKey = key; this.send(gu.id, { t: 'stats', ...stats }); }
       if (gu.container && this.ticks % 5 === 0) this.sendContainer(gu, false);
-      if (gu.inventoryDirty || this.ticks % 20 === 0) { gu.inventoryDirty = false; this.send(gu.id, { t: 'self', mode: p.gameMode, state: this.playerState(p) }); }
+      if (gu.inventoryDirty || this.ticks % 20 === 0) { gu.inventoryDirty = false; this.send(gu.id, { t: 'self', mode: p.gameMode, creativeRev: gu.creativeRev, state: this.playerState(p) }); }
     }
     this.checkSleep();
     if (this.ticks % 2 === 0) this.sendEntities(this.ticks % 4 === 0);
@@ -222,7 +227,7 @@ export class NetHost {
         if (m.t === 'bin') continue; // guests send no binary
         if (m.t === 'guestJoined') this.onJoin(m.from, m.playerId, m.name, m.skin);
         else if (m.t === 'guestLeft') this.onLeave(m.from);
-        else if (m.from !== undefined) { const gu = this.guests.get(m.from); if (gu && isGuestMessage(m) && this.game.dims.has(gu.dim)) this.game.withDimension(gu.dim, () => this.onGuestMessage(gu, m)); }
+        else if (m.from !== undefined) { const gu = this.guests.get(m.from); if (gu && isGuestMessage(m) && this.game.dims.has(gu.dim)) this.game.withDimension(gu.dim, () => { const own = m.t === 'use' || m.t === 'snd'; if (own) this.soundOrigin = gu.id; try { this.onGuestMessage(gu, m); } finally { this.soundOrigin = 0; } }); }
       } catch (e) { console.error('host message error', e); }
     }
   }
@@ -253,9 +258,10 @@ export class NetHost {
     });
     p.setPos(saved?.x ?? spawn[0] + 0.5, saved?.y ?? spawn[1], saved?.z ?? spawn[2] + 0.5); p.needsCorrection = false;
     p.setGameMode(this.opts.gameMode as any);
-    const gu: Guest = { id, playerId, name, player: p, dim: inst.dim, known: new Set(), chunks: new Set(), wantChunks: new Set(), container: null, ready: false, lastMoveTick: this.ticks, movementViolations: 0, craftingSize: 2, inventoryRevision: 0, crafting: new Inventory(4), cursor: new Inventory(1), statsKey: '', inventoryDirty: false, rideId: null, movesThisTick: 0, chunksInFlight: 0, teleportId: 0 };
+    p.cheats = this.opts.cheats || g.ops.has(playerId);
+    const gu: Guest = { id, playerId, name, player: p, dim: inst.dim, known: new Set(), chunks: new Set(), wantChunks: new Set(), container: null, ready: false, lastMoveTick: this.ticks, movementViolations: 0, craftingSize: 2, inventoryRevision: 0, crafting: new Inventory(4), cursor: new Inventory(1), statsKey: '', inventoryDirty: false, rideId: null, movesThisTick: 0, chunksInFlight: 0, teleportId: 0, creativeRev: 0 };
     this.guests.set(id, gu);
-    this.send(id, { t: 'welcome', name, selfId: p.id, hostName: this.official ? this.opts.name : this.hostName, dimension: inst.dim, seed: inst.world.seed, time: inst.world.time, dayTime: inst.world.dayTime, spawn, saved: saved ?? null, gameMode: this.opts.gameMode, cheats: this.opts.cheats, difficulty: g.difficulty, rules: g.rules, weather: g.weather.serialize(), version: g.version, protocol: PROTOCOL_VERSION, players: this.playerList(), music: g.sounds.currentMusic() });
+    this.send(id, { t: 'welcome', name, selfId: p.id, hostName: this.official ? this.opts.name : this.hostName, dimension: inst.dim, seed: inst.world.seed, time: inst.world.time, dayTime: inst.world.dayTime, spawn, saved: saved ?? null, gameMode: this.opts.gameMode, cheats: p.cheats, difficulty: g.difficulty, rules: g.rules, weather: g.weather.serialize(), version: g.version, protocol: PROTOCOL_VERSION, players: this.playerList(), music: g.sounds.currentMusic() });
     g.gui.addChat(`§e${name} joined the game`);
     this.broadcast({ t: 'chat', text: `§e${name} joined the game` });
     this.broadcast({ t: 'players', list: this.playerList() });
@@ -299,6 +305,33 @@ export class NetHost {
     gu.teleportId = (gu.teleportId + 1) & 0xffff;
     this.send(gu.id, { t: 'correct', id: gu.teleportId, x, y, z, yaw, pitch });
   }
+  /** a guest copied a region with /schem save: the data goes to its browser, not ours */
+  sendSchematic(p: Player, schem: Schematic): void {
+    for (const gu of this.guests.values()) if (gu.player === p) this.send(gu.id, { t: 'schem', data: schem });
+  }
+  /** vanilla /op, /deop: operator status persists with the world (ops.json) */
+  setOp(p: Player, on: boolean): boolean {
+    const g = this.game;
+    for (const gu of this.guests.values()) if (gu.player === p) {
+      if (on) g.ops.add(gu.playerId); else g.ops.delete(gu.playerId);
+      const cheats = this.opts.cheats || on;
+      if (gu.player.cheats === cheats) return false;
+      gu.player.cheats = cheats;
+      this.send(gu.id, { t: 'perm', cheats });
+      return true;
+    }
+    return false;
+  }
+  /** Change the shared world's rules while hosting (the "Open to LAN" settings, vanilla /defaultgamemode + /publish). */
+  setRules(o: { cheats?: boolean; gameMode?: string }): void {
+    if (o.gameMode) { this.opts.gameMode = o.gameMode; if (this.ws?.readyState === 1) this.ws.send(JSON.stringify({ t: 'update', gameMode: o.gameMode })); }
+    if (o.cheats !== undefined) {
+      this.opts.cheats = o.cheats;
+      this.game.cheats = o.cheats || this.game.cheats;
+      for (const gu of this.guests.values()) { const cheats = o.cheats || this.game.ops.has(gu.playerId); if (gu.player.cheats !== cheats) { gu.player.cheats = cheats; this.send(gu.id, { t: 'perm', cheats }); } }
+    }
+  }
+  isOp(p: Player): boolean { for (const gu of this.guests.values()) if (gu.player === p) return this.game.ops.has(gu.playerId); return p === this.game.player; }
   /** A guest right-clicked a merchant: open the trading screen on their side. */
   openTrading(p: Player, mob: Mob): void {
     for (const gu of this.guests.values()) if (gu.player === p) { gu.trading = mob.id; this.send(gu.id, { t: 'open', kind: 'trading', id: mob.id, mtype: mob.type, prof: mob.profession, level: mob.villagerLevel, xp: mob.villagerXp, trades: mob.ensureTrades() }); }
@@ -357,6 +390,7 @@ export class NetHost {
       }
       case 'inv': // Creative players may choose any item; survival inventory stays host-authoritative.
         if (p.isCreative) {
+          if (Number.isInteger(m.rev)) gu.creativeRev = m.rev;
           if (Array.isArray(m.inventory) && m.inventory.length === p.inventory.size) {
             p.inventory.deserialize(m.inventory, g.items);
             if (Array.isArray(m.armor) && m.armor.length === p.armor.size) p.armor.deserialize(m.armor, g.items);
@@ -398,9 +432,7 @@ export class NetHost {
       case 'snd': {
         const { x, y, z } = m;
         if (typeof m.e !== 'string' || m.e.length > 128 || !g.sounds.events[m.e.replace(/^minecraft:/, '')] || ![x, y, z, m.v, m.p].every(Number.isFinite) || p.distSq(x, y, z) > 1024) break;
-        this.soundOrigin = gu.id;
-        try { g.sounds.playAt(m.e, x, y, z, Math.max(0, Math.min(16, m.v)), Math.max(0.25, Math.min(4, m.p)), m.a !== false); }
-        finally { this.soundOrigin = 0; }
+        g.sounds.playAt(m.e, x, y, z, Math.max(0, Math.min(16, m.v)), Math.max(0.25, Math.min(4, m.p)), m.a !== false);
         break;
       }
       case 'interact': {
@@ -421,7 +453,7 @@ export class NetHost {
         // Transitional transaction validation: moving items is allowed only when the complete multiset across
         // the open menu and player inventory is unchanged. This closes item creation/deletion while explicit
         // vanilla click-mode messages are introduced.
-        if (!this.sameItems([gu.container.inv, p.inventory], [nextContainer, nextPlayer])) { this.sendContainer(gu, true); this.send(gu.id, { t: 'self', mode: p.gameMode, state: this.playerState(p) }); break; }
+        if (!this.sameItems([gu.container.inv, p.inventory], [nextContainer, nextPlayer])) { this.sendContainer(gu, true); this.send(gu.id, { t: 'self', mode: p.gameMode, creativeRev: gu.creativeRev, state: this.playerState(p) }); break; }
         gu.container.inv.deserialize(m.slots, g.items); p.inventory.deserialize(m.player, g.items);
         gu.container.inv.onChange?.(); p.inventory.onChange?.();
         const c = w.chunkAt(gu.container.x, gu.container.z); if (c) c.modified = true;
@@ -429,6 +461,13 @@ export class NetHost {
         break;
       }
       case 'craft': this.remoteCraft(gu, m.id, m.all); break;
+      case 'schemPaste': {
+        if (!(this.opts.cheats || p.cheats)) { this.send(gu.id, { t: 'chat', text: '§cYou are not allowed to paste schematics here' }); break; }
+        if (!isSchematic(m.data)) { this.send(gu.id, { t: 'chat', text: '§cThat schematic could not be read' }); break; }
+        const n = pasteSchematic(g, m.data, [Math.floor(p.x), Math.floor(p.y), Math.floor(p.z)], Number(m.rot) || 0);
+        this.send(gu.id, { t: 'chat', text: `Pasted "${m.data.name}" (${n.toLocaleString()} blocks)` });
+        break;
+      }
       case 'trade': {
         const mob = g.entities.find((x) => x.id === m.id);
         if (!(mob instanceof Mob) || gu.trading !== mob.id || mob.removed || mob.distSq(p.x, p.y, p.z) > 64) break;
@@ -541,7 +580,7 @@ export class NetHost {
       const b = new BoatEntity(wood, heldName.includes('_chest_')); b.setPos(p.x, p.y, p.z); b.yaw = p.yaw;
       if (g.entities.some((x) => !x.removed && x !== p && x.bb.intersects(b.bb))) return;
       g.addEntity(b); if (!p.isCreative && --held.count <= 0) p.inventory.slots[p.selectedSlot] = null;
-      this.send(gu.id, { t: 'self', mode: p.gameMode, state: this.playerState(p) }); return;
+      this.send(gu.id, { t: 'self', mode: p.gameMode, creativeRev: gu.creativeRev, state: this.playerState(p) }); return;
     }
     if (!e) return;
     const v = Array.isArray(m.v) && m.v.length === 3 && m.v.every(Number.isFinite) ? m.v : [0, 0, 0];
@@ -549,14 +588,14 @@ export class NetHost {
     if (e instanceof EyeOfEnderEntity) { g.addEntity(e); return; }
     e.setPos(p.x, p.eyeY - 0.1, p.z); e.vx = v[0] * scale; e.vy = v[1] * scale; e.vz = v[2] * scale; e.yaw = p.yaw; e.pitch = p.pitch;
     g.addEntity(e);
-    this.send(gu.id, { t: 'self', mode: p.gameMode, state: this.playerState(p) });
+    this.send(gu.id, { t: 'self', mode: p.gameMode, creativeRev: gu.creativeRev, state: this.playerState(p) });
   }
 
   private chat(gu: Guest, text: string): void {
     const g = this.game;
     if (text.startsWith('/')) {
       // vanilla IntegratedServer.publishServer: "Allow Cheats" makes every player on the shared world an operator
-      runCommand(g, text, gu.player, (t) => this.send(gu.id, { t: 'chat', text: t }), this.opts.cheats);
+      runCommand(g, text, gu.player, (t) => this.send(gu.id, { t: 'chat', text: t }), this.opts.cheats || gu.player.cheats);
       return;
     }
     const line = `<${gu.name}> ${text}`;

@@ -8,6 +8,7 @@ import { BoatEntity } from '../entity/boat';
 import { ArrowEntity, FallingBlockEntity, PrimedTnt, ThrownProjectile } from '../entity/misc';
 import { ItemStack, Inventory } from '../items/stack';
 import { SET_UPDATE_NEIGHBORS, type WorldListener } from '../world/world';
+import { isSchematic, schematicStore } from '../game/schematics';
 import { Chunk, chunkKey } from '../world/chunk';
 import { decodeChunk, unpackFrame, FRAME_CHUNK, PROTOCOL_VERSION, defaultRelayUrl, shouldApplyInventoryState, type ServerInfo, type PlayerListEntry } from './protocol';
 
@@ -51,6 +52,10 @@ export class NetClient implements WorldListener {
   ping = 0;
   /** last position correction id from the host, echoed on every move (vanilla AcceptTeleportationPacket) */
   private teleportId = 0;
+  /** creative inventory edits sent; the host's inventory pushes are ignored until it has applied the latest one (no flicker) */
+  private creativeRev = 0;
+  /** set while a block use is predicted locally: its sounds are not forwarded (the host replays the use) */
+  suppressForward = false;
   container: { x: number; y: number; z: number; inv: Inventory; be?: any } | null = null;
   disconnectReason = '';
   private wanted = new Set<number>();
@@ -110,7 +115,9 @@ export class NetClient implements WorldListener {
     this.audioAttached = true;
     const sounds = this.game.sounds;
     sounds.musicControlled = true;
-    sounds.onSound = (event, x, y, z, volume, pitch, attenuate) => this.send({ t: 'snd', e: event, x, y, z, v: volume, p: pitch, a: attenuate });
+    // our local sounds reach everyone else through the host — except those of a predicted block use, which the host
+    // replays itself (forwarding those too made the host and other guests hear them twice)
+    sounds.onSound = (event, x, y, z, volume, pitch, attenuate) => { if (!this.suppressForward) this.send({ t: 'snd', e: event, x, y, z, v: volume, p: pitch, a: attenuate }); };
     const music = this.welcome?.music;
     if (music) sounds.playMusicRemote(music.name, music.kind, music.volume);
   }
@@ -168,7 +175,7 @@ export class NetClient implements WorldListener {
     if (p.isCreative) {
       const inv = p.inventory.serialize(), armor = p.armor.serialize(), off = p.offhand.serialize();
       const key = JSON.stringify(inv) + JSON.stringify(armor) + JSON.stringify(off);
-      if (key !== this.lastHeld) { this.lastHeld = key; this.send({ t: 'inv', inventory: inv, armor, off, held: p.heldItem()?.serialize() ?? null }); }
+      if (key !== this.lastHeld) { this.lastHeld = key; this.send({ t: 'inv', rev: ++this.creativeRev, inventory: inv, armor, off, held: p.heldItem()?.serialize() ?? null }); }
     }
     if (this.ticks % 40 === 0) this.send({ t: 'ping', time: performance.now(), ping: this.ping });
   }
@@ -211,7 +218,8 @@ export class NetClient implements WorldListener {
       case 'self': {
         if (m.mode) p.setGameMode(m.mode);
         const s = m.state;
-        if (s) {
+        const stale = p.isCreative && Number.isInteger(m.creativeRev) && m.creativeRev < this.creativeRev;
+        if (s && !stale) {
           if (Array.isArray(s.inventory)) p.inventory.deserialize(s.inventory, g.items);
           if (Array.isArray(s.armor)) p.armor.deserialize(s.armor, g.items);
           if (Array.isArray(s.offhand)) p.offhand.deserialize(s.offhand, g.items);
@@ -223,6 +231,8 @@ export class NetClient implements WorldListener {
         break;
       }
       case 'stats': this.applyStats(m); break;
+      case 'schem': { if (isSchematic(m.data)) schematicStore.save(m.data).then(() => g.gui.addChat(`Saved "${m.data.name}" (${(m.data.size[0] * m.data.size[1] * m.data.size[2]).toLocaleString()} blocks, ${m.data.size.join('×')})`), (e: any) => g.gui.addChat('§c' + String(e?.message ?? e))); break; }
+      case 'perm': { p.cheats = !!m.cheats; g.cheats = !!m.cheats; g.gui.addChat(m.cheats ? '§7You are now an operator on this world' : '§7You are no longer an operator on this world'); break; }
       case 'invState': {
         if (!shouldApplyInventoryState(this.inventoryRevision, m.rev, m.accepted === true)) break;
         this.inventoryRevision = m.rev;

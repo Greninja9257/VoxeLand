@@ -29,7 +29,8 @@ const OFFICIAL_ID = 'official';
 const OFFICIAL_MAX = +(process.env.PUBLIC_MAX_PLAYERS || 16);
 const MAX_STORED_CHUNKS = +(process.env.PUBLIC_MAX_CHUNKS || 2048);
 /** Guests send small intents; the host's snapshots, inventories and public-world metadata are legitimately large. */
-const MAX_GUEST_CONTROL_BYTES = 64 * 1024;
+const MAX_GUEST_CONTROL_BYTES = 4 * 1024 * 1024; // schematic pastes travel as JSON
+const MAX_GUEST_BYTES_PER_SECOND = 8 * 1024 * 1024;
 const MAX_HOST_CONTROL_BYTES = 4 * 1024 * 1024;
 const MAX_GUEST_MESSAGES_PER_SECOND = 400;
 const HEARTBEAT_MS = 30_000;
@@ -157,11 +158,13 @@ wss.on('connection', (ws) => {
   let javaSession = null;
   let rateWindow = Date.now();
   let rateMessages = 0;
+  let rateBytes = 0;
 
   ws.on('message', (data, isBinary) => {
     const now = Date.now();
-    if (now - rateWindow >= 1000) { rateWindow = now; rateMessages = 0; }
+    if (now - rateWindow >= 1000) { rateWindow = now; rateMessages = 0; rateBytes = 0; }
     if (role !== 'host' && ++rateMessages > MAX_GUEST_MESSAGES_PER_SECOND) { ws.close(1008, 'Too many messages'); return; }
+    if (role !== 'host' && (rateBytes += Buffer.byteLength(data)) > MAX_GUEST_BYTES_PER_SECOND) { ws.close(1008, 'Too much data'); return; }
     if (isBinary) {
       const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
       if (role !== 'host') return; // guests and Java clients never have a valid binary control message

@@ -98,7 +98,8 @@ The static build is written to `dist/`. Single-player worlds use IndexedDB, and 
 - Ender Dragon and Wither boss encounters
 - Vanilla-style HUD, menus, inventory screens, fonts, particles, positional audio, music, subtitles, and overlays
 - Rebindable controls and extensive video, audio, chat, accessibility, language, and skin settings
-- Commands with suggestions and completion, including `/gamemode`, `/give`, `/tp`, `/weather`, `/summon`, `/locate`, and `/fill`
+- Commands with suggestions and completion, including `/gamemode`, `/give`, `/tp`, `/weather`, `/summon`, `/locate`, `/fill`, `/op`, and `/defaultgamemode`
+- Schematics: `/schem pos1|pos2`, `save`, `paste` (with rotation), `list`, `delete`, and `export`/`import` as JSON files, stored in the browser
 
 <details>
 <summary><strong>Technical highlights</strong></summary>
@@ -106,7 +107,7 @@ The static build is written to `dist/`. Single-player worlds use IndexedDB, and 
 - Chunk generation and meshing run in a worker pool sized to the available CPU.
 - Each 16³ chunk section is grouped by render layer, with frustum culling and alpha-weighted mipmaps.
 - Local saves use IndexedDB.
-- Player-hosted multiplayer uses WebSockets; the included Node.js backend also maintains a persistent public world.
+- Player-hosted multiplayer uses WebSockets (operators via `/op`, LAN settings editable from the pause menu while hosting); the included Node.js backend also maintains a persistent public world.
 - A gateway translates between the browser protocol and supported Minecraft Java servers.
 
 </details>

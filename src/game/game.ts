@@ -4,6 +4,7 @@ import { loadImage } from '../assets';
 import { BlockRegistry } from '../blocks/registry';
 import { ModelBaker } from '../render/models';
 import { villagerTypeFor } from '../entity/villagerTrades';
+import { schematicStore, exportSchematic, importSchematic } from './schematics';
 import type { ListingContext } from '../entity/villagerTrades';
 import { pickEnchants, ENCH_POOL, maxLevel } from '../items/enchanting';
 import { Mesher } from '../render/mesher';
@@ -104,6 +105,8 @@ export class Game {
   client: NetClient | JavaNetClient | null = null;
   /** saved state of guests that visited this world (by name) */
   playerData = new Map<string, any>();
+  /** player ids given operator status with /op (vanilla ops.json); persisted with the world */
+  ops = new Set<string>();
   get isRemote(): boolean { return this.client !== null; }
   /** Players in the bound dimension: the local player when it is there, plus the guests whose copies live in it. */
   allPlayers(): Player[] { const out: Player[] = []; if (this.player && !this.player.removed && this.player.world === this.world) out.push(this.player); for (const e of this.entities) if (e instanceof RemotePlayer && !e.removed) out.push(e); return out; }
@@ -230,6 +233,7 @@ export class Game {
     if (state?.rules) Object.assign(this.rules, state.rules);
     if (state?.worldSpawn) this.worldSpawn = state.worldSpawn;
     this.playerData = new Map(Object.entries(state?.playerData ?? {}));
+    this.ops = new Set(Array.isArray(state?.ops) ? state.ops : []);
     this.dragonKills = state?.dragonKills ?? 0;
     const dim: Dimension = state?.player?.dimension ?? 'overworld';
     await this.setupDimension(dim, meta.seed, state?.time?.[dim]);
@@ -366,7 +370,7 @@ export class Game {
       time[inst.dim] = { time: this.world.time, dayTime: this.world.dayTime };
     });
     this.host?.saveAllPlayers();
-    if (!this.sessionChunks) storage.saveState(this.worldMeta.id, 'world', { player: this.player.serialize(), weather: this.weather.serialize(), entities, time, rules: this.rules, worldSpawn: this.worldSpawn, playerData: Object.fromEntries(this.playerData), dragonKills: this.dragonKills }).catch(console.error);
+    if (!this.sessionChunks) storage.saveState(this.worldMeta.id, 'world', { player: this.player.serialize(), weather: this.weather.serialize(), entities, time, rules: this.rules, worldSpawn: this.worldSpawn, playerData: Object.fromEntries(this.playerData), ops: [...this.ops], dragonKills: this.dragonKills }).catch(console.error);
     this.worldMeta.lastPlayed = Date.now();
     if (!this.sessionChunks) storage.saveWorldMeta(this.worldMeta).catch(() => {});
   }
@@ -925,6 +929,7 @@ export class Game {
   // ---------- chat ----------
   handleChat(text: string): void {
     if (this.client) {
+      if (/^\/schem\s/i.test(text) && this.guestSchematicCommand(text)) return;
       this.client.send({ t: 'chat', text });
       // a Java server broadcasts our message back to us (vanilla clients never echo); the VoxeLand host does not
       if (!text.startsWith('/') && this.client instanceof NetClient) this.gui.addChat(`<${this.player.name}> ${text}`);
@@ -932,6 +937,18 @@ export class Game {
     }
     if (text.startsWith('/')) runCommand(this, text);
     else { const line = `<${this.player.name}> ${text}`; this.gui.addChat(line); this.host?.broadcast({ t: 'chat', text: line }); }
+  }
+  /** Guests keep schematics in their own browser: list/delete/export/import run locally, paste ships the data to the
+   *  host, pos1/pos2/save run on the host (which sends the copied region back). Returns true when handled here. */
+  private guestSchematicCommand(text: string): boolean {
+    const parts = text.trim().split(/\s+/), sub = (parts[1] ?? '').toLowerCase();
+    const say = (t: string) => this.gui.addChat(t), err = (t: string) => this.gui.addChat('§c' + t);
+    if (sub === 'list') { schematicStore.list().then((names) => say(names.length ? `Schematics: ${names.join(', ')}` : 'No schematics saved yet')); return true; }
+    if (sub === 'delete') { if (!parts[2]) return false; schematicStore.delete(parts[2]).then((ok) => (ok ? say(`Deleted "${parts[2]}"`) : err(`No schematic named "${parts[2]}"`))); return true; }
+    if (sub === 'export') { if (!parts[2]) return false; schematicStore.load(parts[2]).then((sc) => { if (!sc) { err(`No schematic named "${parts[2]}"`); return; } exportSchematic(sc); say(`Exported "${sc.name}"`); }); return true; }
+    if (sub === 'import') { importSchematic().then(async (sc) => { if (!sc) { err('No schematic imported'); return; } await schematicStore.save(sc); say(`Imported "${sc.name}" (${sc.size.join('×')})`); }); return true; }
+    if (sub === 'paste') { if (!parts[2]) return false; schematicStore.load(parts[2]).then((sc) => { if (!sc) { err(`No schematic named "${parts[2]}"`); return; } this.client?.send({ t: 'schemPaste', data: sc, rot: parseInt(parts[3] ?? '0') || 0 }); }); return true; }
+    return false;
   }
   completeCommand(text: string): string | null { return completeCommand(this, text); }
   commandSuggestions(text: string): string[] { return suggestCommand(this, text); }
@@ -991,6 +1008,13 @@ export class Game {
       else if (!input.pointerLocked && input.buttonsPressed.size) { input.lockPointer(); input.discardTick(); }
     }
     if (hadScreen) input.discardTick();
+  }
+
+  /** Use the held item / target block; a guest's local prediction keeps its sounds to itself (the host replays them). */
+  private predictUse(p: Player): void {
+    const c = this.client as NetClient | null;
+    if (c) c.suppressForward = true;
+    try { p.use(this.targetBlock); } finally { if (c) c.suppressForward = false; }
   }
 
   /** Mouse look runs every frame (not per tick) so turning is smooth and nothing is lost. */
@@ -1379,9 +1403,9 @@ export class Game {
       if (input.pointerLocked) {
         if (this.targetEntity && (this.targetEntity as any).interact && input.wasPressed('use')) {
           if (this.client) { this.client.send({ t: 'interact', id: this.targetEntity.remoteId }); p.swing(); p.useCooldown = 4; }
-          else if ((this.targetEntity as Mob | BoatEntity).interact(p, p.heldItem())) { p.swing(); p.useCooldown = 4; } else p.use(this.targetBlock);
+          else if ((this.targetEntity as Mob | BoatEntity).interact(p, p.heldItem())) { p.swing(); p.useCooldown = 4; } else this.predictUse(p);
         }
-        else p.use(this.targetBlock);
+        else this.predictUse(p);
       }
     }
     if (!useDown && p.usingItem) p.stopUsing();

@@ -292,8 +292,10 @@ export class PauseScreen extends Screen {
     this.add(new Button(cx + 4, y + 24, 98, 20, 'Statistics', () => {}));
     this.add(new Button(cx - 102, y + 48, 98, 20, g.assets.lang['menu.options'] ?? 'Options...', () => this.gui.open(new OptionsScreen(this))));
     // vanilla PauseScreen: "Open to LAN" in singleplayer (greyed once shared), "Player Reporting" on a server
-    const share = this.add(new Button(cx + 4, y + 48, 98, 20, g.isRemote ? g.assets.lang['menu.playerReporting'] ?? 'Player Reporting' : g.assets.lang['menu.shareToLan'] ?? 'Open to LAN', () => { if (!g.isRemote && !g.host) this.gui.open(new ShareWorldScreen(this)); }));
-    if (g.host || g.isRemote) share.active = false;
+    const share = this.add(new Button(cx + 4, y + 48, 98, 20, g.isRemote ? g.assets.lang['menu.playerReporting'] ?? 'Player Reporting' : g.assets.lang['menu.shareToLan'] ?? 'Open to LAN', () => { if (!g.isRemote) this.gui.open(new ShareWorldScreen(this)); }));
+    // while hosting, the same button opens the settings for other players (game mode, cheats, operators)
+    if (g.host) share.label = 'LAN Settings…';
+    if (g.isRemote) share.active = false;
     this.add(new Button(cx - 102, y + 72, 204, 20, g.isRemote ? g.assets.lang['menu.disconnect'] ?? 'Disconnect' : g.assets.lang['menu.returnToMenu'] ?? 'Save and Quit to Title', () => g.quitToTitle()));
   }
   render(ctx: CanvasRenderingContext2D, mx: number, my: number, partial: number): void { this.gui.font.drawCentered(ctx, this.gui.game.assets.lang['menu.game'] ?? 'Game Menu', this.width / 2, this.height / 4 - 16, 0xffffff); super.render(ctx, mx, my, partial); }

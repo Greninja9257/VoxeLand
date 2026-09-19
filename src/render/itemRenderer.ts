@@ -262,6 +262,10 @@ export class ItemRenderer {
     }
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
     gl.viewport(0, 0, S, S);
+    // the first icons are drawn before any world frame (joining a world shows the hotbar first): set every piece of
+    // state this pass relies on instead of inheriting it, or the cached icon comes out inside-out
+    const depthWas = gl.isEnabled(gl.DEPTH_TEST), blendWas = gl.isEnabled(gl.BLEND), scissorWas = gl.isEnabled(gl.SCISSOR_TEST);
+    gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL); gl.depthMask(true); gl.disable(gl.BLEND); gl.disable(gl.SCISSOR_TEST); gl.colorMask(true, true, true, true);
     gl.clearColor(0, 0, 0, 0);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     // orthographic projection like vanilla GUI: item occupies 16 units, display.gui transform applied
@@ -272,12 +276,13 @@ export class ItemRenderer {
     const model = new Float32Array(16);
     this.applyDisplay(model, mesh, 'gui');
     const sky = { fogColor: [0, 0, 0] as [number, number, number], fogStart: 1e6, fogEnd: 1e6 + 1 } as any;
-    this.renderer.drawChunkFormatBuffer(mesh.data, mesh.quads, model, sky, { light: 0xff, alphaCut: 0.1, noFog: true, noCull: true });
+    this.renderer.drawChunkFormatBuffer(mesh.data, mesh.quads, model, sky, { light: 0xff, alphaCut: 0.1, noFog: true, noCull: true, flatLight: true });
     this.renderer.vp.set(savedVp);
     const px = new Uint8Array(S * S * 4);
     gl.readPixels(0, 0, S, S, gl.RGBA, gl.UNSIGNED_BYTE, px);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, this.renderer.canvas.width, this.renderer.canvas.height);
+    if (!depthWas) gl.disable(gl.DEPTH_TEST); if (blendWas) gl.enable(gl.BLEND); if (scissorWas) gl.enable(gl.SCISSOR_TEST);
     // flip vertically into the canvas at 16x16 (downsample: nearest)
     target.width = S; target.height = S;
     const img = target.getContext('2d')!.createImageData(S, S);

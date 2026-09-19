@@ -63,6 +63,7 @@ export const storage = {
   },
   loadState<T>(worldId: string, key: string): Promise<T | undefined> { return tx<T | undefined>('state', 'readonly', (s) => s.get(`${worldId}:${key}`)); },
   saveState(worldId: string, key: string, value: any): Promise<void> { return tx('state', 'readwrite', (s) => { s.put(value, `${worldId}:${key}`); }); },
+  deleteState(worldId: string, key: string): Promise<void> { return tx('state', 'readwrite', (s) => { s.delete(`${worldId}:${key}`); }); },
   loadOptions<T>(): Promise<T | undefined> { return tx<T | undefined>('state', 'readonly', (s) => s.get('options')); },
   saveOptions(value: any): Promise<void> { return tx('state', 'readwrite', (s) => { s.put(value, 'options'); }); },
 };
