@@ -688,7 +688,7 @@ export class Game {
 
   // ---------- queries ----------
   isDay(): boolean { const t = this.world.dayTime % 24000; return t < 12542 || t >= 23460; }
-  skyDarken(): number { const sky = computeSky(this.world.dayTime, this.world.dimension, 0x7ba4ff, undefined, 8, this.weather.rainLevel, this.weather.thunderLevel, 64, 'air', 0); return Math.round((1 - sky.dayFactor) * 11 / 0.8 * 0.8 + 0); }
+  skyDarken(): number { const sky = computeSky(this.world.dayTime, this.world.dimension, 0x7ba4ff, undefined, 8, this.weather.rainLevel, this.weather.thunderStrength, 64, 'air', 0); return Math.round((1 - sky.dayFactor) * 11 / 0.8 * 0.8 + 0); }
   biomeAt(x: number, z: number) { return BIOMES[this.world.getBiome(x, z)]; }
   canStandAt(x: number, y: number, z: number): boolean {
     const bb = new AABB(x - 0.3, y, z - 0.3, x + 0.3, y + 1.8, z + 0.3);
@@ -1503,7 +1503,7 @@ export class Game {
     const wc = this.biomeColors; const wo = w.getBiome(bx, bz) * 12;
     const waterColor = (wc[wo + 6] << 16) | (wc[wo + 7] << 8) | wc[wo + 8];
     const dayTimeF = this.rules.doDaylightCycle !== false && !this.paused ? w.dayTime + partial : w.dayTime;
-    let sky = computeSky(dayTimeF, w.dimension, skyColorFor(biome), biome.fogColor, r.viewDistance, this.weather.rainLevel, this.weather.thunderLevel, cam.y, medium as any, waterColor);
+    let sky = computeSky(dayTimeF, w.dimension, skyColorFor(biome), biome.fogColor, r.viewDistance, this.weather.rainLevel, this.weather.thunderStrength, cam.y, medium as any, waterColor);
     if (p.hasEffect('blindness')) { sky.fogStart = 0; sky.fogEnd = 5; }
     if (this.weather.flash > 0) { sky.skyColor = [1, 1, 1]; sky.fogColor = sky.fogColor.map((v) => Math.min(1, v + 0.5)) as any; }
     // darkness in caves: vanilla sky light drives lightmap

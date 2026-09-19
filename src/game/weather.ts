@@ -18,20 +18,25 @@ export class Weather {
   constructor(private game: Game) {}
 
   get rainStrength(): number { return this.rainLevel; }
+  /** vanilla Level.getThunderLevel: the thunder level only shows through the rain (thunder × rain) */
+  get thunderStrength(): number { return this.thunderLevel * this.rainLevel; }
 
   tick(): void {
     const g = this.game;
-    if (g.world.dimension !== 'overworld') { this.rainLevel = 0; this.thunderLevel = 0; return; }
+    // vanilla ServerLevel.advanceWeatherCycle: the Overworld's weather keeps running while players are elsewhere;
+    // thunder (3600–15600 on / 12000–180000 off) and rain (12000–24000 on / 12000–180000 off) are independent
+    // timers, and a thunderstorm is simply when both overlap
     if (g.rules.doWeatherCycle !== false) {
-      if (--this.thunderTime <= 0) { this.thundering = !this.thundering; this.thunderTime = this.thundering ? 3600 + Math.floor(Math.random() * 12000) : 12000 + Math.floor(Math.random() * 168000); if (this.thundering) this.raining = true; }
+      if (--this.thunderTime <= 0) { this.thundering = !this.thundering; this.thunderTime = this.thundering ? 3600 + Math.floor(Math.random() * 12000) : 12000 + Math.floor(Math.random() * 168000); }
       if (--this.rainTime <= 0) { this.raining = !this.raining; this.rainTime = this.raining ? 12000 + Math.floor(Math.random() * 12000) : 12000 + Math.floor(Math.random() * 168000); }
     }
     this.prevRainLevel = this.rainLevel;
     this.rainLevel = Math.max(0, Math.min(1, this.rainLevel + (this.raining ? 0.01 : -0.01)));
     this.thunderLevel = Math.max(0, Math.min(1, this.thunderLevel + (this.thundering ? 0.01 : -0.01)));
     if (this.lightningFlash > 0) this.lightningFlash--;
-    // lightning strikes
-    if (this.thunderLevel > 0.9 && Math.random() < 1 / 100000 * 20 && g.player) {
+    if (g.world.dimension !== 'overworld') return; // the effects below belong to the Overworld
+    // lightning strikes (vanilla tickChunk: raining && thundering, 1 in 100000 per chunk tick)
+    if (this.thunderStrength > 0.9 && Math.random() < 1 / 100000 * 20 && g.player) {
       const x = Math.floor(g.player.x + (Math.random() - 0.5) * 128), z = Math.floor(g.player.z + (Math.random() - 0.5) * 128);
       if (g.world.isLoaded(x, z) && this.biomeRains(g.world, x, z)) this.strikeLightning(x, g.world.getHeight(x, z), z);
     }
