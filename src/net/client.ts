@@ -48,7 +48,6 @@ export class NetClient implements WorldListener {
   applying = false;
   private ticks = 0;
   private lastHeld = '';
-  private lastArmor = '';
   ping = 0;
   /** last position correction id from the host, echoed on every move (vanilla AcceptTeleportationPacket) */
   private teleportId = 0;
@@ -164,10 +163,12 @@ export class NetClient implements WorldListener {
     // vanilla ServerboundMovePlayerPacket: position, look, onGround plus the pose/animation flags others render
     const snap: any = { t: 'move', tp: this.teleportId, x: r3(p.x), y: r3(p.y), z: r3(p.z), yaw: r1(p.yaw), pitch: r1(p.pitch), og: p.onGround, sneak: p.isSneaking, sprint: p.isSprinting, swim: p.swimmingPose, sleep: p.sleeping, fly: p.flying, slot: p.selectedSlot, swing: p.swinging && p.swingTime <= 1, use: !!p.usingItem, br: p.breaking ? { x: p.breaking.x, y: p.breaking.y, z: p.breaking.z, face, stage: p.breakStage, state: p.breaking.state } : null };
     this.send(snap);
-    // creative players pick items out of thin air, so the host has to be told what is in the hand
+    // creative players pick items out of thin air (vanilla ServerboundSetCreativeModeSlotPacket): the host takes the
+    // whole creative inventory as reported, since any slot may have changed
     if (p.isCreative) {
-      const held = JSON.stringify(p.heldItem()?.serialize() ?? null), armor = JSON.stringify(p.armor.serialize()) + JSON.stringify(p.offhand.serialize());
-      if (held !== this.lastHeld || armor !== this.lastArmor) { this.lastHeld = held; this.lastArmor = armor; this.send({ t: 'inv', held: p.heldItem()?.serialize() ?? null, armor: p.armor.serialize(), off: p.offhand.serialize() }); }
+      const inv = p.inventory.serialize(), armor = p.armor.serialize(), off = p.offhand.serialize();
+      const key = JSON.stringify(inv) + JSON.stringify(armor) + JSON.stringify(off);
+      if (key !== this.lastHeld) { this.lastHeld = key; this.send({ t: 'inv', inventory: inv, armor, off, held: p.heldItem()?.serialize() ?? null }); }
     }
     if (this.ticks % 40 === 0) this.send({ t: 'ping', time: performance.now(), ping: this.ping });
   }

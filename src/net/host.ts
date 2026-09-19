@@ -357,8 +357,14 @@ export class NetHost {
       }
       case 'inv': // Creative players may choose any item; survival inventory stays host-authoritative.
         if (p.isCreative) {
-          const held = m.held ? ItemStack.deserialize(m.held, g.items) : null;
-          if (!held || held.count > 0) p.inventory.slots[p.selectedSlot] = held;
+          if (Array.isArray(m.inventory) && m.inventory.length === p.inventory.size) {
+            p.inventory.deserialize(m.inventory, g.items);
+            if (Array.isArray(m.armor) && m.armor.length === p.armor.size) p.armor.deserialize(m.armor, g.items);
+            if (Array.isArray(m.off) && m.off.length === p.offhand.size) p.offhand.deserialize(m.off, g.items);
+          } else {
+            const held = m.held ? ItemStack.deserialize(m.held, g.items) : null;
+            if (!held || held.count > 0) p.inventory.slots[p.selectedSlot] = held;
+          }
           gu.inventoryDirty = true;
         }
         break;
