@@ -24,6 +24,8 @@ export class RemotePlayer extends Player {
   needsCorrection = false;
   /** host: the guest's last movement packet said it was standing on the ground */
   reportedOnGround = true;
+  /** the `use` flag of the previous snapshot (item use starts only on its rising edge) */
+  private lastUseFlag = false;
   constructor(name: string) { super(); this.name = name; this.cheats = false; }
 
   setPos(x: number, y: number, z: number): void {
@@ -58,7 +60,11 @@ export class RemotePlayer extends Player {
     if (s.mode) this.gameMode = s.mode;
     if (s.swing) this.swing();
     if (s.use !== undefined) {
-      if (s.use && !this.usingItem) {
+      // edge-triggered like vanilla's single ServerboundUseItemPacket: a guest whose meal (in its own, possibly
+      // slower or delayed clock) is still flagged "using" after the host's timer finished must not start a second one
+      const rising = !!s.use && !this.lastUseFlag;
+      this.lastUseFlag = !!s.use;
+      if (rising && !this.usingItem) {
         const held = this.heldItem();
         // the host actually consumes the item (vanilla ServerPlayer eats/drinks); mirrors only animate
         const duration = held ? (host ? this.useDurationFor(held) : 72000) : 0;
