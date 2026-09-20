@@ -34,6 +34,8 @@ export class Chunk {
   /** Set once all 8 neighbors were generated and this chunk was decorated with cross-chunk features. */
   decorated = false;
   inhabitedTime = 0;
+  /** serialized block entities at the last load/flush: a change marks the chunk modified so container contents persist */
+  blockEntitySig = '';
   /** entities the generator asks to be spawned when the chunk is first loaded (village villagers, animals…) */
   spawns: { type: string; x: number; y: number; z: number; extra?: Record<string, any> }[] = [];
   /** generated structures whose bounds touch this chunk (fortress mob spawns, /locate) */

@@ -219,10 +219,15 @@ export class NetClient implements WorldListener {
         if (m.mode) p.setGameMode(m.mode);
         const s = m.state;
         const stale = p.isCreative && Number.isInteger(m.creativeRev) && m.creativeRev < this.creativeRev;
+        // while a window is open its slots are synchronised by the transaction replies (vanilla ContainerSetContent);
+        // the periodic snapshot may predate a click still in flight and would briefly resurrect moved items
+        const windowOpen = !!(g.gui.screen as any)?.isInventoryLike;
         if (s && !stale) {
-          if (Array.isArray(s.inventory)) p.inventory.deserialize(s.inventory, g.items);
-          if (Array.isArray(s.armor)) p.armor.deserialize(s.armor, g.items);
-          if (Array.isArray(s.offhand)) p.offhand.deserialize(s.offhand, g.items);
+          if (!windowOpen) {
+            if (Array.isArray(s.inventory)) p.inventory.deserialize(s.inventory, g.items);
+            if (Array.isArray(s.armor)) p.armor.deserialize(s.armor, g.items);
+            if (Array.isArray(s.offhand)) p.offhand.deserialize(s.offhand, g.items);
+          }
           if (Number.isInteger(s.selectedSlot) && s.selectedSlot >= 0 && s.selectedSlot < 9) p.selectedSlot = s.selectedSlot;
           this.applyStats(s);
           if (Number.isFinite(s.exhaustion)) p.exhaustion = s.exhaustion;

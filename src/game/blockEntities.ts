@@ -291,11 +291,20 @@ export class BlockEntityManager {
   /** Store runtime BEs of a chunk back into the chunk (before save/unload). */
   flushChunk(c: Chunk): void {
     c.blockEntities.clear();
-    for (const be of this.map.values()) if ((be.x >> 4) === c.cx && (be.z >> 4) === c.cz) c.setBlockEntity(be.x & 15, be.y, be.z & 15, this.serializeOne(be));
+    const parts: string[] = [];
+    for (const be of this.map.values()) if ((be.x >> 4) === c.cx && (be.z >> 4) === c.cz) { const d = this.serializeOne(be); c.setBlockEntity(be.x & 15, be.y, be.z & 15, d); parts.push(JSON.stringify(d)); }
+    // Only block changes used to mark a chunk dirty, so chest/furnace/hopper contents changed since the last save
+    // were dropped whenever the chunk unloaded or the world closed without another block edit in it.
+    const sig = parts.join('\u0001');
+    if (sig !== c.blockEntitySig) { c.blockEntitySig = sig; c.modified = true; }
   }
   flushAll(): void { for (const c of this.game.world.chunks.values()) this.flushChunk(c); }
+  /** any runtime block entity inside the chunk */
+  hasIn(c: Chunk): boolean { for (const be of this.map.values()) if ((be.x >> 4) === c.cx && (be.z >> 4) === c.cz) return true; return false; }
   loadChunk(c: Chunk): void {
-    for (const d of c.blockEntities.values()) { const be = this.deserializeOne(d); this.map.set(this.key(be.x, be.y, be.z), be); }
+    const parts: string[] = [];
+    for (const d of c.blockEntities.values()) { const be = this.deserializeOne(d); this.map.set(this.key(be.x, be.y, be.z), be); parts.push(JSON.stringify(this.serializeOne(be))); }
+    c.blockEntitySig = parts.join('\u0001');
   }
   unloadChunk(c: Chunk): void {
     this.flushChunk(c);

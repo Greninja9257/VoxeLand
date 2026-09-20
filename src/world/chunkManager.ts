@@ -30,6 +30,8 @@ export class ChunkManager {
   private unloading = false;
   onChunkLoaded?: (c: Chunk) => void;
   onChunkUnloaded?: (c: Chunk) => void;
+  /** called before the periodic save so runtime block entities are written back into their chunks */
+  onBeforeSave?: () => void;
 
   /** Main-thread mesher for the blocking chunk-builder modes (vanilla prioritizeChunkUpdates). */
   syncMesher: Mesher | null = null;
@@ -141,7 +143,7 @@ export class ChunkManager {
     this.dispatchMeshes(ccx, ccz);
     // periodic save
     this.saveTimer += dt;
-    if (this.saveTimer > 30 && !this.remote) { this.saveTimer = 0; this.saveAll(); }
+    if (this.saveTimer > 30 && !this.remote) { this.saveTimer = 0; this.onBeforeSave?.(); this.saveAll(); }
     this.stats.loaded = world.chunks.size;
   }
 

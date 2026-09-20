@@ -165,11 +165,16 @@ export class NetHost {
   private uploadWorld(maxChunks = 8, includeMeta = true): void {
     const g = this.game;
     if (!this.ws || this.ws.readyState !== 1) return;
+    // container/furnace/hopper contents live in the runtime block-entity map, not in the chunk: write them back and
+    // upload chunks whose contents changed, or the public world forgot everything put into a chest
+    if (includeMeta) for (const inst of g.dims.values()) g.withDimension(inst, () => { for (const c of inst.world.chunks.values()) { if (!c.blockEntities.size && !g.blockEntities.hasIn(c)) continue; const before = c.blockEntitySig; g.blockEntities.flushChunk(c); if (c.blockEntitySig !== before) this.dirtyChunks.set(`${inst.dim}:${c.cx},${c.cz}`, [inst.dim, c.cx, c.cz]); } });
     let sent = 0;
     for (const [key, [dim, cx, cz]] of this.dirtyChunks) {
-      const c = g.dims.get(dim)?.world.getChunk(cx, cz);
+      const inst = g.dims.get(dim);
+      const c = inst?.world.getChunk(cx, cz);
       this.dirtyChunks.delete(key);
-      if (!c) continue;
+      if (!c || !inst) continue;
+      g.withDimension(inst, () => g.blockEntities.flushChunk(c));
       const { header, body } = encodeChunk(c, dim);
       const payload = packFrame(FRAME_CHUNK, header, body);
       const out = new Uint8Array(4 + payload.length);
@@ -782,6 +787,7 @@ export class NetHost {
     }
   }
   private sendChunk(gu: Guest, c: Chunk): void {
+    this.game.blockEntities.flushChunk(c); // current sign text / container contents, not the last save's
     const { header, body } = encodeChunk(c, gu.dim);
     this.sendBinary(gu.id, packFrame(FRAME_CHUNK, header, body));
     gu.chunks.add(chunkKeyOf(c.cx, c.cz));

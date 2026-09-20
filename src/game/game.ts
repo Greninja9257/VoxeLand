@@ -297,6 +297,7 @@ export class Game {
       this.syncMesher.options = { smoothLighting: this.options.smoothLighting, fancy: this.options.graphics !== 'fast' };
       inst.chunks.onChunkLoaded = (c) => this.withDimension(inst, () => { this.blockEntities.loadChunk(c); if ((c as any).fresh) this.spawner.populateChunk(c); else if (c.spawns.length) this.spawner.spawnStructureEntities(c); });
       inst.chunks.onChunkUnloaded = (c) => this.withDimension(inst, () => { this.blockEntities.unloadChunk(c); this.unloadEntitiesIn(c); this.host?.onChunkUnloaded(c, dim); });
+      inst.chunks.onBeforeSave = () => this.withDimension(inst, () => this.blockEntities.flushAll());
       if (this.client) inst.chunks.simulationDistance = 0;
       this.bind(inst);
     } finally { if (prev) this.bind(prev); }
