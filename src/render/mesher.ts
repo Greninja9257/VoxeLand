@@ -313,25 +313,29 @@ export class Mesher {
     const tex = 'entity/chest/' + kind + (type === 'left' ? '_left' : type === 'right' ? '_right' : '');
     if (!this.baker.tileUv.has(tex)) return this.meshBoxFallback(input, x, y, z, state);
     // vanilla ChestModel (64x64): lid texOffs(0,0) box 14x5x14, base texOffs(0,19) box 14x10x14, lock texOffs(0,0) box 2x4x1
+    // vanilla ModelPart.Cube unwrap: the DOWN face sits at (u+d, v) and UP at (u+d+w, v) — the lid's wooden top is the
+    // second square, the first is its dark underside (they were swapped, which painted the inside on top)
     const boxUv = (u: number, v: number, w: number, h: number, d: number): number[][] => [
-      [u + d + w, v, u + d + 2 * w, v + d],      // down
-      [u + d, v, u + d + w, v + d],              // up
-      [u + d + w + d, v + d, u + 2 * d + 2 * w, v + d + h], // north (back)
-      [u + d, v + d, u + d + w, v + d + h],      // south (front)
-      [u, v + d, u + d, v + d + h],              // west
-      [u + d + w, v + d, u + 2 * d + w, v + d + h], // east
+      [u + d, v, u + d + w, v + d],              // down
+      [u + d + w, v, u + d + 2 * w, v + d],      // up
+      // our local frame is vanilla's model rotated a half turn (front on our north), so front/back and the two
+      // ends swap unwrap squares
+      [u + d + w + d, v + d, u + 2 * d + 2 * w, v + d + h], // north = vanilla SOUTH square (the front, with the latch)
+      [u + d, v + d, u + d + w, v + d + h],      // south = vanilla NORTH square (the back)
+      [u + d + w, v + d, u + 2 * d + w, v + d + h], // west = vanilla EAST square
+      [u, v + d, u + d, v + d + h],              // east = vanilla WEST square
     ];
-    // The vanilla chest "front" (lock side) faces north in model space and gets rotated so that
-    // it faces `facing`. Our box default front is south, so rotate an extra half turn.
-    const r = (rot + 2) & 3;
+    // the lock (z 0..1, our north side) must end up on the `facing` side: north needs no rotation
+    const r = rot;
     if (type === 'single') {
       this.meshBox(input, x, y, z, 1, 0, 1, 15, 10, 15, tex, boxUv(0, 19, 14, 10, 14), 64, 64, LAYER_SOLID, 0xffffff, true, r, 0);
       this.meshBox(input, x, y, z, 1, 9, 1, 15, 14, 15, tex, boxUv(0, 0, 14, 5, 14), 64, 64, LAYER_SOLID, 0xffffff, true, r, 0);
       this.meshBox(input, x, y, z, 7, 7, 0, 9, 11, 1, tex, boxUv(0, 0, 2, 4, 1), 64, 64, LAYER_SOLID, 0xffffff, true, r, 0);
     } else {
       // double chest halves: 15 wide each, textures are 64x64 "left"/"right" variants
+      // the seam is on the partner's side: for the left half that is our local east edge (x = 16)
       const left = type === 'left';
-      const bx0 = left ? 0 : 1, bx1 = left ? 15 : 16;
+      const bx0 = left ? 1 : 0, bx1 = left ? 16 : 15;
       const bw = 15;
       this.meshBox(input, x, y, z, bx0, 0, 1, bx1, 10, 15, tex, boxUv(0, 19, bw, 10, 14), 64, 64, LAYER_SOLID, 0xffffff, true, r, 0);
       this.meshBox(input, x, y, z, bx0, 9, 1, bx1, 14, 15, tex, boxUv(0, 0, bw, 5, 14), 64, 64, LAYER_SOLID, 0xffffff, true, r, 0);
@@ -343,6 +347,7 @@ export class Mesher {
   private meshShulker(input: MeshInput, x: number, y: number, z: number, state: number, tex: string): void {
     const t = 'entity/shulker/' + tex;
     if (!this.baker.tileUv.has(t)) return this.meshBoxFallback(input, x, y, z, state);
+    // vanilla renders shulkers and banners with scale(1, -1, -1), which swaps the unwrap's up/down squares
     const boxUv = (u: number, v: number, w: number, h: number, d: number): number[][] => [
       [u + d + w, v, u + d + 2 * w, v + d], [u + d, v, u + d + w, v + d],
       [u + d + w + d, v + d, u + 2 * d + 2 * w, v + d + h], [u + d, v + d, u + d + w, v + d + h],
@@ -382,6 +387,7 @@ export class Mesher {
     if (!this.baker.tileUv.has(tex)) return this.meshBoxFallback(input, x, y, z, state);
     const props = this.reg.getProps(state);
     // banner model (64x64): flag 20x40x1 at (0,0), pole 2x42x2 at (44,0), crossbar 20x2x2 at (0,42)
+    // vanilla renders shulkers and banners with scale(1, -1, -1), which swaps the unwrap's up/down squares
     const boxUv = (u: number, v: number, w: number, h: number, d: number): number[][] => [
       [u + d + w, v, u + d + 2 * w, v + d], [u + d, v, u + d + w, v + d],
       [u + d + w + d, v + d, u + 2 * d + 2 * w, v + d + h], [u + d, v + d, u + d + w, v + d + h],
