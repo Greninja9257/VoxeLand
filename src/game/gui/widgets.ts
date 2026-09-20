@@ -160,37 +160,45 @@ export class Checkbox extends Widget {
   mouseDown(_x: number, _y: number, b: number, s: Screen): void { if (b === 0) { this.checked = !this.checked; this.onChange(this.checked); s.gui.game.sounds.play('ui.button.click', 0.25, 1); } }
 }
 
-/** An on/off toggle switch (Bedrock-style): a pill track that turns green with a knob sliding across. */
+/** Bedrock Edition toggle: a pill track (dark when off, green when on) with a round knob you can click or drag. */
 export class ToggleSwitch extends Widget {
-  private knob: number; // 0..1, animated
-  constructor(x: number, y: number, public value: boolean, public onChange: (v: boolean) => void, public label = '') { super(x, y, 40 + (label ? 60 : 30), 20); this.knob = value ? 1 : 0; }
+  private knob: number;        // 0..1 knob position (animated / dragged)
+  private dragging = false; private dragStartX = 0; private dragged = false;
+  static readonly W = 30; static readonly H = 14;
+  constructor(x: number, y: number, public value: boolean, public onChange: (v: boolean) => void) { super(x, y, ToggleSwitch.W, ToggleSwitch.H); this.knob = value ? 1 : 0; }
   render(ctx: CanvasRenderingContext2D, mx: number, my: number, _p: number, s: Screen): void {
-    const gui = s.gui;
-    const hov = this.active && this.contains(mx, my);
-    const target = this.value ? 1 : 0;
-    this.knob += (target - this.knob) * 0.35; if (Math.abs(target - this.knob) < 0.02) this.knob = target;
-    const tx = this.x, ty = this.y + 3, tw = 36, th = 14;
+    void s;
+    const hov = this.active && (this.contains(mx, my) || this.dragging);
+    if (!this.dragging) { const t = this.value ? 1 : 0; this.knob += (t - this.knob) * 0.4; if (Math.abs(t - this.knob) < 0.01) this.knob = t; }
+    const x = this.x, y = this.y, w = this.w, h = this.h, r = h / 2;
     const on = this.knob;
-    // track: dark rim, grey→green fill blending with the knob position
-    const mix = (a: number, b: number) => Math.round(a + (b - a) * on);
-    const fill = `rgb(${mix(0x58, 0x2f)},${mix(0x58, 0xb0)},${mix(0x58, 0x38)})`;
-    const rim = this.active ? '#0a0a0a' : '#2a2a2a';
-    ctx.fillStyle = rim; ctx.fillRect(tx, ty, tw, th);
-    ctx.fillStyle = this.active ? fill : '#3a3a3a'; ctx.fillRect(tx + 1, ty + 1, tw - 2, th - 2);
-    ctx.fillStyle = 'rgba(0,0,0,0.25)'; ctx.fillRect(tx + 1, ty + 1, tw - 2, 2); // inner shadow
-    // knob: 14×14 square with a light face and bevel, slides from the left to the right end
-    const kx = Math.round(tx + 1 + on * (tw - 2 - 12));
-    ctx.fillStyle = rim; ctx.fillRect(kx - 1, ty, 14, th);
-    ctx.fillStyle = hov ? '#ffffff' : '#e0e0e0'; ctx.fillRect(kx, ty + 1, 12, th - 2);
-    ctx.fillStyle = hov ? '#c8c8c8' : '#a8a8a8'; ctx.fillRect(kx, ty + th - 4, 12, 3); ctx.fillRect(kx + 9, ty + 1, 3, th - 2);
-    const text = (this.label ? this.label + ': ' : '') + (this.value ? 'ON' : 'OFF');
-    gui.font.draw(ctx, text, tx + tw + 6, this.y + 6, !this.active ? 0xa0a0a0 : this.value ? (hov ? 0x9cff9c : 0x55ff55) : hov ? 0xffffa0 : 0xa0a0a0);
+    const lerp = (a: number, b: number) => Math.round(a + (b - a) * on);
+    const pill = (px: number, py: number, pw: number, ph: number) => { const rr = ph / 2; ctx.beginPath(); ctx.moveTo(px + rr, py); ctx.lineTo(px + pw - rr, py); ctx.arc(px + pw - rr, py + rr, rr, -Math.PI / 2, Math.PI / 2); ctx.lineTo(px + rr, py + ph); ctx.arc(px + rr, py + rr, rr, Math.PI / 2, Math.PI * 1.5); ctx.closePath(); };
+    ctx.save();
+    ctx.imageSmoothingEnabled = true;
+    // track: 1px dark outline, fill blends from Bedrock's dark grey to its green
+    pill(x, y, w, h); ctx.fillStyle = this.active ? '#1e1e1e' : '#303030'; ctx.fill();
+    pill(x + 1, y + 1, w - 2, h - 2); ctx.fillStyle = this.active ? `rgb(${lerp(0x48, 0x3c)},${lerp(0x49, 0x8f)},${lerp(0x4b, 0x27)})` : '#3a3a3a'; ctx.fill();
+    // knob: white disc with a dark outline, sliding between the ends
+    const kx = x + r + on * (w - 2 * r), ky = y + r;
+    ctx.beginPath(); ctx.arc(kx, ky, r - 1, 0, Math.PI * 2); ctx.fillStyle = '#1e1e1e'; ctx.fill();
+    ctx.beginPath(); ctx.arc(kx, ky, r - 2, 0, Math.PI * 2); ctx.fillStyle = !this.active ? '#8a8a8a' : hov ? '#ffffff' : '#ededed'; ctx.fill();
+    ctx.restore();
   }
-  mouseDown(_x: number, _y: number, b: number, s: Screen): void {
-    if (b !== 0 || !this.active) return;
-    this.value = !this.value;
-    s.gui.game.sounds.play('ui.button.click', 0.25, 1);
-    this.onChange(this.value);
+  private knobFromMouse(mx: number): number { const r = this.h / 2; return Math.max(0, Math.min(1, (mx - this.x - r) / (this.w - 2 * r))); }
+  mouseDown(x: number, _y: number, b: number, _s: Screen): void { if (b !== 0 || !this.active) return; this.dragging = true; this.dragged = false; this.dragStartX = x; }
+  mouseMove(x: number, y: number, s: Screen): void {
+    super.mouseMove(x, y, s);
+    if (!this.dragging) return;
+    if (Math.abs(x - this.dragStartX) > 2) this.dragged = true;
+    if (this.dragged) this.knob = this.knobFromMouse(x);
+  }
+  mouseUp(x: number, _y: number, b: number, s: Screen): void {
+    if (b !== 0 || !this.dragging) return;
+    this.dragging = false;
+    // a flick lands wherever the knob was let go; a plain click flips it
+    const next = this.dragged ? this.knobFromMouse(x) >= 0.5 : !this.value;
+    if (next !== this.value) { this.value = next; s.gui.game.sounds.play('ui.button.click', 0.25, 1); this.onChange(this.value); }
   }
 }
 

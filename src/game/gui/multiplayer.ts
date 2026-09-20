@@ -297,7 +297,7 @@ export class ShareWorldScreen extends Screen {
       let toggle = this.toggles.get(gu.id);
       if (!toggle) { toggle = this.add(new ToggleSwitch(0, 0, host.isOp(p), (v) => host.setOp(p, v))); this.toggles.set(gu.id, toggle); }
       toggle.value = host.isOp(p);
-      toggle.x = x + w - 80; toggle.y = y + 4;
+      toggle.x = x + w - 40; toggle.y = y + 7;
     }, () => {}));
     this.add(new Button(cx - 100, this.height - 28, 200, 20, lang['gui.done'] ?? 'Done', () => this.gui.open(this.parent)));
   }
@@ -315,7 +315,7 @@ export class ShareWorldScreen extends Screen {
     f.drawCentered(ctx, lang['lanServer.title'] ?? 'LAN World', this.width / 2, 20, 0xffffff);
     f.drawCentered(ctx, lang['lanServer.otherPlayers'] ?? 'Settings for Other Players', this.width / 2, 44, 0xa0a0a0);
     f.draw(ctx, `Players (${host.guests.size})`, this.width / 2 - 155, 92, 0xa0a0a0);
-    f.draw(ctx, 'Operator', this.width / 2 + 155 - 12 - 80, 92, 0xa0a0a0);
+    f.draw(ctx, 'Operator', this.width / 2 + 155 - 12 - 40 - 8, 92, 0xa0a0a0);
     if (!host.guests.size) f.drawCentered(ctx, '§8Nobody has joined yet', this.width / 2, 104 + 12, 0xffffff);
     // toggles are parked off-screen; the list places the ones whose rows are visible, and players that left are dropped
     for (const [id, toggle] of this.toggles) { toggle.x = -1000; toggle.y = -1000; if (!host.guests.has(id)) { toggle.active = false; this.toggles.delete(id); } }
