@@ -1,4 +1,4 @@
-// Screen base class + widgets (button, slider, text field, checkbox, list).
+// Screen base class + widgets (button, slider, text field, checkbox, toggle switch, list).
 import type { Gui } from './gui';
 
 export abstract class Screen {
@@ -158,6 +158,40 @@ export class Checkbox extends Widget {
     gui.font.draw(ctx, this.label, this.x + 24, this.y + 6, 0xffffff);
   }
   mouseDown(_x: number, _y: number, b: number, s: Screen): void { if (b === 0) { this.checked = !this.checked; this.onChange(this.checked); s.gui.game.sounds.play('ui.button.click', 0.25, 1); } }
+}
+
+/** An on/off toggle switch (Bedrock-style): a pill track that turns green with a knob sliding across. */
+export class ToggleSwitch extends Widget {
+  private knob: number; // 0..1, animated
+  constructor(x: number, y: number, public value: boolean, public onChange: (v: boolean) => void, public label = '') { super(x, y, 40 + (label ? 60 : 30), 20); this.knob = value ? 1 : 0; }
+  render(ctx: CanvasRenderingContext2D, mx: number, my: number, _p: number, s: Screen): void {
+    const gui = s.gui;
+    const hov = this.active && this.contains(mx, my);
+    const target = this.value ? 1 : 0;
+    this.knob += (target - this.knob) * 0.35; if (Math.abs(target - this.knob) < 0.02) this.knob = target;
+    const tx = this.x, ty = this.y + 3, tw = 36, th = 14;
+    const on = this.knob;
+    // track: dark rim, grey→green fill blending with the knob position
+    const mix = (a: number, b: number) => Math.round(a + (b - a) * on);
+    const fill = `rgb(${mix(0x58, 0x2f)},${mix(0x58, 0xb0)},${mix(0x58, 0x38)})`;
+    const rim = this.active ? '#0a0a0a' : '#2a2a2a';
+    ctx.fillStyle = rim; ctx.fillRect(tx, ty, tw, th);
+    ctx.fillStyle = this.active ? fill : '#3a3a3a'; ctx.fillRect(tx + 1, ty + 1, tw - 2, th - 2);
+    ctx.fillStyle = 'rgba(0,0,0,0.25)'; ctx.fillRect(tx + 1, ty + 1, tw - 2, 2); // inner shadow
+    // knob: 14×14 square with a light face and bevel, slides from the left to the right end
+    const kx = Math.round(tx + 1 + on * (tw - 2 - 12));
+    ctx.fillStyle = rim; ctx.fillRect(kx - 1, ty, 14, th);
+    ctx.fillStyle = hov ? '#ffffff' : '#e0e0e0'; ctx.fillRect(kx, ty + 1, 12, th - 2);
+    ctx.fillStyle = hov ? '#c8c8c8' : '#a8a8a8'; ctx.fillRect(kx, ty + th - 4, 12, 3); ctx.fillRect(kx + 9, ty + 1, 3, th - 2);
+    const text = (this.label ? this.label + ': ' : '') + (this.value ? 'ON' : 'OFF');
+    gui.font.draw(ctx, text, tx + tw + 6, this.y + 6, !this.active ? 0xa0a0a0 : this.value ? (hov ? 0x9cff9c : 0x55ff55) : hov ? 0xffffa0 : 0xa0a0a0);
+  }
+  mouseDown(_x: number, _y: number, b: number, s: Screen): void {
+    if (b !== 0 || !this.active) return;
+    this.value = !this.value;
+    s.gui.game.sounds.play('ui.button.click', 0.25, 1);
+    this.onChange(this.value);
+  }
 }
 
 export class CycleButton<T> extends Button {

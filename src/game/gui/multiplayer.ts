@@ -2,7 +2,7 @@
 // direct connection by IP, the password prompt, "Share World" (public / private with a password) and the
 // disconnect notice.
 import type { NetHost } from '../../net/host';
-import { Screen, Button, ListWidget, TextField, CycleButton } from './widgets';
+import { Screen, Button, ListWidget, TextField, CycleButton, ToggleSwitch } from './widgets';
 import { TitleScreen } from './screens';
 import { listServers, PasswordRequired } from '../../net/client';
 import { defaultRelayUrl, normalizeRelayUrl, type ServerInfo } from '../../net/protocol';
@@ -273,36 +273,57 @@ export class ShareWorldScreen extends Screen {
     }));
     this.add(new Button(cx + 5, this.height - 28, 150, 20, 'Cancel', () => this.gui.open(this.parent)));
   }
-  /** Already hosting: change the rules for other players (game mode for newcomers, cheats) and op/deop guests. */
+  /** Already hosting: the rules for other players (vanilla ShareToLanScreen options, live) and a toggle per
+   *  connected player that grants or revokes operator status (/op, /deop). */
+  private players: ListWidget | null = null;
+  private toggles = new Map<number, ToggleSwitch>();
+  private faces = new Map<string, HTMLImageElement>();
   private buildSettings(host: NetHost): void {
     const g = this.gui.game, lang = g.assets.lang;
     const cx = this.width / 2;
     this.gameMode = host.opts.gameMode; this.cheats = host.opts.cheats;
-    this.add(new CycleButton(cx - 155, 90, 150, 20, (lang['selectWorld.gameMode'] ?? 'Game Mode') + ': ', [{ value: 'survival', label: 'Survival' }, { value: 'creative', label: 'Creative' }, { value: 'adventure', label: 'Adventure' }, { value: 'spectator', label: 'Spectator' }], this.gameMode, (v) => { this.gameMode = v; host.setRules({ gameMode: v }); }));
-    this.add(new CycleButton(cx + 5, 90, 150, 20, (lang['selectWorld.allowCommands'] ?? 'Allow Cheats') + ': ', [{ value: false, label: 'OFF' }, { value: true, label: 'ON' }], this.cheats, (v) => { this.cheats = v; host.setRules({ cheats: v }); }));
-    // connected players with an operator toggle (vanilla /op, /deop)
-    let y = 132;
-    for (const gu of [...host.guests.values()].slice(0, 8)) {
+    this.add(new CycleButton(cx - 155, 60, 150, 20, (lang['selectWorld.gameMode'] ?? 'Game Mode') + ': ', [{ value: 'survival', label: 'Survival' }, { value: 'creative', label: 'Creative' }, { value: 'adventure', label: 'Adventure' }, { value: 'spectator', label: 'Spectator' }], this.gameMode, (v) => { this.gameMode = v; host.setRules({ gameMode: v }); }));
+    this.add(new CycleButton(cx + 5, 60, 150, 20, (lang['selectWorld.allowCommands'] ?? 'Allow Cheats') + ': ', [{ value: false, label: 'OFF' }, { value: true, label: 'ON' }], this.cheats, (v) => { this.cheats = v; host.setRules({ cheats: v }); }));
+    const guests = () => [...host.guests.values()];
+    const rowH = 28, listY = 104, listH = Math.max(rowH, this.height - listY - 40);
+    this.players = this.add(new ListWidget(cx - 155, listY, 310, listH, rowH, () => guests().length, (ctx, i, x, y, w, _sel, hov) => {
+      const gu = guests()[i]; if (!gu) return;
       const p = gu.player;
-      const btn = this.add(new Button(cx + 55, y, 100, 20, host.isOp(p) ? 'Deop' : 'Op', () => { host.setOp(p, !host.isOp(p)); btn.label = host.isOp(p) ? 'Deop' : 'Op'; }));
-      (btn as any).playerName = p.name;
-      y += 24;
-    }
+      if (hov) { ctx.fillStyle = 'rgba(255,255,255,0.08)'; ctx.fillRect(x - 4, y, w + 8, rowH); }
+      this.drawFace(ctx, p.skin, x + 2, y + 6, 16);
+      this.gui.font.draw(ctx, p.name, x + 24, y + 5, 0xffffff);
+      this.gui.font.draw(ctx, `${lang['gameMode.' + p.gameMode] ?? p.gameMode} · ${Math.round(p.ping)} ms`, x + 24, y + 15, 0x808080);
+      // one toggle per guest, kept in the widget list so it gets hover/click; positioned to the row each frame
+      let toggle = this.toggles.get(gu.id);
+      if (!toggle) { toggle = this.add(new ToggleSwitch(0, 0, host.isOp(p), (v) => host.setOp(p, v))); this.toggles.set(gu.id, toggle); }
+      toggle.value = host.isOp(p);
+      toggle.x = x + w - 80; toggle.y = y + 4;
+    }, () => {}));
     this.add(new Button(cx - 100, this.height - 28, 200, 20, lang['gui.done'] ?? 'Done', () => this.gui.open(this.parent)));
+  }
+  /** 8×8 face (+ hat layer) of a default skin */
+  private drawFace(ctx: CanvasRenderingContext2D, skin: string, x: number, y: number, size: number): void {
+    let img = this.faces.get(skin);
+    if (!img) { img = new Image(); img.src = `./assets/pack/assets/minecraft/textures/entity/player/wide/${skin === 'alex' ? 'alex' : 'steve'}.png`; this.faces.set(skin, img); }
+    if (!img.complete || !img.naturalWidth) { ctx.fillStyle = '#3c2a1e'; ctx.fillRect(x, y, size, size); return; }
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(img, 8, 8, 8, 8, x, y, size, size);
+    ctx.drawImage(img, 40, 8, 8, 8, x, y, size, size);
+  }
+  private drawSettings(ctx: CanvasRenderingContext2D, host: NetHost): void {
+    const f = this.gui.font, lang = this.gui.game.assets.lang;
+    f.drawCentered(ctx, lang['lanServer.title'] ?? 'LAN World', this.width / 2, 20, 0xffffff);
+    f.drawCentered(ctx, lang['lanServer.otherPlayers'] ?? 'Settings for Other Players', this.width / 2, 44, 0xa0a0a0);
+    f.draw(ctx, `Players (${host.guests.size})`, this.width / 2 - 155, 92, 0xa0a0a0);
+    f.draw(ctx, 'Operator', this.width / 2 + 155 - 12 - 80, 92, 0xa0a0a0);
+    if (!host.guests.size) f.drawCentered(ctx, '§8Nobody has joined yet', this.width / 2, 104 + 12, 0xffffff);
+    // toggles are parked off-screen; the list places the ones whose rows are visible, and players that left are dropped
+    for (const [id, toggle] of this.toggles) { toggle.x = -1000; toggle.y = -1000; if (!host.guests.has(id)) { toggle.active = false; this.toggles.delete(id); } }
   }
   render(ctx: CanvasRenderingContext2D, mx: number, my: number, partial: number): void {
     const f = this.gui.font;
     const lang = this.gui.game.assets.lang;
-    if (this.gui.game.host) {
-      f.drawCentered(ctx, lang['lanServer.title'] ?? 'LAN World', this.width / 2, 40, 0xffffff);
-      f.drawCentered(ctx, lang['lanServer.otherPlayers'] ?? 'Settings for Other Players', this.width / 2, 72, 0xa0a0a0);
-      f.draw(ctx, 'Players', this.width / 2 - 155, 120, 0xa0a0a0);
-      let y = 132;
-      for (const gu of [...this.gui.game.host.guests.values()].slice(0, 8)) { f.draw(ctx, `${gu.name}${this.gui.game.host.isOp(gu.player) ? ' §7(operator)' : ''}`, this.width / 2 - 155, y + 6, 0xffffff); y += 24; }
-      if (!this.gui.game.host.guests.size) f.draw(ctx, '§8Nobody has joined yet', this.width / 2 - 155, 138, 0xffffff);
-      super.render(ctx, mx, my, partial);
-      return;
-    }
+    if (this.gui.game.host) { this.drawSettings(ctx, this.gui.game.host); super.render(ctx, mx, my, partial); return; }
     f.drawCentered(ctx, lang['lanServer.title'] ?? 'LAN World', this.width / 2, 40, 0xffffff);
     f.drawCentered(ctx, lang['lanServer.otherPlayers'] ?? 'Settings for Other Players', this.width / 2, 72, 0xa0a0a0);
     f.draw(ctx, 'Server address (leave as-is to use this game\'s server):', this.width / 2 - 155, 140, 0x808080);
